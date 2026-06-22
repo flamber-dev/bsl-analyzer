@@ -187,6 +187,27 @@ mod tests {
     }
 
     #[test]
+    fn test_directive_not_indented_when_not_first_line() {
+        // A compilation directive that is not the file's first line must stay at
+        // the procedure's indent, not be pushed one level in (regression).
+        let code = "Процедура А()\nКонецПроцедуры\n\n&НаСервере\nПроцедура Б()\nКонецПроцедуры";
+        let formatted = format(code);
+        let expected =
+            "Процедура А()\nКонецПроцедуры\n\n&НаСервере\nПроцедура Б()\nКонецПроцедуры\n";
+        assert_eq!(formatted, expected);
+    }
+
+    #[test]
+    fn test_directive_inside_region_not_indented() {
+        let code =
+            "#Область Обработчики\n&НаКлиенте\nПроцедура П()\n\tА = 1;\nКонецПроцедуры\n#КонецОбласти";
+        let formatted = format(code);
+        let expected =
+            "#Область Обработчики\n&НаКлиенте\nПроцедура П()\n\tА = 1;\nКонецПроцедуры\n#КонецОбласти\n";
+        assert_eq!(formatted, expected);
+    }
+
+    #[test]
     fn test_trim_trailing_whitespace() {
         let code = "Процедура Тест()   \nКонецПроцедуры  ";
         let formatted = format(code);

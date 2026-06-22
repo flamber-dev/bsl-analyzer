@@ -246,7 +246,12 @@ fn decide_newline_gap(ir: &Ir, gap_index: usize, gap_text: &str) -> GapDecision 
     let next_kind = ir.atoms[gap_index].kind;
     let body_level = block_depth(&lca);
     let next_depth = block_depth(next_node);
-    let final_level = if is_block_boundary_keyword(next_kind) {
+    let final_level = if is_block_boundary_keyword(next_kind) || is_leading_annotation(next_kind) {
+        // A compilation directive / annotation (`&НаКлиенте`, `&Вместо(...)`) is
+        // the head of the declaration it precedes and sits at the same indent as
+        // its `Процедура`/`Функция` keyword — not one level deeper. Its enclosing
+        // PROCEDURE_DEF/FUNCTION_DEF still counts toward `next_depth`, so undo it
+        // exactly like the block-boundary keyword does.
         next_depth.saturating_sub(1)
     } else {
         next_depth
@@ -409,6 +414,26 @@ fn is_block_boundary_keyword(kind: SyntaxKind) -> bool {
             | SyntaxKind::PRE_ELSIF
             | SyntaxKind::PRE_ELSE
             | SyntaxKind::PRE_END_IF
+    )
+}
+
+/// Lead token of a compilation directive (`&НаКлиенте`, `&НаСервере`, …) or a
+/// БСП method annotation (`&Перед`, `&Вместо`, …). These head the declaration
+/// they precede, so on a line of their own they belong at the declaration's
+/// indent, not the body's.
+fn is_leading_annotation(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::ANN_AT_CLIENT
+            | SyntaxKind::ANN_AT_SERVER
+            | SyntaxKind::ANN_AT_SERVER_NO_CONTEXT
+            | SyntaxKind::ANN_AT_CLIENT_AT_SERVER
+            | SyntaxKind::ANN_AT_CLIENT_AT_SERVER_NO_CONTEXT
+            | SyntaxKind::ANN_BEFORE
+            | SyntaxKind::ANN_AFTER
+            | SyntaxKind::ANN_AROUND
+            | SyntaxKind::ANN_CHANGE_AND_VALIDATE
+            | SyntaxKind::ANN_CUSTOM
     )
 }
 
