@@ -554,7 +554,14 @@ pub(super) fn search_status_with_cap(
             let _ = writeln!(
                 out,
                 "  Watcher mode: {}",
-                if overlay.watcher_mode { "enabled" } else { "polling" }
+                if overlay.watcher_mode {
+                    "enabled"
+                } else {
+                    // False until a feed proves itself, so a hub that armed late over a quiet
+                    // tree reads as "not yet proven", never as "no hub at all".
+                    "off (no change feed has proved itself to the overlay yet; the overlay is as \
+                     of its last publication)"
+                }
             );
             let _ = writeln!(out, "  Pending dirty paths: {}", overlay.pending_dirty_paths);
         }
@@ -1287,6 +1294,11 @@ mod tests {
         assert!(text.contains("Resolved workspace view: ready"));
         assert!(text.contains("Baseline: snapshot local-workspace-baseline"));
         assert!(text.contains("Workspace overlay: enabled"));
+        assert!(
+            text.contains("Watcher mode: off (no change feed has proved itself"),
+            "no feed ever attached to this engine: {}",
+            text,
+        );
         assert!(text.contains("Files:    1"));
         assert!(text.contains("Chunks:   1"));
     }
