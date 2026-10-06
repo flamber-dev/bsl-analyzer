@@ -924,6 +924,31 @@ fn this_object_non_exported_method_emits_method_not_export() {
 }
 
 #[test]
+fn this_object_exported_method_resolves() {
+    let fixture = r#"
+//- /Catalogs/Справочник1/Ext/ObjectModule.bsl
+Процедура Экспортный() Экспорт
+КонецПроцедуры
+Процедура Тест()
+    ЭтотОбъект.Экспортный();
+КонецПроцедуры
+"#;
+    let (db, file_id) =
+        setup_with_target_path(fixture, "/Catalogs/Справочник1/Ext/ObjectModule.bsl");
+    let unresolved: Vec<_> = db
+        .infer(file_id)
+        .diagnostics
+        .iter()
+        .filter(|(_, d)| matches!(d, InferenceDiagnostic::UnresolvedMethodCall { .. }))
+        .map(|(_, d)| d.clone())
+        .collect();
+    assert!(
+        unresolved.is_empty(),
+        "an exported method is a member of the object; got {unresolved:?}"
+    );
+}
+
+#[test]
 fn this_object_direct_non_exported_call_resolves() {
     let fixture = r#"
 //- /Catalogs/Справочник1/Ext/ObjectModule.bsl

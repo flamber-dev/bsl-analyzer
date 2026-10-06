@@ -33,6 +33,12 @@ pub fn from_hir(
         UnresolvedMethodKind::MethodNotExport => {
             format!("Метод '{}.{}' не экспортирован", receiver_name.as_str(), method_name.as_str())
         }
+        UnresolvedMethodKind::SelfMethodNotExport => format!(
+            "Метод '{}' не экспортный: через '{}' доступны только экспортные методы модуля; \
+             вызовите его без квалификатора или объявите Экспорт",
+            method_name.as_str(),
+            receiver_name.as_str()
+        ),
         // Nothing is said about this call. The module's surface is unknown, so any
         // verdict would be a guess, and it would be filed against the calling file —
         // which is not the one with the problem. The unreadable file is reported at
@@ -453,9 +459,56 @@ mod tests {
     #[test]
     fn form_self_call_to_own_method_is_silent() {
         let umc = form_umc(
-            "&НаКлиенте\nПроцедура Показать()\nКонецПроцедуры\n\n&НаКлиенте\nПроцедура Сохранить()\n    ЭтотОбъект.Показать();\nКонецПроцедуры\n",
+            "&НаКлиенте\nПроцедура Показать() Экспорт\nКонецПроцедуры\n\n&НаКлиенте\nПроцедура Сохранить()\n    ЭтотОбъект.Показать();\nКонецПроцедуры\n",
         );
-        assert!(umc.is_empty(), "the module declares the method, got: {umc:?}");
+        assert!(umc.is_empty(), "the module declares and exports the method, got: {umc:?}");
+    }
+
+    #[test]
+    fn form_self_call_to_own_exported_server_method_is_silent() {
+        let umc = form_umc(
+            "&НаСервере\nФункция Посчитать() Экспорт\n    Возврат 1;\nКонецФункции\n\n&НаСервере\nПроцедура Обработать()\n    Итог = ЭтаФорма.Посчитать();\n    Итог = ЭтотОбъект.Посчитать();\nКонецПроцедуры\n",
+        );
+        assert!(umc.is_empty(), "an exported server method is a member of the form, got: {umc:?}");
+    }
+
+    /// Checked on 8.3.17.1549 and 8.3.27.2214: the module compiles, and the call fails
+    /// at run time with «Метод объекта не обнаружен (Показать)» — on the client and on
+    /// the server, through `ЭтотОбъект` and through `ЭтаФорма` alike. The same method
+    /// declared `Экспорт` answers (the tests above), and so does the bare call (below).
+    #[test]
+    fn form_self_call_to_non_exported_method_reports_it() {
+        let umc = form_umc(
+            "&НаКлиенте\nПроцедура Показать()\nКонецПроцедуры\n\n&НаКлиенте\nПроцедура Сохранить()\n    ЭтотОбъект.Показать();\n    ЭтаФорма.Показать();\nКонецПроцедуры\n",
+        );
+        assert_eq!(
+            umc,
+            vec![
+                "Метод 'Показать' не экспортный: через 'ЭтотОбъект' доступны только экспортные \
+                 методы модуля; вызовите его без квалификатора или объявите Экспорт"
+                    .to_string(),
+                "Метод 'Показать' не экспортный: через 'ЭтаФорма' доступны только экспортные \
+                 методы модуля; вызовите его без квалификатора или объявите Экспорт"
+                    .to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn form_self_call_to_non_exported_server_method_reports_it() {
+        let umc = form_umc(
+            "&НаСервере\nФункция Посчитать()\n    Возврат 1;\nКонецФункции\n\n&НаСервере\nПроцедура Обработать()\n    Итог = ЭтаФорма.Посчитать();\nКонецПроцедуры\n",
+        );
+        assert_eq!(umc.len(), 1, "got: {umc:?}");
+        assert!(umc[0].starts_with("Метод 'Посчитать' не экспортный"), "got: {}", umc[0]);
+    }
+
+    #[test]
+    fn bare_call_to_non_exported_form_method_is_silent() {
+        let umc = form_umc(
+            "&НаКлиенте\nПроцедура Показать()\nКонецПроцедуры\n\n&НаКлиенте\nПроцедура Сохранить()\n    Показать();\nКонецПроцедуры\n",
+        );
+        assert!(umc.is_empty(), "a bare call needs no Экспорт, got: {umc:?}");
     }
 
     #[test]
@@ -473,7 +526,7 @@ mod tests {
     #[test]
     fn this_form_alias_resolves_the_form_instead_of_an_unknown_module() {
         let umc = form_umc(
-            "&НаКлиенте\nПроцедура Показать()\nКонецПроцедуры\n\n&НаКлиенте\nПроцедура Сохранить()\n    ЭтаФорма.Показать();\nКонецПроцедуры\n",
+            "&НаКлиенте\nПроцедура Показать() Экспорт\nКонецПроцедуры\n\n&НаКлиенте\nПроцедура Сохранить()\n    ЭтаФорма.Показать();\nКонецПроцедуры\n",
         );
         assert!(
             umc.is_empty(),
