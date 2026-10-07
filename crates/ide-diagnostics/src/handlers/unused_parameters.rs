@@ -95,6 +95,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     // also covers indirect bindings, accepting that string data coinciding with a method
     // name exempts that method's parameters too.
     if metadata.module_type == bsl_metadata::ModuleType::FormModule {
+        // An EXPORTED form-module method is an interface for code outside the form -
+        // often outside the configuration altogether (an external processor calling
+        // `Форма.Метод(...)` by name). The caller dictates the signature; a parameter the
+        // body ignores is not the author's to drop.
+        for method in summary.methods.iter().filter(|m| m.is_export) {
+            fixed_signature_handlers.insert(method.name.as_str().fold_lower());
+        }
         for reg in &summary.set_action_regs {
             fixed_signature_handlers.insert(reg.handler_name.as_str().fold_lower());
         }
@@ -949,5 +956,32 @@ EndProcedure
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedParameters).collect();
 
         assert_eq!(unused.len(), 0);
+    }
+
+    /// An exported form-module method is called by code the form cannot see (often
+    /// an external processor), so its signature is the caller's; the same body in a
+    /// non-exported method still reports.
+    #[test]
+    fn exported_form_module_method_keeps_its_contract_parameters() {
+        use crate::test_utils::check_hir_diagnostic_with_fixtures;
+        let fixture = r#"//- /Documents/Заказ/Forms/ФормаДокумента/Ext/Form/Module.bsl
+Функция ВнешнийОбработчик(Первый, Второй, Третий) Экспорт
+    Возврат Ложь;
+КонецФункции
+
+Функция ЛокальнаяФункция(Первый, Второй, Третий)
+    Возврат Ложь;
+КонецФункции
+
+Процедура ПриОткрытии()
+    ЛокальнаяФункция(1, 2, 3);
+КонецПроцедуры
+"#;
+        let messages: Vec<String> = check_hir_diagnostic_with_fixtures(fixture)
+            .into_iter()
+            .filter(|d| d.code == crate::DiagnosticCode::UnusedParameters)
+            .map(|d| d.message)
+            .collect();
+        assert_eq!(messages.len(), 3, "{messages:?}");
     }
 }
