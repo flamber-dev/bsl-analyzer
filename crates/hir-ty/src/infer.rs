@@ -419,6 +419,19 @@ pub enum InferenceDiagnostic {
         mdo_name: Name,
     },
 
+    /// A resolved platform member the catalog dates later than the project's
+    /// minimum platform release. A bare global call then breaks compilation of the
+    /// module on that release («Процедура или функция с указанным именем не
+    /// определена», checked live on 8.3.17); a member of a typed value is late-bound
+    /// and fails when executed. Raised only when `min_platform_version` is set and
+    /// the member's version is known.
+    PlatformMemberNewerThanMinVersion {
+        expr: ExprId,
+        name: Name,
+        introduced: bsl_platform::PlatformVersion,
+        minimum: bsl_platform::PlatformVersion,
+    },
+
     /// A resolved platform member is not available in some of the execution
     /// environments this body runs in (`missing` — the EDT-style
     /// "[Web client]" qualifier set).
@@ -624,6 +637,10 @@ pub struct InferenceContext<'db> {
     /// is unknown (an empty [`Self::body_env`], as in effective and weaving bodies),
     /// so the branch may be compiled nowhere.
     in_uncompiled_branch: bool,
+
+    /// The project's `min_platform_version`, parsed once per body; `None` turns
+    /// the min-platform check off entirely.
+    min_platform: Option<bsl_platform::PlatformVersion>,
 
     /// Lazily-built, usage-aware user global surface. Both maps are constructed
     /// together so global modules are enumerated at most once per inference run.
@@ -884,6 +901,9 @@ impl<'db> InferenceContext<'db> {
             body_env,
             checked_env: opts.checked_environments,
             in_uncompiled_branch: false,
+            min_platform: db
+                .min_platform_version()
+                .and_then(|value| bsl_platform::PlatformVersion::parse_catalog(&value)),
             global_exports: None,
             global_read_exports: None,
             global_surface_partly_unknown: false,
@@ -1208,6 +1228,7 @@ impl<'db> InferenceContext<'db> {
             InferenceDiagnostic::MissedRequiredParameterManagerModule { expr, .. } => *expr,
             InferenceDiagnostic::RedundantAccessToObjectThreeLevel { expr, .. } => *expr,
             InferenceDiagnostic::UnavailableInEnvironment { expr, .. } => *expr,
+            InferenceDiagnostic::PlatformMemberNewerThanMinVersion { expr, .. } => *expr,
             InferenceDiagnostic::ModuleAccessibility { expr, .. } => *expr,
             InferenceDiagnostic::GuardedCall { expr, .. } => *expr,
         };
@@ -1267,6 +1288,63 @@ impl<'db> InferenceContext<'db> {
             name: name.clone(),
             member_kind,
             missing,
+        });
+    }
+
+    /// The release this module must still compile on: the project's
+    /// `min_platform_version`. The compatibility mode does not lower it — checked
+    /// live, 8.3.x modes do not hide members newer than the mode.
+    fn effective_min_platform(&self) -> Option<bsl_platform::PlatformVersion> {
+        self.min_platform
+    }
+
+    /// Report a resolved platform member that `introduced` dates after the
+    /// effective minimum release. Silent when either version is unknown and where
+    /// nothing compiles the code (an uncompiled `#Если` branch, a module compiled
+    /// nowhere) — the same places a missing name cannot fail the module.
+    fn check_min_platform(
+        &mut self,
+        expr: ExprId,
+        name: &Name,
+        introduced: impl FnOnce() -> Option<bsl_platform::PlatformVersion>,
+    ) {
+        let Some(minimum) = self.effective_min_platform() else {
+            return;
+        };
+        let Some(introduced) = introduced() else {
+            return;
+        };
+        if !introduced.release_newer_than(minimum) {
+            return;
+        }
+        if self.in_uncompiled_branch || self.module_compiles_nowhere() {
+            return;
+        }
+        self.push_inference_diagnostic(InferenceDiagnostic::PlatformMemberNewerThanMinVersion {
+            expr,
+            name: name.clone(),
+            introduced,
+            minimum,
+        });
+    }
+
+    /// [`Self::check_min_platform`] for a member of `receiver_ty`, judged only when
+    /// the receiver is exactly one platform type.
+    fn check_min_platform_type_member(
+        &mut self,
+        expr: ExprId,
+        receiver_ty: TypeId,
+        member: &Name,
+        is_property: bool,
+    ) {
+        if self.min_platform.is_none() {
+            return;
+        }
+        let Some(owner) = self.exact_platform_owner(receiver_ty) else {
+            return;
+        };
+        self.check_min_platform(expr, member, || {
+            crate::min_platform::type_member(owner.as_str(), member.as_str(), is_property)
         });
     }
 
@@ -1431,7 +1509,9 @@ impl<'db> InferenceContext<'db> {
         }
         let environment =
             hir_def::execution_env::EnvFlags::from_platform_context(platform_type.context.as_ref());
-        self.check_member_env(expr, &Name::new(name), environment, EnvMemberKind::Type);
+        let type_name = Name::new(name);
+        self.check_member_env(expr, &type_name, environment, EnvMemberKind::Type);
+        self.check_min_platform(expr, &type_name, || crate::min_platform::constructed_type(name));
     }
 
     /// Accessibility of a cross-module call to `callee_module` (a common
@@ -2174,6 +2254,9 @@ impl<'db> InferenceContext<'db> {
                                     env,
                                     EnvMemberKind::Property,
                                 );
+                                self.check_min_platform_type_member(
+                                    target_id, base_ty, field, true,
+                                );
                             }
                             if info.is_readonly {
                                 self.push_inference_diagnostic(
@@ -2375,6 +2458,7 @@ impl<'db> InferenceContext<'db> {
                 match crate::method_lookup::lookup_method(self.db, receiver_ty, method) {
                     Some(info) => {
                         self.check_member_env(expr_id, method, info.env, EnvMemberKind::Method);
+                        self.check_min_platform_type_member(expr_id, receiver_ty, method, false);
                         info.return_ty
                     }
                     None => self.db.unknown(),
@@ -2415,6 +2499,7 @@ impl<'db> InferenceContext<'db> {
                     self.push_deprecated_platform_member_diagnostic(expr_id, base_ty, field, true);
                     if let crate::field_enum::FieldOrigin::PlatformProperty { env } = info.origin {
                         self.check_member_env(expr_id, field, env, EnvMemberKind::Property);
+                        self.check_min_platform_type_member(expr_id, base_ty, field, true);
                     }
                     info.ty
                 } else if let Some(info) = crate::manager_lookup::lookup_manager_field(
@@ -2481,6 +2566,9 @@ impl<'db> InferenceContext<'db> {
                     );
                     if !platform.is_ambiguous_type_name(name.as_str()) && platform_type.is_some() {
                         self.check_member_env(expr_id, name, environment, EnvMemberKind::Type);
+                        self.check_min_platform(expr_id, name, || {
+                            crate::min_platform::constructed_type(name.as_str())
+                        });
                     }
                     let ctors = platform.get_constructors(name.as_str());
                     if !ctors.is_empty() {
@@ -2861,6 +2949,9 @@ impl<'db> InferenceContext<'db> {
             {
                 trace!("resolved {} as platform global → {:?}", name, id);
                 self.check_member_env(expr_id, name, env, EnvMemberKind::GlobalProperty);
+                self.check_min_platform(expr_id, name, || {
+                    crate::min_platform::global_property(name.as_str())
+                });
                 return found(id, BareNameOrigin::PlatformProperty, env);
             }
         }
@@ -2881,6 +2972,9 @@ impl<'db> InferenceContext<'db> {
                         availability,
                         EnvMemberKind::GlobalProperty,
                     );
+                    self.check_min_platform(expr_id, name, || {
+                        crate::min_platform::global_property(name.as_str())
+                    });
                     return found(
                         self.db.unknown(),
                         BareNameOrigin::PlatformProperty,
@@ -2903,6 +2997,9 @@ impl<'db> InferenceContext<'db> {
                         )
                     });
                 self.check_member_env(expr_id, name, availability, EnvMemberKind::Type);
+                self.check_min_platform(expr_id, name, || {
+                    crate::min_platform::platform_type(name.as_str())
+                });
                 return found(id, BareNameOrigin::PlatformSystemEnum, availability);
             }
         }
@@ -3264,6 +3361,7 @@ impl<'db> InferenceContext<'db> {
                         false,
                     );
                     self.check_member_env(callee, &method_name, info.env, EnvMemberKind::Method);
+                    self.check_min_platform_type_member(callee, receiver_ty, &method_name, false);
                     let mut candidates = info.candidates;
                     let arg_idxs: Vec<ExprIdx> = args.iter().map(|arg| arg.to_idx()).collect();
                     self.select_returns_by_type_argument(&mut candidates, &arg_idxs);
@@ -3444,6 +3542,14 @@ impl<'db> InferenceContext<'db> {
                         EnvMemberKind::GlobalFunction,
                     );
                 }
+                // This branch is entered even when the module declares a method of the
+                // same name; such a polyfill (a local `СтрЗаменитьПоРегулярномуВыражению`
+                // for an older platform) is the very code that must stay silent.
+                if self.min_platform.is_some() && !self.is_call_name_shadowed(&name) {
+                    self.check_min_platform(callee, &name, || {
+                        crate::min_platform::global_function(name.as_str())
+                    });
+                }
 
                 for arg in args {
                     self.infer_expr(*arg);
@@ -3516,6 +3622,9 @@ impl<'db> InferenceContext<'db> {
                             availability,
                             EnvMemberKind::GlobalFunction,
                         );
+                        self.check_min_platform(callee, name, || {
+                            crate::min_platform::global_function(name.as_str())
+                        });
                         for arg in args {
                             self.infer_expr(*arg);
                         }
@@ -3955,6 +4064,12 @@ impl<'db> InferenceContext<'db> {
                                 env,
                                 EnvMemberKind::Method,
                             );
+                            self.check_min_platform(call_expr, method_name, || {
+                                crate::min_platform::global_member(
+                                    module_name.as_str(),
+                                    method_name.as_str(),
+                                )
+                            });
                             self.expr_types.insert(call_expr, self.db.unknown());
                             return return_ty;
                         }
@@ -4109,6 +4224,9 @@ impl<'db> InferenceContext<'db> {
                     self.infer_expr(*arg);
                 }
                 self.check_member_env(call_expr, method_name, env, EnvMemberKind::Method);
+                self.check_min_platform(call_expr, method_name, || {
+                    crate::min_platform::global_member(module_name.as_str(), method_name.as_str())
+                });
                 self.expr_types.insert(call_expr, self.db.unknown());
                 return BareReceiverDispatch::Resolved(return_ty);
             }

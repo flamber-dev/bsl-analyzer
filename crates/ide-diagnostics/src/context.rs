@@ -177,6 +177,13 @@ impl<'a> AnalysisContext<'a> {
         self.provider.kernel_type_display(id, locale)
     }
 
+    /// The project's minimum platform release, parsed; `None` when unset or not a
+    /// version.
+    pub fn min_platform_version(&self) -> Option<bsl_platform::PlatformVersion> {
+        let value = self.provider.min_platform_version()?;
+        bsl_platform::PlatformVersion::parse_catalog(&value)
+    }
+
     pub fn main_configuration(&self) -> Option<Arc<bsl_metadata::Configuration>> {
         self.visible_configurations()
             .into_iter()

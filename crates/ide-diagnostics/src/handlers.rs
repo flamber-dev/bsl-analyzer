@@ -121,6 +121,7 @@ pub mod ordinary_app_support;
 pub mod os_users_method;
 pub mod pairing_broken_transaction;
 pub mod parse_error;
+pub mod platform_member_newer_than_min_version;
 pub mod postfix_access_on_expression;
 pub mod privileged_module_method_call;
 pub mod procedure_returns_value;
@@ -497,6 +498,9 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::ReadOnlyPropertyAssignment => Some(&read_only_property::METADATA),
         DiagnosticCode::GlobalPropertyNotWritable => Some(&global_property_not_writable::METADATA),
         DiagnosticCode::UnavailableInEnvironment => Some(&unavailable_in_environment::METADATA),
+        DiagnosticCode::PlatformMemberNewerThanMinVersion => {
+            Some(&platform_member_newer_than_min_version::METADATA)
+        }
         DiagnosticCode::ModuleAccessibility => Some(&module_accessibility::METADATA),
 
         DiagnosticCode::UnknownSuppressionCode => Some(&crate::suppression::UNKNOWN_CODE_METADATA),

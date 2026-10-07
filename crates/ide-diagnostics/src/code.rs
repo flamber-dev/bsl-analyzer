@@ -178,6 +178,7 @@ pub enum DiagnosticCode {
     ReadOnlyPropertyAssignment,
     GlobalPropertyNotWritable,
     UnavailableInEnvironment,
+    PlatformMemberNewerThanMinVersion,
     ModuleAccessibility,
 
     AmbiguousFieldInQuery,

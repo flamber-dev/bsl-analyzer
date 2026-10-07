@@ -17,6 +17,7 @@ mod method_environment;
 pub mod method_graph;
 pub mod method_lookup;
 pub mod method_resolution;
+pub mod min_platform;
 pub mod module_implicit;
 pub mod narrow;
 pub mod object_resolver;

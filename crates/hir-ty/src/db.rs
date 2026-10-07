@@ -39,6 +39,10 @@ pub trait HirDatabase: ConfigsDatabase + bsl_types::intern::TypeKernelDb {
     /// Configured 1C runtime target; `None` selects the bundled catalog release.
     fn target_platform_version(&self) -> Option<Arc<str>>;
 
+    /// Oldest 1C platform release the project's code must compile on; `None`
+    /// keeps the min-platform check silent. Never consulted for catalog selection.
+    fn min_platform_version(&self) -> Option<Arc<str>>;
+
     /// Whether the host has finished the initial workspace/metadata load.
     fn workspace_load_complete(&self) -> bool;
 

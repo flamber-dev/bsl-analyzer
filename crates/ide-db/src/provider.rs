@@ -283,6 +283,12 @@ pub trait AnalysisProvider {
 
     fn kernel_type_display(&self, id: bsl_types::kind::TypeId, locale: base_db::Locale) -> String;
 
+    /// The project's `min_platform_version`; `None` (the default for providers
+    /// without project settings) keeps the min-platform check silent.
+    fn min_platform_version(&self) -> Option<Arc<str>> {
+        None
+    }
+
     fn parse(&self, file_id: FileId) -> Parse<SyntaxNode>;
 
     fn file_text(&self, file_id: FileId) -> String;
