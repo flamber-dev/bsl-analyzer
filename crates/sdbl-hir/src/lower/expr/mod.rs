@@ -196,13 +196,11 @@ impl LoweringContext<'_> {
             .map(|token| token.text().to_string())
             .collect();
 
-        for child in node.children_with_tokens() {
-            if let Some(token) = child.as_token() {
-                if token.kind() == syntax::SyntaxKind::STRING && token.text().contains('\n') {
-                    self.diagnostics
-                        .push(SdblDiagnostic::MultilineString { range: token.text_range() });
-                    break;
-                }
+        // A literal kept as one lexeme still carries its own line breaks.
+        for token in node.children_with_tokens().filter_map(|element| element.into_token()) {
+            if token.kind() == syntax::SyntaxKind::STRING && token.text().contains(['\n', '\r']) {
+                self.diagnostics
+                    .push(SdblDiagnostic::MultilineString { range: token.text_range() });
             }
         }
 
@@ -235,14 +233,16 @@ impl LoweringContext<'_> {
     fn lower_multi_string(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
         use crate::hir::LiteralValue;
 
-        let string_count = node
+        // The query lexer splits a double-quoted literal into its quotes and its per-line
+        // content runs and drops the line breaks themselves, so the tree no longer shows
+        // where a line ended. Every literal with content is therefore offered as a
+        // candidate; the IDE layer, which still sees the query text, decides whether the
+        // query really contains a literal that continues on the next line.
+        let fragments = node
             .children_with_tokens()
-            .filter(|child| {
-                child.as_token().map(|t| t.kind() == syntax::SyntaxKind::STRING).unwrap_or(false)
-            })
+            .filter(|element| element.kind() == syntax::SyntaxKind::STRING)
             .count();
-
-        if string_count > 2 {
+        if fragments > 2 {
             self.diagnostics.push(SdblDiagnostic::MultilineString { range: node.text_range() });
         }
 

@@ -50,203 +50,147 @@ mod tests {
     use crate::DiagnosticCode;
     use expect_test::expect;
 
+    fn check(code: &str, expected: expect_test::Expect) {
+        check_diagnostics_snapshot_for(code, DiagnosticCode::LogicalOrInJoinQuerySection, expected);
+    }
+
     #[test]
     fn test_logical_or_in_join_query_section() {
-        let code = r#"Процедура ПолучиттьРеализациюТовара()
-
-	Запрос = Новый Запрос;
-	Запрос.Текст =
-	     "ВЫБРАТЬ
-         |	РеализацияТоваровУслугТовары.Ссылка КАК Ссылка,
-         |	РеализацияТоваровУслугТовары.Сумма > 0
-         |		ИЛИ РеализацияТоваровУслугТовары.СуммаСНДС > 0 КАК НенулеваяСумма
-         |ИЗ
-         |	Документ.РеализацияТоваровУслуг.Товары КАК РеализацияТоваровУслугТовары
-         |      ВНУТРЕННЕЕ СОЕДИНЕНИЕ Документ.РеализацияТоваровУслуг КАК РеализацияТоваровУслуг
-         |      ПО РеализацияТоваровУслугТовары.Ссылка = РеализацияТоваровУслуг.Ссылка
-         |          И (РеализацияТоваровУслугТовары.Сумма > 0 ИЛИ РеализацияТоваровУслугТовары.СуммаНДС > 0 ИЛИ РеализацияТоваровУслугТовары.СуммаСНДС > 0) //Ошибка (2 срабатывания)
-         |		ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Номенклатура КАК СправочникНоменклатура
-         |			ЛЕВОЕ СОЕДИНЕНИЕ Справочник.ВидыНоменклатуры КАК ВидыНоменклатуры //Тест работы на вложенном соединении
-         |			ПО СправочникНоменклатура.ВидНоменклатуры = ВидыНоменклатуры.Ссылка
-         |				И (СправочникНоменклатура.СрокГодности > 1
-         |					ИЛИ СправочникНоменклатура.СрокГодности < 10)
-         |				И (СправочникНоменклатура.СрокГодности > 1
-         |					ИЛИ ВидыНоменклатуры.ЗапрещенаПродажаЧерезПатент = ИСТИНА) //Ошибка
-         |		ПО РеализацияТоваровУслугТовары.Номенклатура = СправочникНоменклатура.Ссылка
-         |			И (СправочникНоменклатура.КодПоКВПД = ""1122""
-         |				ИЛИ СправочникНоменклатура.КодПоКВПД = ""1133"")
-         |			И (СправочникНоменклатура.Артикул = ""0011""
-         |				ИЛИ СправочникНоменклатура.КодТРУ = ""0111"") //Ошибка
-         |			И (СправочникНоменклатура.Артикул = ""0022""
-         |				ИЛИ СправочникНоменклатура.КодТРУ = ""0222""
-         |				ИЛИ СправочникНоменклатура.КодПоКВПД = ""2233"") //Ошибка (2 срабатывания)
-         |			И (СправочникНоменклатура.КодПоКВПД = ""1122""
-         |				ИЛИ СправочникНоменклатура.КодПоКВПД = ""1133""
-         |				ИЛИ СправочникНоменклатура.КодТРУ = ""0222"")"; //Ошибка (2 срабатывания)
-
-	РезультатЗапроса = Запрос.Выполнить();
-
-КонецПроцедуры
-
-//Диагностика должна зафиксировать ошибку
-// при использовании оператора "ИЛИ" в условии над различными полями таблицы.
-// Если оператор "ИЛИ" в условии над одним полем, то ошибка не фиксируется,
-// так как планировщик запросов имеет возможность преобразовывать такое условие в IN, тем самым оптимизируя.
-
-//Итоговое количество срабатываний - 8."#;
-
-        check_diagnostics_snapshot_for(
+        // ИЛИ over one field is left to the planner (it becomes IN); ИЛИ over different
+        // fields in an ON condition is reported once per operator, also in a join nested
+        // inside another join. ИЛИ in the selection list is not a join condition.
+        let code = r#"Функция ЗапросРейсов()
+	Возврат
+	"ВЫБРАТЬ
+	|	Рейсы.Номер КАК Номер,
+	|	Рейсы.Задержка > 0
+	|		ИЛИ Рейсы.Отменен КАК Проблемный
+	|ИЗ
+	|	Справочник.Рейсы КАК Рейсы
+	|		ВНУТРЕННЕЕ СОЕДИНЕНИЕ Справочник.Маршруты КАК Маршруты
+	|		ПО Рейсы.Маршрут = Маршруты.Ссылка
+	|			И (Маршруты.Дальность > 500 ИЛИ Рейсы.Ночной ИЛИ Маршруты.Международный)
+	|		ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Перроны КАК Перроны
+	|			ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Вокзалы КАК Вокзалы
+	|			ПО Перроны.Вокзал = Вокзалы.Ссылка
+	|				И (Перроны.Длина > 200
+	|					ИЛИ Перроны.Длина < 50)
+	|				И (Перроны.Крытый
+	|					ИЛИ Вокзалы.Отапливаемый)
+	|		ПО Рейсы.Перрон = Перроны.Ссылка
+	|			И (Перроны.Код = ""П1""
+	|				ИЛИ Перроны.Код = ""П2""
+	|				ИЛИ Перроны.Код = ""П3"")
+	|			И (Перроны.Код = ""П4""
+	|				ИЛИ Рейсы.РезервныйПеррон = Перроны.Ссылка)";
+КонецФункции
+"#;
+        check(
             code,
-            DiagnosticCode::LogicalOrInJoinQuerySection,
             expect![[r#"
-                LogicalOrInJoinQuerySection @ 13:63..13:66
-                  message: Обнаружен оператор 'ИЛИ' в условии соединения
-                  severity: Warning
-                LogicalOrInJoinQuerySection @ 13:109..13:112
-                  message: Обнаружен оператор 'ИЛИ' в условии соединения
-                  severity: Warning
-                LogicalOrInJoinQuerySection @ 20:16..20:19
-                  message: Обнаружен оператор 'ИЛИ' в условии соединения
-                  severity: Warning
-                LogicalOrInJoinQuerySection @ 25:15..25:18
-                  message: Обнаружен оператор 'ИЛИ' в условии соединения
-                  severity: Warning
-                LogicalOrInJoinQuerySection @ 27:15..27:18
-                  message: Обнаружен оператор 'ИЛИ' в условии соединения
-                  severity: Warning
-                LogicalOrInJoinQuerySection @ 28:15..28:18
-                  message: Обнаружен оператор 'ИЛИ' в условии соединения
-                  severity: Warning
-                LogicalOrInJoinQuerySection @ 30:15..30:18
-                  message: Обнаружен оператор 'ИЛИ' в условии соединения
-                  severity: Warning
-                LogicalOrInJoinQuerySection @ 31:15..31:18
-                  message: Обнаружен оператор 'ИЛИ' в условии соединения
-                  severity: Warning"#]],
+            LogicalOrInJoinQuerySection @ 11:34..11:37
+              message: Обнаружен оператор 'ИЛИ' в условии соединения
+              severity: Warning
+            LogicalOrInJoinQuerySection @ 11:51..11:54
+              message: Обнаружен оператор 'ИЛИ' в условии соединения
+              severity: Warning
+            LogicalOrInJoinQuerySection @ 18:8..18:11
+              message: Обнаружен оператор 'ИЛИ' в условии соединения
+              severity: Warning
+            LogicalOrInJoinQuerySection @ 24:7..24:10
+              message: Обнаружен оператор 'ИЛИ' в условии соединения
+              severity: Warning"#]],
         );
     }
 
     #[test]
     fn test_same_field_no_trigger() {
-        let code = r#"
-Процедура Тест()
-    Запрос.Текст = "SELECT * FROM T1
-                   |LEFT JOIN T2 ON T1.ID = T2.ID
-                   |   AND (T2.Status = 1 OR T2.Status = 2)";
+        let code = r#"Процедура Табло(Запрос)
+	Запрос.Текст = "SELECT * FROM Flights AS F
+	|LEFT JOIN Platforms AS P ON F.Platform = P.Ref
+	|	AND (P.Code = 1 OR P.Code = 2)";
 КонецПроцедуры
 "#;
-
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::LogicalOrInJoinQuerySection,
-            expect![[r#""#]],
-        );
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_or_in_select_no_trigger() {
-        let code = r#"
-Процедура Тест()
-    Запрос.Текст = "SELECT Field1 > 0 OR Field2 > 0 FROM Table1";
+        let code = r#"Процедура Табло(Запрос)
+	Запрос.Текст = "SELECT F.Delay > 0 OR F.Cancelled AS Bad FROM Flights AS F";
 КонецПроцедуры
 "#;
-
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::LogicalOrInJoinQuerySection,
-            expect![[r#""#]],
-        );
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_multiple_fields_trigger() {
-        let code = r#"
-Процедура Тест()
-    Запрос.Текст = "SELECT * FROM T1 INNER JOIN T2 ON T1.ID = T2.ID AND (T1.Amount > 100 OR T2.Price > 500)";
+        let code = r#"Процедура Табло(Запрос)
+	Запрос.Текст = "SELECT * FROM Flights AS F INNER JOIN Routes AS R ON F.Route = R.Ref AND (F.Delay > 10 OR R.Length > 900)";
 КонецПроцедуры
 "#;
-
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::LogicalOrInJoinQuerySection,
             expect![[r#"
-                LogicalOrInJoinQuerySection @ 3:90..3:92
-                  message: Обнаружен оператор 'ИЛИ' в условии соединения
-                  severity: Warning"#]],
+            LogicalOrInJoinQuerySection @ 2:105..2:107
+              message: Обнаружен оператор 'ИЛИ' в условии соединения
+              severity: Warning"#]],
         );
     }
 
     #[test]
     fn test_bilingual_english() {
-        let code = r#"
-Procedure Test()
-    Query = "SELECT * FROM T1
-            |INNER JOIN T2 ON T1.ID = T2.ID
-            |   AND (T1.Field1 = 1 OR T2.Field2 = 2)";
+        let code = r#"Procedure Board(Query)
+	Query.Text = "SELECT * FROM Flights AS F
+	|INNER JOIN Routes AS R ON F.Route = R.Ref
+	|	AND (F.Night = TRUE OR R.Length = 2)";
 EndProcedure
 "#;
-
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::LogicalOrInJoinQuerySection,
             expect![[r#"
-                LogicalOrInJoinQuerySection @ 5:36..5:38
-                  message: Обнаружен оператор 'ИЛИ' в условии соединения
-                  severity: Warning"#]],
+            LogicalOrInJoinQuerySection @ 4:24..4:26
+              message: Обнаружен оператор 'ИЛИ' в условии соединения
+              severity: Warning"#]],
         );
     }
 
     #[test]
     fn test_bilingual_russian() {
-        let code = r#"
-Процедура Тест()
-    Запрос = "ВЫБРАТЬ * ИЗ Т1
-             |ВНУТРЕННЕЕ СОЕДИНЕНИЕ Т2 ПО Т1.ID = Т2.ID
-             |   И (Т1.Поле1 = 1 ИЛИ Т2.Поле2 = 2)";
+        let code = r#"Процедура Табло(Запрос)
+	Запрос.Текст = "ВЫБРАТЬ * ИЗ Рейсы КАК Р
+	|ВНУТРЕННЕЕ СОЕДИНЕНИЕ Маршруты КАК М ПО Р.Маршрут = М.Ссылка
+	|	И (Р.Ночной = ИСТИНА ИЛИ М.Дальность = 2)";
 КонецПроцедуры
 "#;
-
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::LogicalOrInJoinQuerySection,
             expect![[r#"
-                LogicalOrInJoinQuerySection @ 5:34..5:37
-                  message: Обнаружен оператор 'ИЛИ' в условии соединения
-                  severity: Warning"#]],
+            LogicalOrInJoinQuerySection @ 4:25..4:28
+              message: Обнаружен оператор 'ИЛИ' в условии соединения
+              severity: Warning"#]],
         );
     }
 
     #[test]
     fn test_three_part_field_path_no_leak() {
-        let code = r#"
-Процедура Тест()
-    Запрос = "ВЫБРАТЬ * ИЗ Т1
-             |ВНУТРЕННЕЕ СОЕДИНЕНИЕ Т2 ПО Т1.ID = Т2.ID
-             |   И (Т1.Поле.SubField = 1 ИЛИ Т1.Поле.SubField = 2)";
+        let code = r#"Процедура Табло(Запрос)
+	Запрос.Текст = "ВЫБРАТЬ * ИЗ Рейсы КАК Р
+	|ВНУТРЕННЕЕ СОЕДИНЕНИЕ Маршруты КАК М ПО Р.Маршрут = М.Ссылка
+	|	И (М.Начало.Город = 1 ИЛИ М.Начало.Город = 2)";
 КонецПроцедуры
 "#;
-
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::LogicalOrInJoinQuerySection,
-            expect![[r#""#]],
-        );
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_undefined_literal_in_or_is_not_field() {
-        let code = r#"
-Процедура Тест()
-    Запрос = "ВЫБРАТЬ * ИЗ Т1
-             |ВНУТРЕННЕЕ СОЕДИНЕНИЕ Т2 ПО Т1.ID = Т2.ID
-             |   И (Т2.Статус = НЕОПРЕДЕЛЕНО ИЛИ Т2.Статус = 1)";
+        let code = r#"Процедура Табло(Запрос)
+	Запрос.Текст = "ВЫБРАТЬ * ИЗ Рейсы КАК Р
+	|ВНУТРЕННЕЕ СОЕДИНЕНИЕ Маршруты КАК М ПО Р.Маршрут = М.Ссылка
+	|	И (М.Оператор = НЕОПРЕДЕЛЕНО ИЛИ М.Оператор = &Оператор)";
 КонецПроцедуры
 "#;
-
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::LogicalOrInJoinQuerySection,
-            expect![[r#""#]],
-        );
+        check(code, expect![[r#""#]]);
     }
 }

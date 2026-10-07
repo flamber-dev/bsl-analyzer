@@ -69,15 +69,18 @@ mod tests {
     use ide_db::RootDatabaseImpl;
     use std::rc::Rc;
     use vfs::{FileId, FileSet, VfsPath};
-    fn check_as_command_module(code: &str) -> Vec<Diagnostic> {
+
+    const OBJECT_COMMAND: &str =
+        "Documents/ПриходнаяНакладная/Commands/ПечатьЭтикеток/Ext/CommandModule.bsl";
+    const COMMON_COMMAND: &str = "CommonCommands/ОбновитьОстатки/Ext/CommandModule.bsl";
+    const REGULAR_MODULE: &str = "/СкладскойУчет.bsl";
+
+    fn check_at(path: &str, code: &str) -> Vec<Diagnostic> {
         let mut db = RootDatabaseImpl::new();
         let file_id = FileId::from_raw(1);
 
         let mut file_set = FileSet::default();
-        file_set.insert(
-            file_id,
-            VfsPath::new("Catalogs/Справочник1/Commands/Команда1/Ext/CommandModule.bsl"),
-        );
+        file_set.insert(file_id, VfsPath::new(path));
         let source_root = SourceRoot::new_local(file_set);
         db.set_source_root(SourceRootId(0), source_root);
         db.set_file_source_root(file_id, SourceRootId(0));
@@ -91,71 +94,59 @@ mod tests {
         check(&ctx)
     }
 
-    fn check_as_regular_module(code: &str) -> Vec<Diagnostic> {
-        let mut db = RootDatabaseImpl::new();
-        let file_id = FileId::from_raw(1);
+    const EXPORTED: &str = r#"&НаКлиенте
+Процедура ОбработкаКоманды(Накладная, ПараметрыВыполнения) Экспорт
+	НапечататьЭтикетки(Накладная);
+КонецПроцедуры
 
-        let mut file_set = FileSet::default();
-        file_set.insert(file_id, VfsPath::new("/test.bsl"));
-        let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), source_root);
-        db.set_file_source_root(file_id, SourceRootId(0));
+&НаСервере
+Функция ЧислоЭтикеток(Накладная) Экспорт
+	Возврат Накладная.Товары.Количество();
+КонецФункции
 
-        db.set_file_text(file_id, code);
-
-        let config = Rc::new(DiagnosticsConfig::default());
-        let provider = ide_db::SalsaProvider::new(&db, None);
-        let ctx = crate::DiagnosticsContext::new(&config, file_id, &provider);
-
-        check(&ctx)
-    }
+&НаКлиенте
+Процедура НапечататьЭтикетки(Накладная)
+КонецПроцедуры
+"#;
 
     #[test]
     fn test_exported_procedure_and_function_detected() {
-        let code = "Процедура Тест1() Экспорт\nКонецПроцедуры\n\nПроцедура Тест2()\nКонецПроцедуры\n\nФункция Тест3() Экспорт\nКонецФункции\n\nФункция Тест4()\nКонецФункции";
-        let diagnostics = check_as_command_module(code);
-
+        let diagnostics = check_at(OBJECT_COMMAND, EXPORTED);
         expect![[r#"
-            CommandModuleExportMethods @ 1:11..1:16
+            CommandModuleExportMethods @ 2:11..2:27
               message: Экспортные методы в модулях команд не имеют смысла
               severity: Hint
-            CommandModuleExportMethods @ 7:9..7:14
+            CommandModuleExportMethods @ 7:9..7:22
               message: Экспортные методы в модулях команд не имеют смысла
               severity: Hint"#]]
-        .assert_eq(&format_diags(code, &diagnostics));
+        .assert_eq(&format_diags(EXPORTED, &diagnostics));
     }
 
     #[test]
     fn test_non_exported_ignored() {
-        let code = r#"
-Процедура Тест2()
+        let code = r#"&НаКлиенте
+Процедура ОбработкаКоманды(Накладная, ПараметрыВыполнения)
+	НапечататьЭтикетки(Накладная);
 КонецПроцедуры
 
-Функция Тест4()
-    Возврат 0;
+&НаСервере
+Функция ЧислоЭтикеток(Накладная)
+	Возврат Накладная.Товары.Количество();
 КонецФункции
 "#;
-        let diagnostics = check_as_command_module(code);
+        let diagnostics = check_at(OBJECT_COMMAND, code);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
-    fn test_exported_procedure() {
-        let code = "Процедура Тест1() Экспорт\nКонецПроцедуры";
-        let diagnostics = check_as_command_module(code);
+    fn test_common_command_module() {
+        let code = r#"&НаКлиенте
+Procedure CommandProcessing(CommandParameter, ExecutionParameters) Export
+EndProcedure
+"#;
+        let diagnostics = check_at(COMMON_COMMAND, code);
         expect![[r#"
-            CommandModuleExportMethods @ 1:11..1:16
-              message: Экспортные методы в модулях команд не имеют смысла
-              severity: Hint"#]]
-        .assert_eq(&format_diags(code, &diagnostics));
-    }
-
-    #[test]
-    fn test_exported_function() {
-        let code = "Функция Тест3() Экспорт\n    Возврат 0;\nКонецФункции";
-        let diagnostics = check_as_command_module(code);
-        expect![[r#"
-            CommandModuleExportMethods @ 1:9..1:14
+            CommandModuleExportMethods @ 2:11..2:28
               message: Экспортные методы в модулях команд не имеют смысла
               severity: Hint"#]]
         .assert_eq(&format_diags(code, &diagnostics));
@@ -163,8 +154,7 @@ mod tests {
 
     #[test]
     fn test_regular_module_not_checked() {
-        let code = "Процедура Тест() Экспорт\nКонецПроцедуры";
-        let diagnostics = check_as_regular_module(code);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+        let diagnostics = check_at(REGULAR_MODULE, EXPORTED);
+        expect![[r#""#]].assert_eq(&format_diags(EXPORTED, &diagnostics));
     }
 }

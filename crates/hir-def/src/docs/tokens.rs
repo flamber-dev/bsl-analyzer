@@ -33,7 +33,6 @@ pub struct DocCommentToken {
 pub fn doc_comment_tokens(lines: &[&str]) -> Vec<DocCommentToken> {
     let mut tokens = Vec::new();
     let mut section = None;
-    let mut prev_blank = false;
     let mut has_entry = false;
     let mut field_stack = Vec::<FieldContext>::new();
     for (index, raw) in lines.iter().enumerate() {
@@ -42,9 +41,7 @@ pub fn doc_comment_tokens(lines: &[&str]) -> Vec<DocCommentToken> {
         let normalized = raw.replace('\t', " ");
         let line = normalized.trim();
         let mut output = LineTokens { line: index, source: &normalized, tokens: &mut tokens };
-        if let Some((next, payload)) =
-            section_header(line, section == Some(Section::Parameters), prev_blank)
-        {
+        if let Some((next, payload)) = section_header(line, section == Some(Section::Parameters)) {
             section = Some(next);
             has_entry = false;
             field_stack.clear();
@@ -107,7 +104,6 @@ pub fn doc_comment_tokens(lines: &[&str]) -> Vec<DocCommentToken> {
         if !matches!(section, Some(Section::Examples | Section::CallOptions)) {
             output.references(line);
         }
-        prev_blank = line.is_empty();
     }
     tokens.sort_by_key(|token| (token.line, token.range.start()));
     let mut previous = None;

@@ -329,6 +329,26 @@ impl Form {
         form
     }
 
+    /// Apply an extension overlay (a borrowed form of the same name) onto this
+    /// base form. The dialog — identity, elements, handlers — comes from the
+    /// overlay alone; the base attributes stay, and an overlay attribute
+    /// replaces a same-named one whole (`is_main`, type, columns) or is added.
+    pub fn apply_extension_overlay(&mut self, overlay: &Form) {
+        let inherited = std::mem::replace(self, overlay.clone());
+
+        let mut attributes = inherited.attributes;
+        for attr in &overlay.attributes {
+            match attributes
+                .iter_mut()
+                .find(|existing| stdx::case::eq_ignore_case(&existing.name, &attr.name))
+            {
+                Some(existing) => *existing = attr.clone(),
+                None => attributes.push(attr.clone()),
+            }
+        }
+        self.attributes = attributes;
+    }
+
     pub fn is_handler(&self, method_name: &str) -> bool {
         let name_lower = method_name.fold_lower();
         self.event_handlers.iter().any(|h| h.handler_name.fold_lower() == name_lower)
@@ -492,5 +512,132 @@ mod tests {
         assert_eq!(group_kids, vec![101]);
 
         assert!(form.children_of(200).next().is_none());
+    }
+
+    fn borrowed_form_base() -> Form {
+        let uuid = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let mut form = Form::with_handlers(
+            "ФормаДокумента".to_string(),
+            FormType::Managed,
+            uuid,
+            vec![FormElement::new("БазовоеПоле", 1, Some("Объект.Номер".to_string()))],
+            vec![FormEventHandler {
+                event_type: "OnOpen".to_string(),
+                handler_name: "БазовыйПриОткрытии".to_string(),
+            }],
+            vec!["БазоваяКоманда".to_string()],
+        );
+        let mut main = FormAttribute::new(
+            "Объект",
+            AttributeType::Ref {
+                mdo_type: crate::MdoType::Document, name: "Заказ".to_string()
+            },
+        );
+        main.is_main = true;
+        main.columns = vec![FormAttributeColumn {
+            name: "Колонка".to_string(),
+            attr_type: AttributeType::Boolean,
+        }];
+        form.attributes = vec![
+            main,
+            FormAttribute::new("СчЁтчик", AttributeType::Number { precision: 10, scale: 0 }),
+            FormAttribute::new("БазовыйРеквизитФормы", AttributeType::String { length: None }),
+        ];
+        form
+    }
+
+    fn borrowed_form_overlay() -> Form {
+        let uuid = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+        Form::with_handlers(
+            "ФормаДокумента".to_string(),
+            FormType::Managed,
+            uuid,
+            vec![FormElement::new("ПолеРасширения", 7, None)],
+            vec![FormEventHandler {
+                event_type: "OnOpen".to_string(),
+                handler_name: "Расш_ПриОткрытии".to_string(),
+            }],
+            vec!["КомандаРасширения".to_string()],
+        )
+    }
+
+    #[test]
+    fn borrowed_form_empty_overlay_inherits_every_base_attribute() {
+        let base = borrowed_form_base();
+        let mut merged = base.clone();
+        merged.apply_extension_overlay(&borrowed_form_overlay());
+
+        assert_eq!(merged.attributes, base.attributes);
+        let main = merged.main_attribute().expect("основной реквизит унаследован");
+        assert_eq!(main.name, "Объект");
+        assert!(main.is_main);
+        assert_eq!(main.columns.len(), 1);
+    }
+
+    #[test]
+    fn borrowed_form_overlay_attribute_replaces_unicode_case_twin_whole() {
+        let mut overlay = borrowed_form_overlay();
+        overlay.attributes = vec![
+            FormAttribute::new("счётчик", AttributeType::String { length: Some(5) }),
+            FormAttribute::new("РасшРеквизитФормы", AttributeType::Date),
+        ];
+        let mut merged = borrowed_form_base();
+        merged.apply_extension_overlay(&overlay);
+
+        let names: Vec<&str> = merged.attribute_names().collect();
+        assert_eq!(names, ["Объект", "счётчик", "БазовыйРеквизитФормы", "РасшРеквизитФормы"]);
+        let twins: Vec<_> = merged
+            .attributes
+            .iter()
+            .filter(|a| stdx::case::eq_ignore_case(&a.name, "СЧЁТЧИК"))
+            .collect();
+        assert_eq!(twins.len(), 1, "конфликт даёт единственный реквизит");
+        assert_eq!(twins[0], &overlay.attributes[0]);
+    }
+
+    #[test]
+    fn borrowed_form_overlay_main_attribute_wins_with_its_own_flag_and_columns() {
+        let mut overlay = borrowed_form_overlay();
+        overlay.attributes =
+            vec![FormAttribute::new("ОБЪЕКТ", AttributeType::String { length: None })];
+        let mut merged = borrowed_form_base();
+        merged.apply_extension_overlay(&overlay);
+
+        let object = merged.find_attribute("Объект").expect("реквизит на месте");
+        assert_eq!(object, &overlay.attributes[0]);
+        assert!(!object.is_main);
+        assert!(object.columns.is_empty());
+        assert!(merged.main_attribute().is_none());
+
+        overlay.attributes[0].is_main = true;
+        overlay.attributes[0].columns = vec![FormAttributeColumn {
+            name: "КолонкаРасширения".to_string(),
+            attr_type: AttributeType::Date,
+        }];
+        let mut merged = borrowed_form_base();
+        merged.apply_extension_overlay(&overlay);
+        assert_eq!(merged.main_attribute(), Some(&overlay.attributes[0]));
+        assert_eq!(merged.find_attribute("объект"), Some(&overlay.attributes[0]));
+    }
+
+    #[test]
+    fn borrowed_form_dialog_comes_from_overlay_and_sources_stay_intact() {
+        let base = borrowed_form_base();
+        let mut overlay = borrowed_form_overlay();
+        overlay.attributes = vec![FormAttribute::new("РасшРеквизитФормы", AttributeType::Date)];
+        let base_before = base.clone();
+        let overlay_before = overlay.clone();
+
+        let mut merged = base.clone();
+        merged.apply_extension_overlay(&overlay);
+
+        let mut expected = overlay.clone();
+        expected.attributes = base.attributes.iter().chain(&overlay.attributes).cloned().collect();
+        assert_eq!(merged, expected);
+        assert!(merged.find_element("БазовоеПоле").is_none());
+        assert!(!merged.is_handler("БазовыйПриОткрытии"));
+        assert!(!merged.is_handler("БазоваяКоманда"));
+        assert_eq!(base, base_before);
+        assert_eq!(overlay, overlay_before);
     }
 }

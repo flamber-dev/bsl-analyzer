@@ -27,3 +27,31 @@ Correct:
 ```bsl
 CommonModule.KnownMethod();
 ```
+
+## Calls through ThisObject / ThisForm in a form module
+
+Only the exported methods of a form module are reachable through `ThisObject` and `ThisForm`. A non-exported method does not break the module, but the call fails at run time with "Object method not found" (checked on 8.3.17 and 8.3.27, on the client and on the server).
+
+Incorrect:
+
+```bsl
+&AtClient
+Procedure Show()
+EndProcedure
+
+&AtClient
+Procedure Save()
+    ThisForm.Show();
+EndProcedure
+```
+
+Correct:
+
+```bsl
+&AtClient
+Procedure Save()
+    Show();
+EndProcedure
+```
+
+or declare the method `Export`.

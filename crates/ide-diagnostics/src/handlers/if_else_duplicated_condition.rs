@@ -47,299 +47,237 @@ mod tests {
     use crate::test_utils::*;
     use crate::DiagnosticCode;
     use expect_test::expect;
-    #[test]
-    fn test_simple_duplicate() {
-        let code = r#"
-Процедура Тест()
-    Если x = 1 Тогда
-        т = 1;
-    ИначеЕсли x = 2 Тогда
-        т = 2;
-    ИначеЕсли x = 1 Тогда
-        т = 3;
-    КонецЕсли;
-КонецПроцедуры
-"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let dupl_diags: Vec<_> = diagnostics
+    fn check(code: &str, expected: expect_test::Expect) {
+        let diagnostics: Vec<_> = check_hir_diagnostic(code)
             .into_iter()
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
             .collect();
-
-        expect![[r#"
-            IfElseDuplicatedCondition @ 7:15..7:20
-              message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
-              severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
+        expected.assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_no_duplicates() {
-        let code = r#"
-Процедура Тест()
-    Если x = 1 Тогда
-        т = 1;
-    ИначеЕсли x = 2 Тогда
-        т = 2;
-    ИначеЕсли x = 3 Тогда
-        т = 3;
-    КонецЕсли;
-КонецПроцедуры
+        let code = r#"Функция Сигнал(Цвет)
+	Если Цвет = "Красный" Тогда
+		Возврат "Стоп";
+	ИначеЕсли Цвет = "Желтый" Тогда
+		Возврат "Внимание";
+	ИначеЕсли Цвет = "Зеленый" Тогда
+		Возврат "Ехать";
+	КонецЕсли;
+	Возврат "";
+КонецФункции
 "#;
+        check(code, expect![[r#""#]]);
+    }
 
-        let diagnostics = check_hir_diagnostic(code);
-        let dupl_diags: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
-            .collect();
-
-        expect![[r#""#]].assert_eq(&format_diags(code, &dupl_diags));
+    #[test]
+    fn test_simple_duplicate() {
+        let code = r#"Функция Сигнал(Цвет)
+	Если Цвет = "Красный" Тогда
+		Возврат "Стоп";
+	ИначеЕсли Цвет = "Желтый" Тогда
+		Возврат "Внимание";
+	ИначеЕсли Цвет = "Красный" Тогда
+		Возврат "Ехать";
+	КонецЕсли;
+	Возврат "";
+КонецФункции
+"#;
+        check(
+            code,
+            expect![[r#"
+            IfElseDuplicatedCondition @ 6:12..6:28
+              message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
+              severity: Warning"#]],
+        );
     }
 
     #[test]
     fn test_case_insensitive_variables() {
-        let code = r#"
-Процедура Тест()
-    Если п = 1 Тогда
-        т = 1;
-    ИначеЕсли П = 1 Тогда
-        т = 2;
-    КонецЕсли;
+        let code = r#"Процедура Переключить(Режим)
+	Если режим > 2 Тогда
+		Режим = 0;
+	ИначеЕсли РЕЖИМ > 2 Тогда
+		Режим = 1;
+	КонецЕсли;
 КонецПроцедуры
 "#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        let dupl_diags: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
-            .collect();
-
-        expect![[r#"
-            IfElseDuplicatedCondition @ 5:15..5:20
+        check(
+            code,
+            expect![[r#"
+            IfElseDuplicatedCondition @ 4:12..4:21
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
-              severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
+              severity: Warning"#]],
+        );
     }
 
     #[test]
     fn test_whitespace_normalization() {
-        let code = r#"
-Процедура Тест()
-    Если п = 1 Тогда
-        т = 1;
-    ИначеЕсли П     =   1 Тогда
-        т = 2;
-    КонецЕсли;
+        let code = r#"Процедура Переключить(Режим)
+	Если Режим > 2 Тогда
+		Режим = 0;
+	ИначеЕсли Режим    >  2 Тогда
+		Режим = 1;
+	КонецЕсли;
 КонецПроцедуры
 "#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        let dupl_diags: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
-            .collect();
-
-        expect![[r#"
-            IfElseDuplicatedCondition @ 5:15..5:26
+        check(
+            code,
+            expect![[r#"
+            IfElseDuplicatedCondition @ 4:12..4:25
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
-              severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
+              severity: Warning"#]],
+        );
     }
 
     #[test]
     fn test_string_case_sensitive() {
-        let code = r#"
-Процедура Тест()
-    Если (Знак = "Ё") Тогда
-        Возврат 0;
-    ИначеЕсли (Знак = "ё") Тогда
-        Возврат 1;
-    КонецЕсли;
-КонецПроцедуры
+        let code = r#"Функция Регистр(Буква)
+	Если (Буква = "Я") Тогда
+		Возврат "верхний";
+	ИначеЕсли (Буква = "я") Тогда
+		Возврат "нижний";
+	КонецЕсли;
+	Возврат "";
+КонецФункции
 "#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        let dupl_diags: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
-            .collect();
-
-        expect![[r#""#]].assert_eq(&format_diags(code, &dupl_diags));
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_string_same_case() {
-        let code = r#"
-Процедура Тест()
-    Если (Знак = "ё") Тогда
-        Возврат 0;
-    ИначеЕсли (Знак = "ё") Тогда
-        Возврат 1;
-    КонецЕсли;
-КонецПроцедуры
+        let code = r#"Функция Регистр(Буква)
+	Если (Буква = "я") Тогда
+		Возврат "верхний";
+	ИначеЕсли (Буква = "я") Тогда
+		Возврат "нижний";
+	КонецЕсли;
+	Возврат "";
+КонецФункции
 "#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        let dupl_diags: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
-            .collect();
-
-        expect![[r#"
-            IfElseDuplicatedCondition @ 5:15..5:27
+        check(
+            code,
+            expect![[r#"
+            IfElseDuplicatedCondition @ 4:12..4:25
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
-              severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
+              severity: Warning"#]],
+        );
     }
 
     #[test]
     fn test_nested_if_independent() {
-        let code = r#"
-Процедура Тест()
-    Если п = 1 Тогда
-        Если п = 2 Тогда
-            т = 1;
-        ИначеЕсли п = 2 Тогда
-            т = 2;
-        КонецЕсли;
-    ИначеЕсли п = 1 Тогда
-        т = 3;
-    КонецЕсли;
+        // The inner chain and the outer chain are compared separately.
+        let code = r#"Процедура Разобрать(Код)
+	Если Код = 10 Тогда
+		Если Код = 20 Тогда
+			Сообщить("внутри");
+		ИначеЕсли Код = 20 Тогда
+			Сообщить("повтор внутри");
+		КонецЕсли;
+	ИначеЕсли Код = 10 Тогда
+		Сообщить("повтор снаружи");
+	КонецЕсли;
 КонецПроцедуры
 "#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        let dupl_diags: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
-            .collect();
-
-        expect![[r#"
-            IfElseDuplicatedCondition @ 6:19..6:24
+        check(
+            code,
+            expect![[r#"
+            IfElseDuplicatedCondition @ 5:13..5:21
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
               severity: Warning
-            IfElseDuplicatedCondition @ 9:15..9:20
+            IfElseDuplicatedCondition @ 8:12..8:20
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
-              severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
+              severity: Warning"#]],
+        );
     }
 
     #[test]
     fn test_triple_duplicate_condition() {
-        let code = r#"
-Процедура Тест()
-    Если п = 0 Тогда
-        т = 0;
-    ИначеЕсли п = 1 Тогда
-        т = 1;
-    ИначеЕсли п = 1 Тогда
-        т = 2;
-    ИначеЕсли п = 2 Тогда
-        т = 3;
-    ИначеЕсли П     =   1 Тогда
-        т = 4;
-    Иначе
-        т = -1;
-    КонецЕсли;
+        // Every later repeat points at the first occurrence.
+        let code = r#"Процедура Разобрать(Код)
+	Если Код = 5 Тогда
+		Сообщить("пять");
+	ИначеЕсли Код = 7 Тогда
+		Сообщить("семь");
+	ИначеЕсли Код = 9 Тогда
+		Сообщить("девять");
+	ИначеЕсли Код  =  7 Тогда
+		Сообщить("снова семь");
+	ИначеЕсли КОД = 7 Тогда
+		Сообщить("и ещё");
+	Иначе
+		Сообщить("прочее");
+	КонецЕсли;
 КонецПроцедуры
 "#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        let dupl_diags: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
-            .collect();
-
-        expect![[r#"
-            IfElseDuplicatedCondition @ 7:15..7:20
+        check(
+            code,
+            expect![[r#"
+            IfElseDuplicatedCondition @ 8:12..8:21
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 2)
               severity: Warning
-            IfElseDuplicatedCondition @ 11:15..11:26
+            IfElseDuplicatedCondition @ 10:12..10:19
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 2)
-              severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
+              severity: Warning"#]],
+        );
     }
 
     #[test]
     fn test_nested_and_outer_duplicates() {
-        let code = r#"
-Процедура Тест()
-    Если п = 0 Тогда
-        т = 0;
-    ИначеЕсли п = 1 Тогда
-        Если п = 1 Тогда
-            т = 1;
-        ИначеЕсли п = 2 Тогда
-            т = 2;
-        ИначеЕсли п = 2 Тогда
-            т = 3;
-        Иначе
-            т = 4;
-        КонецЕсли;
-    ИначеЕсли п = 1 Тогда
-        т = 4;
-    Иначе
-        т = -1;
-    КонецЕсли;
+        let code = r#"Процедура Разобрать(Код, Флаг)
+	Если Флаг Тогда
+		Сообщить("флаг");
+	ИначеЕсли Код > 0 Тогда
+		Если Код > 100 Тогда
+			Сообщить("много");
+		ИначеЕсли Код > 10 Тогда
+			Сообщить("средне");
+		ИначеЕсли Код > 10 Тогда
+			Сообщить("снова средне");
+		Иначе
+			Сообщить("мало");
+		КонецЕсли;
+	ИначеЕсли Код > 0 Тогда
+		Сообщить("снова больше нуля");
+	Иначе
+		Сообщить("ноль");
+	КонецЕсли;
 КонецПроцедуры
 "#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        let dupl_diags: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
-            .collect();
-
-        expect![[r#"
-            IfElseDuplicatedCondition @ 10:19..10:24
+        check(
+            code,
+            expect![[r#"
+            IfElseDuplicatedCondition @ 9:13..9:21
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 2)
               severity: Warning
-            IfElseDuplicatedCondition @ 15:15..15:20
+            IfElseDuplicatedCondition @ 14:12..14:19
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 2)
-              severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
+              severity: Warning"#]],
+        );
     }
 
     #[test]
-    fn test_string_case_sensitive_fixture() {
-        let no_dup_code = r#"
-Процедура Тест()
-    Если (Знак = "Ё") Тогда
-        Возврат 0;
-    ИначеЕсли (ЗНак = "ё") Тогда
-        Возврат 1;
-    Иначе
-        Возврат 2;
-    КонецЕсли;
-КонецПроцедуры
+    fn test_variable_case_differs_string_case_matters() {
+        let code = r#"Функция Регистр(Буква)
+	Если (Буква = "я") Тогда
+		Возврат 1;
+	ИначеЕсли (БУКВА = "я") Тогда
+		Возврат 2;
+	ИначеЕсли (буква = "Я") Тогда
+		Возврат 3;
+	Иначе
+		Возврат 4;
+	КонецЕсли;
+КонецФункции
 "#;
-
-        let diagnostics = check_hir_diagnostic(no_dup_code);
-        let dupl_diags: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
-            .collect();
-        expect![[r#""#]].assert_eq(&format_diags(no_dup_code, &dupl_diags));
-
-        let dup_code = r#"
-Процедура Тест()
-    Если (Знак = "ё") Тогда
-        Возврат 0;
-    ИначеЕсли (Знак = "ё") Тогда
-        Возврат 1;
-    ИначеЕсли (ЗНак = "ё") Тогда
-        Возврат 2;
-    Иначе
-        Возврат 3;
-    КонецЕсли;
-КонецПроцедуры
-"#;
-
-        let diagnostics2 = check_hir_diagnostic(dup_code);
-        let dupl_diags2: Vec<_> = diagnostics2
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
-            .collect();
-        expect![[r#"
-            IfElseDuplicatedCondition @ 5:15..5:27
+        check(
+            code,
+            expect![[r#"
+            IfElseDuplicatedCondition @ 4:12..4:25
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
-              severity: Warning
-            IfElseDuplicatedCondition @ 7:15..7:27
-              message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
-              severity: Warning"#]].assert_eq(&format_diags(dup_code, &dupl_diags2));
+              severity: Warning"#]],
+        );
     }
 }

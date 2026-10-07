@@ -80,33 +80,62 @@ mod tests {
 
     #[test]
     fn test_fix_deletes_line_only_when_alone() {
-        // The plain self-assign line is deleted whole; the ones sharing a line with a
-        // trailing comment or a preceding statement offer no fix (nothing must be lost).
-        let code =
-            "Процедура Тест()\n    А = А;\n    Б = Б; // важно\n    В = 1; Г = Г;\nКонецПроцедуры";
-        check_fix_snapshot_for(
-            code,
-            DiagnosticCode::SelfAssign,
-            expect![[r#"
-            SelfAssign @ 2:5..2:10 — Удалить самоприсваивание [fix_all=false]
-            Процедура Тест()
-                Б = Б; // важно
-                В = 1; Г = Г;
-            КонецПроцедуры"#]],
-        );
-    }
-
-    #[test]
-    fn test_self_assign() {
-        let code = r#"Процедура Тест()
-    А = А;
-КонецПроцедуры"#;
-
+        // Only the assignment that owns its line is deleted; the trailing comment and the
+        // leading statement on the other two lines would be lost, so they get no fix.
+        let code = "Процедура ПересчитатьОстаток(Остаток, Резерв)\n\tРезерв = Резерв; // оставить\n\tОстаток = Остаток;\n\tИтог = 0; Резерв = Резерв;\nКонецПроцедуры\n";
         check_diagnostics_snapshot_for(
             code,
             DiagnosticCode::SelfAssign,
             expect![[r#"
-            SelfAssign @ 2:5..2:10
+            SelfAssign @ 2:2..2:17
+              message: Присваивание переменной самой себе
+              severity: Major
+            SelfAssign @ 3:2..3:19
+              message: Присваивание переменной самой себе
+              severity: Major
+            SelfAssign @ 4:12..4:27
+              message: Присваивание переменной самой себе
+              severity: Major"#]],
+        );
+        check_fix_snapshot_for(
+            code,
+            DiagnosticCode::SelfAssign,
+            expect![[r#"
+            SelfAssign @ 3:2..3:19 — Удалить самоприсваивание [fix_all=false]
+            Процедура ПересчитатьОстаток(Остаток, Резерв)
+            	Резерв = Резерв; // оставить
+            	Итог = 0; Резерв = Резерв;
+            КонецПроцедуры
+        "#]],
+        );
+    }
+
+    #[test]
+    fn test_distinct_paths_are_silent() {
+        let code = r#"Процедура ОбновитьКарточку(Карточка, ВесБрутто)
+	Вес = ВесБрутто;
+	Карточка.Артикул = Карточка.Код;
+	Если Вес = ВесБрутто Тогда
+		Вес = 0;
+	КонецЕсли;
+	Упаковка = Новый Упаковка;
+КонецПроцедуры
+"#;
+        check_diagnostics_snapshot_for(code, DiagnosticCode::SelfAssign, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_self_assign() {
+        let code = r#"Процедура ОбновитьКарточку(Карточка, ВесБрутто)
+	Вес = Вес;
+	Карточка.Артикул = Карточка.Код;
+КонецПроцедуры
+"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::SelfAssign,
+            expect![[r#"
+            SelfAssign @ 2:2..2:11
               message: Присваивание переменной самой себе
               severity: Major"#]],
         );
@@ -114,52 +143,33 @@ mod tests {
 
     #[test]
     fn test_self_assign_case_insensitive() {
-        let code = r#"Процедура Тест()
-    А = а;
-КонецПроцедуры"#;
-
+        let code = r#"Процедура ОбновитьКарточку(Карточка, ВесБрутто)
+	ВЕС = вес;
+	Карточка.Артикул = Карточка.Код;
+КонецПроцедуры
+"#;
         check_diagnostics_snapshot_for(
             code,
             DiagnosticCode::SelfAssign,
             expect![[r#"
-            SelfAssign @ 2:5..2:10
+            SelfAssign @ 2:2..2:11
               message: Присваивание переменной самой себе
               severity: Major"#]],
         );
     }
 
     #[test]
-    fn test_no_self_assign() {
-        let code = r#"Процедура Тест()
-    А = Б;
-КонецПроцедуры"#;
-
-        check_diagnostics_snapshot_for(code, DiagnosticCode::SelfAssign, expect![[r#""#]]);
-    }
-
-    #[test]
-    fn test_fixture_self_assign() {
-        let code = r#"Процедура Тест()
-    Если А = 1 Тогда
-    КонецЕсли;
-
-    A = 1;
-    А = а; //Раз
-
-    Структура.Чтото = Структура.ЧтотоДругое;
-    Структура.Чтото = СтруКтура.ЧТото; // Два
-
-    НовыйУникальныйИдентификатор = Новый УникальныйИдентификатор;
-КонецПроцедуры"#;
-
+    fn test_property_self_assign_case_insensitive() {
+        let code = r#"Процедура ОбновитьКарточку(Карточка, ВесБрутто)
+	Вес = ВесБрутто;
+	Карточка.Артикул = КАРТОЧКА.артикул; // путь тот же
+КонецПроцедуры
+"#;
         check_diagnostics_snapshot_for(
             code,
             DiagnosticCode::SelfAssign,
             expect![[r#"
-            SelfAssign @ 6:5..6:10
-              message: Присваивание переменной самой себе
-              severity: Major
-            SelfAssign @ 9:5..9:38
+            SelfAssign @ 3:2..3:37
               message: Присваивание переменной самой себе
               severity: Major"#]],
         );

@@ -7884,3 +7884,392 @@ fn navigation_resolves_a_platform_method_on_an_external_object() {
     hir_ty::resolve_method(&db, receiver(MetadataKind::ExternalReportObject), &name)
         .expect("and so does the external report's");
 }
+
+fn borrowed_form_fixture_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../bsl-metadata/fixtures/extension_metadata"
+    ))
+}
+
+fn borrowed_form_module(root: &std::path::Path, owner: &str, form: &str) -> std::path::PathBuf {
+    root.join(format!("Documents/{owner}/Forms/{form}/Ext/Form/Module.bsl"))
+}
+
+/// A database over `roots` (label, path, kind) whose single source root holds
+/// `modules`, numbered from `FileId(0)` in order.
+fn borrowed_form_db(
+    roots: &[(Option<&str>, &std::path::Path, RootKind)],
+    modules: &[std::path::PathBuf],
+) -> RootDatabaseImpl {
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    for (idx, path) in modules.iter().enumerate() {
+        file_set.insert(FileId(idx as u32), VfsPath::new(path.to_string_lossy().as_ref()));
+    }
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    for (idx, path) in modules.iter().enumerate() {
+        db.set_file_source_root(FileId(idx as u32), SourceRootId(0));
+        db.set_file_text(FileId(idx as u32), &std::fs::read_to_string(path).unwrap());
+    }
+    let paths: Vec<(Option<String>, std::path::PathBuf)> = roots
+        .iter()
+        .map(|(label, path, _)| (label.map(str::to_string), path.to_path_buf()))
+        .collect();
+    db.set_workspace_configs_snapshot(crate::metadata::WorkspaceConfigsSnapshot {
+        canonical_paths: paths
+            .iter()
+            .map(|(_, path)| std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
+            .collect(),
+        kinds: roots.iter().map(|(_, _, kind)| *kind).collect(),
+        closures: vec![Vec::new(); paths.len()],
+        topological_order: (0..paths.len()).collect(),
+        paths,
+        fingerprint: None,
+        source_exclusions: Default::default(),
+    });
+    db
+}
+
+fn borrowed_form(db: &RootDatabaseImpl, file: FileId) -> Option<Arc<bsl_metadata::Form>> {
+    crate::queries::module_metadata_query(db, base_db::FileIdInput::new(db, file)).form.clone()
+}
+
+fn borrowed_form_local(path: &std::path::Path) -> bsl_metadata::Form {
+    bsl_metadata::xml_parser::parse_form_from_bsl_path(path).expect("local form parses")
+}
+
+fn borrowed_form_names(form: &bsl_metadata::Form) -> Vec<&str> {
+    form.attribute_names().collect()
+}
+
+/// Copy the base and extension fixture trees into a scratch directory, so a
+/// test may delete or rewrite files without touching the shared fixture.
+fn borrowed_form_fixture_copy() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let target = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_dir(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let base = temp.path().join("base");
+    let extension = temp.path().join("extension");
+    copy_dir(&borrowed_form_fixture_root().join("base"), &base);
+    copy_dir(&borrowed_form_fixture_root().join("extension"), &extension);
+    (temp, base, extension)
+}
+
+#[test]
+fn borrowed_form_inherits_base_attributes_across_the_fixture_matrix() {
+    use bsl_metadata::AttributeType;
+
+    let root = borrowed_form_fixture_root();
+    let base = root.join("base");
+    let extension = root.join("extension");
+    let modules = vec![
+        borrowed_form_module(&extension, "Заказ", "ФормаДокумента"),
+        borrowed_form_module(&extension, "Заказ", "ФормаСBaseForm"),
+        borrowed_form_module(&extension, "Заказ", "формаёж"),
+        borrowed_form_module(&extension, "Локальный", "ФормаДокумента"),
+        borrowed_form_module(&extension, "Заказ", "ОбычнаяФорма"),
+        borrowed_form_module(&extension, "Заказ", "БезПары"),
+        borrowed_form_module(&base, "Заказ", "ФормаДокумента"),
+        borrowed_form_module(&base, "Заказ", "ФормаСBaseForm"),
+        borrowed_form_module(&base, "Заказ", "ФормаЁж"),
+        borrowed_form_module(&base, "Локальный", "ФормаДокумента"),
+        borrowed_form_module(&base, "Заказ", "ОбычнаяФорма"),
+    ];
+    let db = borrowed_form_db(
+        &[(None, &base, RootKind::Base), (Some("Расширение"), &extension, RootKind::Extension)],
+        &modules,
+    );
+    let form = |idx: u32| borrowed_form(&db, FileId(idx)).expect("form loads");
+
+    let direct = form(0);
+    assert_eq!(borrowed_form_names(&direct), ["Объект", "БазовыйРеквизитФормы"]);
+    let main = direct.main_attribute().expect("inherited main attribute");
+    assert_eq!(main.name, "Объект");
+    assert_eq!(
+        main.attr_type,
+        AttributeType::Ref { mdo_type: bsl_metadata::MdoType::Document, name: "Заказ".into() }
+    );
+    let local = borrowed_form_local(&modules[0]);
+    assert!(local.attributes().is_empty());
+    let mut expected_dialog = local.clone();
+    expected_dialog.attributes = direct.attributes.clone();
+    assert_eq!(*direct, expected_dialog, "the dialog is the extension's alone");
+    assert!(direct.find_element("БазовоеПоле").is_none());
+    assert!(direct.is_handler("Расш_ПриОткрытии"));
+    assert!(!direct.is_handler("БазовыйПриОткрытии"));
+    assert!(!direct.is_handler("БазоваяКомандаОбработка"));
+
+    assert!(borrowed_form_local(&modules[1]).attributes().is_empty(), "BaseForm is not parsed");
+    assert_eq!(borrowed_form_names(&form(1)), ["Объект", "БазовыйРеквизитФормы"]);
+
+    let unicode = form(2);
+    let counters: Vec<_> = unicode
+        .attributes()
+        .iter()
+        .filter(|attr| stdx::case::eq_ignore_case(&attr.name, "СЧЁТЧИК"))
+        .collect();
+    assert_eq!(counters.len(), 1, "a single attribute for the conflict: {unicode:?}");
+    assert_eq!(counters[0].name, "счётчик");
+    assert_eq!(counters[0].attr_type, AttributeType::String { length: None });
+    assert_eq!(
+        borrowed_form_names(&unicode),
+        ["Объект", "БазовыйРеквизитФормы", "счётчик", "РасшРеквизитФормы"]
+    );
+
+    assert_eq!(borrowed_form_names(&form(3)), ["ЛокальныйРеквизитФормы"], "Own owner");
+
+    let ordinary = form(4);
+    assert_eq!(*ordinary, borrowed_form_local(&modules[4]));
+    assert!(ordinary.attributes().is_empty());
+    assert!(ordinary.is_handler("ПередОткрытием"), "default handlers stay");
+
+    assert_eq!(borrowed_form_names(&form(5)), ["СвойРеквизитФормы"], "no base counterpart");
+
+    for idx in 6..11 {
+        assert_eq!(
+            *form(idx),
+            borrowed_form_local(&modules[idx as usize]),
+            "a base form stays local: {}",
+            modules[idx as usize].display()
+        );
+    }
+}
+
+#[test]
+fn borrowed_form_keeps_the_local_form_when_the_pair_is_incomplete() {
+    let (temp, base, extension) = borrowed_form_fixture_copy();
+    let ext_module = borrowed_form_module(&extension, "Заказ", "ФормаДокумента");
+    let base_module = borrowed_form_module(&base, "Заказ", "ФормаДокумента");
+    let local = borrowed_form_local(&ext_module);
+    let roots = [
+        (None, base.as_path(), RootKind::Base),
+        (Some("Расширение"), extension.as_path(), RootKind::Extension),
+    ];
+    let paired = || borrowed_form_db(&roots, &[ext_module.clone(), base_module.clone()]);
+
+    let control = paired();
+    assert_eq!(
+        borrowed_form_names(&borrowed_form(&control, FileId(0)).unwrap()),
+        ["Объект", "БазовыйРеквизитФормы"]
+    );
+
+    let no_base_root = borrowed_form_db(
+        &[(Some("Расширение"), extension.as_path(), RootKind::Extension)],
+        &[ext_module.clone(), base_module.clone()],
+    );
+    assert_eq!(*borrowed_form(&no_base_root, FileId(0)).unwrap(), local, "no base root");
+
+    let no_base_file = borrowed_form_db(&roots, std::slice::from_ref(&ext_module));
+    assert_eq!(*borrowed_form(&no_base_file, FileId(0)).unwrap(), local, "base not in VFS");
+
+    let base_form_xml = base.join("Documents/Заказ/Forms/ФормаДокумента/Ext/Form.xml");
+    let base_dialog = std::fs::read_to_string(&base_form_xml).unwrap();
+    std::fs::remove_file(&base_form_xml).unwrap();
+    let no_base_dialog = paired();
+    assert!(borrowed_form(&no_base_dialog, FileId(1)).is_none(), "base form does not load");
+    assert_eq!(*borrowed_form(&no_base_dialog, FileId(0)).unwrap(), local, "no base form");
+    std::fs::write(&base_form_xml, base_dialog).unwrap();
+
+    let ext_owner = extension.join("Documents/Заказ.xml");
+    let owner_xml = std::fs::read_to_string(&ext_owner).unwrap();
+    std::fs::write(&ext_owner, owner_xml.replace("Adopted", "Own")).unwrap();
+    let own_owner = paired();
+    assert_eq!(*borrowed_form(&own_owner, FileId(0)).unwrap(), local, "owner turned Own");
+    std::fs::write(&ext_owner, owner_xml.replace("<ObjectBelonging>Adopted</ObjectBelonging>", ""))
+        .unwrap();
+    let no_belonging = paired();
+    assert_eq!(
+        *borrowed_form(&no_belonging, FileId(0)).unwrap(),
+        local,
+        "owner without an explicit Adopted flag"
+    );
+    std::fs::remove_file(&ext_owner).unwrap();
+    let no_owner = paired();
+    assert_eq!(*borrowed_form(&no_owner, FileId(0)).unwrap(), local, "owner unknown");
+    std::fs::write(&ext_owner, owner_xml).unwrap();
+
+    let external = temp.path().join("external");
+    let external_module = borrowed_form_module(&external, "Заказ", "ФормаДокумента");
+    std::fs::create_dir_all(external_module.parent().unwrap()).unwrap();
+    std::fs::write(&external_module, "").unwrap();
+    std::fs::copy(
+        extension.join("Documents/Заказ/Forms/ФормаДокумента/Ext/Form.xml"),
+        external.join("Documents/Заказ/Forms/ФормаДокумента/Ext/Form.xml"),
+    )
+    .unwrap();
+    std::fs::copy(ext_owner, external.join("Documents/Заказ.xml")).unwrap();
+    let with_external = borrowed_form_db(
+        &[
+            (None, base.as_path(), RootKind::Base),
+            (Some("Расширение"), extension.as_path(), RootKind::Extension),
+            (
+                Some("АРМ"),
+                external.as_path(),
+                RootKind::External(bsl_metadata::ExternalObjectKind::DataProcessor),
+            ),
+        ],
+        &[external_module.clone(), base_module.clone(), ext_module.clone()],
+    );
+    assert_eq!(
+        *borrowed_form(&with_external, FileId(0)).unwrap(),
+        borrowed_form_local(&external_module),
+        "an external form stays local"
+    );
+    assert_eq!(
+        *borrowed_form(&with_external, FileId(1)).unwrap(),
+        borrowed_form_local(&base_module),
+        "the base form gains nothing from the extension"
+    );
+    assert_eq!(
+        borrowed_form_names(&borrowed_form(&with_external, FileId(2)).unwrap()),
+        ["Объект", "БазовыйРеквизитФормы"]
+    );
+}
+
+#[test]
+fn borrowed_form_keeps_common_forms_local_even_with_a_base_pair() {
+    let (_temp, base, extension) = borrowed_form_fixture_copy();
+    let mut modules = Vec::new();
+    for (root, owner, name) in
+        [(&extension, "Заказ", "БезПары"), (&base, "Заказ", "ФормаДокумента")]
+    {
+        let source = borrowed_form_module(root, owner, name);
+        let common = root.join("CommonForms/ОбщаяФорма/Ext/Form/Module.bsl");
+        std::fs::create_dir_all(common.parent().unwrap()).unwrap();
+        std::fs::copy(&source, &common).unwrap();
+        std::fs::copy(
+            source.parent().unwrap().parent().unwrap().join("Form.xml"),
+            common.parent().unwrap().parent().unwrap().join("Form.xml"),
+        )
+        .unwrap();
+        modules.push(common);
+    }
+    let db = borrowed_form_db(
+        &[(None, &base, RootKind::Base), (Some("Расширение"), &extension, RootKind::Extension)],
+        &modules,
+    );
+    let local = borrowed_form_local(&modules[0]);
+    assert_eq!(borrowed_form_names(&local), ["СвойРеквизитФормы"]);
+    assert_eq!(
+        borrowed_form_names(&borrowed_form(&db, FileId(1)).unwrap()),
+        ["Объект", "БазовыйРеквизитФормы"],
+        "the same-named base common form is readable and has distinct attributes"
+    );
+    assert_eq!(*borrowed_form(&db, FileId(0)).unwrap(), local);
+}
+
+#[test]
+fn borrowed_form_skips_an_ordinary_base_without_dialog() {
+    let (_temp, base, extension) = borrowed_form_fixture_copy();
+    let ext_module = borrowed_form_module(&extension, "Заказ", "ОбычнаяФорма");
+    let base_module = borrowed_form_module(&base, "Заказ", "ОбычнаяФорма");
+    std::fs::copy(
+        base.join("Documents/Заказ/Forms/ОбычнаяФорма/Ext/Form.xml"),
+        extension.join("Documents/Заказ/Forms/ОбычнаяФорма/Ext/Form.xml"),
+    )
+    .unwrap();
+    let ext_dialog = extension.join("Documents/Заказ/Forms/ОбычнаяФорма/Ext/Form.xml");
+    let dialog = std::fs::read_to_string(&ext_dialog).unwrap();
+    std::fs::write(
+        &ext_dialog,
+        dialog
+            .replace("БазовыйРеквизитФормы", "РасшРеквизитФормы")
+            .replace("<MainAttribute>true</MainAttribute>", ""),
+    )
+    .unwrap();
+    let roots = [
+        (None, base.as_path(), RootKind::Base),
+        (Some("Расширение"), extension.as_path(), RootKind::Extension),
+    ];
+
+    let control = borrowed_form_db(&roots, &[ext_module.clone(), base_module.clone()]);
+    assert_eq!(
+        borrowed_form_names(&borrowed_form(&control, FileId(0)).unwrap()),
+        ["Объект", "БазовыйРеквизитФормы", "РасшРеквизитФормы"],
+        "readable dialogs on both sides merge"
+    );
+
+    std::fs::remove_file(base.join("Documents/Заказ/Forms/ОбычнаяФорма/Ext/Form.xml")).unwrap();
+    let db = borrowed_form_db(&roots, &[ext_module.clone(), base_module]);
+    let base_form = borrowed_form(&db, FileId(1)).unwrap();
+    assert!(base_form.is_ordinary() && base_form.is_handler("ПередОткрытием"));
+    let merged = borrowed_form(&db, FileId(0)).unwrap();
+    assert_eq!(*merged, borrowed_form_local(&ext_module));
+    assert!(!merged.is_handler("ПередОткрытием"), "base default handlers do not leak");
+}
+
+#[test]
+fn borrowed_form_follows_a_base_dialog_change_on_disk() {
+    use bsl_types::intern::TypeKernelDb;
+    use hir::HirDatabase;
+
+    let (_temp, base, extension) = borrowed_form_fixture_copy();
+    let ext_module = borrowed_form_module(&extension, "Заказ", "ФормаДокумента");
+    let base_module = borrowed_form_module(&base, "Заказ", "ФормаДокумента");
+    let mut db = borrowed_form_db(
+        &[(None, &base, RootKind::Base), (Some("Расширение"), &extension, RootKind::Extension)],
+        &[ext_module.clone(), base_module],
+    );
+    db.set_file_text(
+        FileId(0),
+        "&НаКлиенте\nПроцедура Проверка()\n\tНовое = НовыйРеквизитФормы;\nКонецПроцедуры\n",
+    );
+
+    let before = borrowed_form(&db, FileId(0)).unwrap();
+    assert!(before.find_attribute("НовыйРеквизитФормы").is_none());
+    let _ = db.infer(FileId(0));
+
+    let base_dialog = base.join("Documents/Заказ/Forms/ФормаДокумента/Ext/Form.xml");
+    let added = r#"<Attribute name="НовыйРеквизитФормы" id="90"><Type><v8:Type>xs:decimal</v8:Type><v8:NumberQualifiers><v8:Digits>5</v8:Digits><v8:FractionDigits>0</v8:FractionDigits></v8:NumberQualifiers></Type></Attribute>
+  </Attributes>"#;
+    let changed =
+        std::fs::read_to_string(&base_dialog).unwrap().replacen("  </Attributes>", added, 1);
+    std::fs::write(&base_dialog, changed).unwrap();
+    db.bump_config_for_path(&base);
+
+    let after = borrowed_form(&db, FileId(0)).unwrap();
+    assert_eq!(
+        after.find_attribute("НовыйРеквизитФормы").map(|attr| &attr.attr_type),
+        Some(&bsl_metadata::AttributeType::Number { precision: 5, scale: 0 })
+    );
+    let ty = db.infer(FileId(0)).var_types.get("новое").copied().expect("variable typed");
+    assert!(
+        matches!(db.lookup_type(ty), bsl_types::kind::TypeKind::Number(..)),
+        "inference sees the new base attribute: {:?}",
+        db.lookup_type(ty)
+    );
+}
+
+#[test]
+fn borrowed_form_picks_up_a_base_dialog_that_appears_on_disk() {
+    let (_temp, base, extension) = borrowed_form_fixture_copy();
+    let ext_module = borrowed_form_module(&extension, "Заказ", "ФормаДокумента");
+    let base_module = borrowed_form_module(&base, "Заказ", "ФормаДокумента");
+    let base_dialog = base.join("Documents/Заказ/Forms/ФормаДокумента/Ext/Form.xml");
+    let dialog = std::fs::read_to_string(&base_dialog).unwrap();
+    std::fs::remove_file(&base_dialog).unwrap();
+    let mut db = borrowed_form_db(
+        &[(None, &base, RootKind::Base), (Some("Расширение"), &extension, RootKind::Extension)],
+        &[ext_module.clone(), base_module],
+    );
+    assert_eq!(*borrowed_form(&db, FileId(0)).unwrap(), borrowed_form_local(&ext_module));
+
+    std::fs::write(&base_dialog, dialog).unwrap();
+    db.bump_config_for_path(&base);
+    assert_eq!(
+        borrowed_form_names(&borrowed_form(&db, FileId(0)).unwrap()),
+        ["Объект", "БазовыйРеквизитФормы"],
+        "a bump of the base root alone must re-run the extension's form"
+    );
+}

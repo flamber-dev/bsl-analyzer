@@ -62,431 +62,310 @@ mod tests {
     use crate::DiagnosticCode;
     use expect_test::expect;
 
-    #[test]
-    fn test_missing_return_elseif_no_else() {
-        let code = r#"Функция РассчитатьСкидку(Знач КатегорияКлиента)
-    Если КатегорияКлиента = "VIP" Тогда
-        Возврат 0.15;
-    ИначеЕсли КатегорияКлиента = "Постоянный" Тогда
-        Возврат 0.10;
-    ИначеЕсли КатегорияКлиента = "Новый" Тогда
-        Возврат 0.05;
-    КонецЕсли;
-КонецФункции"#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        let count = diagnostics
-            .iter()
+    fn check(code: &str, expected: expect_test::Expect) {
+        let diagnostics: Vec<_> = check_hir_diagnostic(code)
+            .into_iter()
             .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
-            .count();
-
-        assert_eq!(count, 1, "Expected 1 diagnostic: fallthrough path has no return");
+            .collect();
+        expected.assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
-    fn test_no_diagnostic_explicit_undefined_return() {
-        let code = r#"Функция РассчитатьСкидку(Знач КатегорияКлиента)
-    Если КатегорияКлиента = "VIP" Тогда
-        Возврат 0.15;
-    ИначеЕсли КатегорияКлиента = "Постоянный" Тогда
-        Возврат 0.10;
-    ИначеЕсли КатегорияКлиента = "Новый" Тогда
-        Возврат 0.05;
-    КонецЕсли;
-    Возврат Неопределено;
-КонецФункции"#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        assert_eq!(
-            diagnostics
-                .iter()
-                .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
-                .count(),
-            0,
-            "Explicit return Неопределено should suppress diagnostic"
+    fn test_missing_return_elseif_no_else() {
+        let code = r#"Функция ТарифСтоянки(Знач ТипМашины)
+	Если ТипМашины = "Легковая" Тогда
+		Возврат 100;
+	ИначеЕсли ТипМашины = "Грузовая" Тогда
+		Возврат 300;
+	ИначеЕсли ТипМашины = "Мотоцикл" Тогда
+		Возврат 50;
+	КонецЕсли;
+КонецФункции
+"#;
+        check(
+            code,
+            expect![[r#"
+            AllFunctionPathMustHaveReturn @ 1:9..1:21
+              message: Не все пути выполнения функции возвращают значение
+              severity: Warning"#]],
         );
     }
 
     #[test]
+    fn test_no_diagnostic_explicit_undefined_return() {
+        let code = r#"Функция ТарифСтоянки(Знач ТипМашины)
+	Если ТипМашины = "Легковая" Тогда
+		Возврат 100;
+	ИначеЕсли ТипМашины = "Грузовая" Тогда
+		Возврат 300;
+	КонецЕсли;
+	Возврат Неопределено;
+КонецФункции
+"#;
+        check(code, expect![[r#""#]]);
+    }
+
+    #[test]
     fn test_missing_return_in_elseif_branch() {
-        let code = r#"Функция ОпределитьТариф(Знач Клиент)
-    Если Клиент.Премиум Тогда
-        Возврат "Максимальный";
-    ИначеЕсли Клиент.Льготный Тогда
-        ЗаписатьЛьготныйТарифВЖурнал(Клиент);
-    Иначе
-        Возврат "Базовый";
-    КонецЕсли;
-КонецФункции"#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        let count = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
-            .count();
-
-        assert_eq!(count, 1, "Expected 1 diagnostic: ElseIf branch missing return");
+        let code = r#"Функция МестоДляМашины(Знач Машина)
+	Если Машина.Электромобиль Тогда
+		Возврат "Зарядка";
+	ИначеЕсли Машина.Габаритная Тогда
+		ОтметитьНегабарит(Машина);
+	Иначе
+		Возврат "Общее";
+	КонецЕсли;
+КонецФункции
+"#;
+        check(
+            code,
+            expect![[r#"
+            AllFunctionPathMustHaveReturn @ 1:9..1:23
+              message: Не все пути выполнения функции возвращают значение
+              severity: Warning"#]],
+        );
     }
 
     #[test]
     fn test_foreach_loop_no_return_after_loop_emits_diagnostic() {
-        let code = r#"Функция ЦиклДляПроверки(Коллекция, Поиск)
-    Для Каждого Элемент Из Коллекция Цикл
-        Если Элемент = Поиск Тогда
-            Возврат 1;
-        КонецЕсли;
-    КонецЦикла;
-КонецФункции"#;
-
-        let count = check_hir_diagnostic(code)
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
-            .count();
-        assert_eq!(
-            count, 1,
-            "empty-collection path through ForEach reaches function end without Возврат"
+        // The empty-collection path through Для Каждого reaches the end without Возврат.
+        let code = r#"Функция НомерМеста(Места, Номер)
+	Для Каждого Место Из Места Цикл
+		Если Место.Номер = Номер Тогда
+			Возврат Место;
+		КонецЕсли;
+	КонецЦикла;
+КонецФункции
+"#;
+        check(
+            code,
+            expect![[r#"
+            AllFunctionPathMustHaveReturn @ 1:9..1:19
+              message: Не все пути выполнения функции возвращают значение
+              severity: Warning"#]],
         );
     }
 
     #[test]
     fn test_while_true_no_fallback_return_emits_diagnostic() {
-        let code = r#"Функция НайтиСледующееСовпадение(ТекущиеДанные)
-    Пока Истина Цикл
-        Если ТекущиеДанные = Неопределено Тогда
-            Возврат Неопределено;
-        КонецЕсли;
-        ТекущиеДанные = СледующийЭлемент(ТекущиеДанные);
-    КонецЦикла;
-КонецФункции"#;
-
-        let count = check_hir_diagnostic(code)
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
-            .count();
-        assert_eq!(
-            count, 1,
-            "without constant propagation, `Пока Истина` is treated as potentially-skippable"
+        // Without constant propagation `Пока Истина` is treated as a loop that may be skipped.
+        let code = r#"Функция ПервоеСвободное(Ярус)
+	Пока Истина Цикл
+		Если Ярус.Свободно() Тогда
+			Возврат Ярус;
+		КонецЕсли;
+		Ярус = Ярус.Следующий();
+	КонецЦикла;
+КонецФункции
+"#;
+        check(
+            code,
+            expect![[r#"
+            AllFunctionPathMustHaveReturn @ 1:9..1:24
+              message: Не все пути выполнения функции возвращают значение
+              severity: Warning"#]],
         );
     }
 
     #[test]
     fn test_while_with_break_and_return_after_loop() {
-        let code = r#"Функция ПроверкаПрерыванийИПродолжений()
-    А = 1;
-    Пока Выборка.Следующий() Цикл
-        Если РезультатыОтбора.Количество() >= МаксКоличествоВыбранных Тогда
-            Прервать;
-        КонецЕсли;
-        Б = 2;
-        С = 3
-    КонецЦикла;
-    Возврат 1;
-КонецФункции"#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        assert_eq!(
-            diagnostics
-                .iter()
-                .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
-                .count(),
-            0,
-            "Explicit return after loop should suppress diagnostic"
-        );
+        let code = r#"Функция ЗанятоМест(Камеры)
+	Занято = 0;
+	Пока Камеры.ЕстьКадр() Цикл
+		Если Занято >= 500 Тогда
+			Прервать;
+		КонецЕсли;
+		Занято = Занято + 1
+	КонецЦикла;
+	Возврат Занято;
+КонецФункции
+"#;
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_simple_missing_else() {
-        let code = r#"
-Функция Тест(Х)
-    Если Х > 0 Тогда
-        Возврат 1;
-    КонецЕсли;
+        let code = r#"Функция Скидка(Часы)
+	Если Часы > 24 Тогда
+		Возврат 10;
+	КонецЕсли;
 КонецФункции
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let missing_return_diags: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
-            .collect();
-
-        expect![[r#"
-            AllFunctionPathMustHaveReturn @ 2:9..2:13
+        check(
+            code,
+            expect![[r#"
+            AllFunctionPathMustHaveReturn @ 1:9..1:15
               message: Не все пути выполнения функции возвращают значение
-              severity: Warning"#]]
-        .assert_eq(&format_diags(code, &missing_return_diags));
+              severity: Warning"#]],
+        );
     }
 
     #[test]
     fn test_no_diagnostic_when_all_paths_return() {
-        let code = r#"
-Функция Тест(Х)
-    Если Х > 0 Тогда
-        Возврат 1;
-    ИначеЕсли Х < 0 Тогда
-        Возврат -1;
-    КонецЕсли;
-    Возврат 0; // Fallback return
+        let code = r#"Функция Знак(Баланс)
+	Если Баланс > 0 Тогда
+		Возврат 1;
+	ИначеЕсли Баланс < 0 Тогда
+		Возврат -1;
+	КонецЕсли;
+	Возврат 0;
 КонецФункции
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-
-        assert_eq!(
-            diagnostics
-                .iter()
-                .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
-                .count(),
-            0,
-            "No diagnostic when all paths return"
-        );
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_no_diagnostic_if_else_both_return() {
-        let code = r#"
-Функция НайтиНазначение(ТекущееНазначение)
-
-    Запрос = Новый Запрос;
-    Запрос.Текст =
-    "ВЫБРАТЬ
-    |    СпрНазначения.Ссылка КАК Назначение
-    |ИЗ
-    |    Справочник.Назначения КАК СпрНазначения
-    |ГДЕ
-    |    СпрНазначения.НазначениеНаПроверке = &НазначениеНаПроверке";
-
-    Запрос.УстановитьПараметр("НазначениеНаПроверке", ТекущееНазначение);
-    РезультатЗапроса = Запрос.Выполнить();
-
-    Выборка = РезультатЗапроса.Выбрать();
-
-    Если Выборка.Следующий() Тогда
-        Возврат Выборка.Назначение;
-    Иначе
-        Возврат Справочники.Назначения.ПустаяСсылка();
-    КонецЕсли;
-
+        let code = r#"Функция АбонементВладельца(Владелец)
+	Запрос = Новый Запрос(
+	"ВЫБРАТЬ Абонементы.Ссылка КАК Абонемент
+	|ИЗ Справочник.Абонементы КАК Абонементы
+	|ГДЕ Абонементы.Владелец = &Владелец");
+	Запрос.УстановитьПараметр("Владелец", Владелец);
+	Выборка = Запрос.Выполнить().Выбрать();
+	Если Выборка.Следующий() Тогда
+		Возврат Выборка.Абонемент;
+	Иначе
+		Возврат Справочники.Абонементы.ПустаяСсылка();
+	КонецЕсли;
 КонецФункции
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        assert_eq!(
-            diagnostics
-                .iter()
-                .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
-                .count(),
-            0,
-            "If/Else with Return in both branches should not trigger diagnostic"
-        );
-    }
-
-    #[test]
-    fn test_no_diagnostic_simple_if_else_both_return() {
-        let code = r#"
-Функция Тест(Х)
-    Если Х > 0 Тогда
-        Возврат 1;
-    Иначе
-        Возврат 0;
-    КонецЕсли;
-КонецФункции
-"#;
-        let diagnostics = check_hir_diagnostic(code);
-        assert_eq!(
-            diagnostics
-                .iter()
-                .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
-                .count(),
-            0,
-            "Simple if/else with both branches returning should not trigger"
-        );
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_no_diagnostic_preproc_both_branches_return() {
-        let code = r#"Функция F()
-    #Если Сервер Тогда
-        Возврат 1;
-    #Иначе
-        Возврат 2;
-    #КонецЕсли
-КонецФункции"#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        let count = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
-            .count();
-
-        assert_eq!(count, 0, "Expected 0 diagnostics: both preprocessor branches return");
+        let code = r#"Функция Источник()
+	#Если Сервер Тогда
+		Возврат "база";
+	#Иначе
+		Возврат "кэш";
+	#КонецЕсли
+КонецФункции
+"#;
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_missing_return_preproc_else_no_return() {
-        let code = r#"Функция F()
-    #Если Сервер Тогда
-        Возврат 1;
-    #Иначе
-        // no return
-    #КонецЕсли
-КонецФункции"#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        let count = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
-            .count();
-
-        assert_eq!(count, 1, "Expected 1 diagnostic: preprocessor else branch has no return");
+        let code = r#"Функция Источник()
+	#Если Сервер Тогда
+		Возврат "база";
+	#Иначе
+		Источник = "кэш";
+	#КонецЕсли
+КонецФункции
+"#;
+        check(
+            code,
+            expect![[r#"
+            AllFunctionPathMustHaveReturn @ 1:9..1:17
+              message: Не все пути выполнения функции возвращают значение
+              severity: Warning"#]],
+        );
     }
 
     #[test]
     fn test_missing_return_preproc_no_else() {
-        let code = r#"Функция F()
-    #Если Сервер Тогда
-        Возврат 1;
-    #КонецЕсли
-КонецФункции"#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        let count = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
-            .count();
-
-        assert_eq!(count, 1, "Expected 1 diagnostic: preprocessor condition can fall through");
+        let code = r#"Функция Источник()
+	#Если Сервер Тогда
+		Возврат "база";
+	#КонецЕсли
+КонецФункции
+"#;
+        check(
+            code,
+            expect![[r#"
+            AllFunctionPathMustHaveReturn @ 1:9..1:17
+              message: Не все пути выполнения функции возвращают значение
+              severity: Warning"#]],
+        );
     }
 
     #[test]
     fn test_no_diagnostic_preproc_nested_in_semantic_if() {
-        let code = r#"Функция F(Cond)
-    Если Cond Тогда
-        #Если Сервер Тогда
-            Возврат 1;
-        #Иначе
-            Возврат 2;
-        #КонецЕсли
-    Иначе
-        Возврат 3;
-    КонецЕсли
-КонецФункции"#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        let count = diagnostics
-            .iter()
-            .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
-            .count();
-
-        assert_eq!(
-            count, 0,
-            "Expected 0 diagnostics: all semantic and preprocessor branches return"
-        );
+        let code = r#"Функция Источник(Онлайн)
+	Если Онлайн Тогда
+		#Если Сервер Тогда
+			Возврат "база";
+		#Иначе
+			Возврат "кэш";
+		#КонецЕсли
+	Иначе
+		Возврат "файл";
+	КонецЕсли
+КонецФункции
+"#;
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_raise_counts_as_exit() {
-        let code = r#"
-Функция Тест()
-    ВызватьИсключение "Ошибка";
+        let code = r#"Функция ОбязательныйНомер(Номер)
+	Если ЗначениеЗаполнено(Номер) Тогда
+		Возврат Номер;
+	КонецЕсли;
+	ВызватьИсключение "Номер не задан";
 КонецФункции
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        assert_eq!(
-            diagnostics
-                .iter()
-                .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
-                .count(),
-            0,
-            "Raise should count as exit"
-        );
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_no_diagnostic_if_no_else_then_try_except_then_return() {
-        let code = r#"Функция Тест(Запрос)
-    Если Не Запрос.Свойство("code") Тогда
-        Возврат "error";
-    КонецЕсли;
-    Результат = Новый Структура;
-    Попытка
-        Результат.Вставить("success", Истина);
-    Исключение
-        Результат.Вставить("success", Ложь);
-    КонецПопытки;
-    Возврат Результат;
-КонецФункции"#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        assert_eq!(
-            diagnostics
-                .iter()
-                .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
-                .count(),
-            0,
-            "If (no Else) + TryExcept + Return at end should not trigger diagnostic"
-        );
+        let code = r#"Функция ОтветШлагбаума(Команда)
+	Если Не Команда.Свойство("Код") Тогда
+		Возврат "нет кода";
+	КонецЕсли;
+	Ответ = Новый Структура;
+	Попытка
+		Ответ.Вставить("Открыт", Шлагбаум.Открыть(Команда.Код));
+	Исключение
+		Ответ.Вставить("Открыт", Ложь);
+	КонецПопытки;
+	Возврат Ответ;
+КонецФункции
+"#;
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_no_diagnostic_if_then_try_except_both_return() {
-        let code = r#"Функция ИндексДняПоИмениКолонки(Знач ИмяКолонки)
-    Если НЕ СтрНачинаетсяС(ИмяКолонки, "ПланРаботДень") Тогда
-        Возврат -1;
-    КонецЕсли;
-    Попытка
-        Возврат Число(Сред(ИмяКолонки, СтрДлина("ПланРаботДень") + 1));
-    Исключение
-        Возврат -1;
-    КонецПопытки;
-КонецФункции"#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        assert_eq!(
-            diagnostics
-                .iter()
-                .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
-                .count(),
-            0,
-            "If + TryExcept where all branches return should not trigger diagnostic"
-        );
+        let code = r#"Функция НомерЯруса(Знач Метка)
+	Если Не СтрНачинаетсяС(Метка, "Ярус") Тогда
+		Возврат 0;
+	КонецЕсли;
+	Попытка
+		Возврат Число(Сред(Метка, 5));
+	Исключение
+		Возврат 0;
+	КонецПопытки;
+КонецФункции
+"#;
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_no_diagnostic_try_except_both_return() {
-        let code = r#"Функция Тест(Х)
-    Попытка
-        Возврат Х / 2;
-    Исключение
-        Возврат -1;
-    КонецПопытки;
-КонецФункции"#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        assert_eq!(
-            diagnostics
-                .iter()
-                .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
-                .count(),
-            0,
-            "TryExcept where both branches return should not trigger diagnostic"
-        );
+        let code = r#"Функция ДоляЗанятых(Занято, Всего)
+	Попытка
+		Возврат Занято / Всего;
+	Исключение
+		Возврат 0;
+	КонецПопытки;
+КонецФункции
+"#;
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_procedure_not_checked() {
-        let code = r#"
-Процедура Тест(Х)
-    Если Х > 0 Тогда
-        Возврат;
-    КонецЕсли;
+        let code = r#"Процедура ОткрытьШлагбаум(Номер)
+	Если Номер = "" Тогда
+		Возврат;
+	КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        assert_eq!(
-            diagnostics
-                .iter()
-                .filter(|d| d.code == DiagnosticCode::AllFunctionPathMustHaveReturn)
-                .count(),
-            0,
-            "Procedures should not be checked"
-        );
+        check(code, expect![[r#""#]]);
     }
 }

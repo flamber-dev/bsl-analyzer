@@ -143,158 +143,122 @@ mod tests {
     use crate::test_utils::{check_body_diagnostic_with_config, format_diags};
     use crate::{DiagnosticCode, DiagnosticsConfig};
     use expect_test::expect;
+
+    fn declared(languages: Option<&str>) -> DiagnosticsConfig {
+        let mut config = DiagnosticsConfig::default();
+        if let Some(languages) = languages {
+            config.parameters.insert(
+                DiagnosticCode::MultilingualStringUsingWithTemplate,
+                serde_json::json!({ "declaredLanguages": languages }),
+            );
+        }
+        config
+    }
+
+    fn snapshot(code: &str, config: DiagnosticsConfig, expected: expect_test::Expect) {
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
+        expected.assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    const MODULE: &str = r#"Процедура СообщитьОЗаказе(Заказ)
+	Подпись = НСтр("ru = 'Пекарня у дома';
+		|en = 'Corner bakery'");
+	Поле = СтрШаблон("%1 из %2", Заказ.Номер, Заказ.Дата);
+	Пусто = НСтр();
+	Произвольно = НСтр("просто текст без языка");
+	Сообщить(НСтр("ru = 'Готово'"));
+
+	Прямо = СтрШаблон(НСтр("ru = 'Заказ %1 испечён'"), Заказ.Номер);
+	Прямо = СтрШаблон(НСтр("en = 'Order %1 is baked'"), Заказ.Номер);
+
+	ЧерезПеременную = НСтр("ru = 'Остаток %1 шт.'");
+	Сообщить(СтрШаблон(ЧерезПеременную, Заказ.Остаток));
+
+	ЧерезПеременнуюEn = НСтр("en = 'Left %1 pcs.'");
+	Сообщить(СтрШаблон(ЧерезПеременнуюEn, Заказ.Остаток));
+
+	Формат = НСтр("ru = 'ЧДЦ=''2'''");
+	Курьер.Отправить(НСтр("ru = 'Адрес='"), Заказ.Адрес);
+КонецПроцедуры
+"#;
+
     #[test]
     fn test_only_ru() {
-        let code = r#"// Считаем, что в конфигурации два языка ru и en
-Процедура БезОшибок()
-
-    Приветствие = НСтр("ru='Привет, я простая строка';
-        |en='Hi, i'm a simple string'");
-
-    ПолеЗапроса = СтрШаблон("%1.%2 КАК %2", "Документ", "Автомобиль");
-
-КонецПроцедуры
-
-Функция СОшибками(Строка)
-
-    БезТекста = НСтр();
-    СНевернымФорматомСтроки = НСтр("Тут текст который не относиться к ниодному языку");
-
-    ТекстТолькоНаРусском = НСтр("ru='Привет, я простая строка''");
-    ТекстТолькоНаАнглийском = НСтр("en='Hi, i'm a simple string'");
-
-    СообщениеПользователю = СтрШаблон(НСтр("ru='В строке №%1 не заполнена номенклатура'"), Строка.Номер);
-    СообщениеПользователю = СтрШаблон(НСтр("en='In line №%1 nomenclature is not filled'"), Строка.Номер);
-
-    ТекстТолькоНаРусском2 = НСтр("ru='В строке №%1 не заполнена номенклатура'");
-    СообщениеПользователю = СтрШаблон(ТекстТолькоНаРусском2, Строка.Номер);
-
-    ТекстТолькоНаАнглийском2 = НСтр("en='In line №%1 nomenclature is not filled'");
-    СообщениеПользователю = СтрШаблон(ТекстТолькоНаАнглийском2, Строка.Номер);
-    Возврат КонструкторАдресов();
-
-    Порция = Сервис.Autocomplete(ИдентификаторАдресногоОбъекта, 0, НСтр("ru = 'ДОМ='"), 1, КодЯзыка, Метаданные.Имя);
-
-    ВычисляемоеПоле.Оформление.УстановитьЗначениеПараметра("Формат", НСтр("ru = 'ДФ=''д ММММ'''"));
-
-    Возврат НСтр("en=""You must specify the user's extension number to the PBX."";ru='Необходимо указать внутренний номер пользователя АТС.'");
-
-КонецФункции
-"#;
-        let config = DiagnosticsConfig::default();
-        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
-
-        expect![[r#"
-            MultilingualStringUsingWithTemplate @ 20:39..20:90
+        snapshot(
+            MODULE,
+            declared(None),
+            expect![[r#"
+            MultilingualStringUsingWithTemplate @ 10:20..10:52
               message: Добавьте строки для языков: [ru]
               severity: Major
-            MultilingualStringUsingWithTemplate @ 25:32..25:83
+            MultilingualStringUsingWithTemplate @ 15:22..15:49
               message: Добавьте строки для языков: [ru]
-              severity: Major"#]]
-        .assert_eq(&format_diags(code, &diagnostics));
+              severity: Major"#]],
+        );
     }
 
     #[test]
     fn test_ru_and_en() {
-        let code = r#"// Считаем, что в конфигурации два языка ru и en
-Процедура БезОшибок()
-
-    Приветствие = НСтр("ru='Привет, я простая строка';
-        |en='Hi, i'm a simple string'");
-
-    ПолеЗапроса = СтрШаблон("%1.%2 КАК %2", "Документ", "Автомобиль");
-
-КонецПроцедуры
-
-Функция СОшибками(Строка)
-
-    БезТекста = НСтр();
-    СНевернымФорматомСтроки = НСтр("Тут текст который не относиться к ниодному языку");
-
-    ТекстТолькоНаРусском = НСтр("ru='Привет, я простая строка''");
-    ТекстТолькоНаАнглийском = НСтр("en='Hi, i'm a simple string'");
-
-    СообщениеПользователю = СтрШаблон(НСтр("ru='В строке №%1 не заполнена номенклатура'"), Строка.Номер);
-    СообщениеПользователю = СтрШаблон(НСтр("en='In line №%1 nomenclature is not filled'"), Строка.Номер);
-
-    ТекстТолькоНаРусском2 = НСтр("ru='В строке №%1 не заполнена номенклатура'");
-    СообщениеПользователю = СтрШаблон(ТекстТолькоНаРусском2, Строка.Номер);
-
-    ТекстТолькоНаАнглийском2 = НСтр("en='In line №%1 nomenclature is not filled'");
-    СообщениеПользователю = СтрШаблон(ТекстТолькоНаАнглийском2, Строка.Номер);
-    Возврат КонструкторАдресов();
-
-    Порция = Сервис.Autocomplete(ИдентификаторАдресногоОбъекта, 0, НСтр("ru = 'ДОМ='"), 1, КодЯзыка, Метаданные.Имя);
-
-    ВычисляемоеПоле.Оформление.УстановитьЗначениеПараметра("Формат", НСтр("ru = 'ДФ=''д ММММ'''"));
-
-    Возврат НСтр("en=""You must specify the user's extension number to the PBX."";ru='Необходимо указать внутренний номер пользователя АТС.'");
-
-КонецФункции
-"#;
-        let mut config = DiagnosticsConfig::default();
-        config.parameters.insert(
-            DiagnosticCode::MultilingualStringUsingWithTemplate,
-            serde_json::json!({
-                "declaredLanguages": "ru,en"
-            }),
+        snapshot(
+            MODULE,
+            declared(Some("ru,en")),
+            expect![[r#"
+            MultilingualStringUsingWithTemplate @ 9:20..9:51
+              message: Добавьте строки для языков: [en]
+              severity: Major
+            MultilingualStringUsingWithTemplate @ 10:20..10:52
+              message: Добавьте строки для языков: [ru]
+              severity: Major
+            MultilingualStringUsingWithTemplate @ 12:20..12:49
+              message: Добавьте строки для языков: [en]
+              severity: Major
+            MultilingualStringUsingWithTemplate @ 15:22..15:49
+              message: Добавьте строки для языков: [ru]
+              severity: Major"#]],
         );
-
-        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
-
-        let snapshot = format_diags(code, &diagnostics);
-        expect![[r#"
-            MultilingualStringUsingWithTemplate @ 19:39..19:90
-              message: Добавьте строки для языков: [en]
-              severity: Major
-            MultilingualStringUsingWithTemplate @ 20:39..20:90
-              message: Добавьте строки для языков: [ru]
-              severity: Major
-            MultilingualStringUsingWithTemplate @ 22:29..22:80
-              message: Добавьте строки для языков: [en]
-              severity: Major
-            MultilingualStringUsingWithTemplate @ 25:32..25:83
-              message: Добавьте строки для языков: [ru]
-              severity: Major"#]]
-        .assert_eq(&snapshot);
     }
 
     #[test]
     fn test_no_error_when_all_languages_present() {
-        let code = r#"
-Процедура Тест()
-    Сообщение = СтрШаблон(НСтр("ru='Значение: %1'; en='Value: %1'"), Значение);
-КонецПроцедуры
+        let code = r#"Функция ПодписьКоробки(Коробка)
+	Возврат СтрШаблон(НСтр("ru = 'Коробка %1'; en = 'Box %1'"), Коробка.Номер);
+КонецФункции
 "#;
-        let mut config = DiagnosticsConfig::default();
-        config.parameters.insert(
-            DiagnosticCode::MultilingualStringUsingWithTemplate,
-            serde_json::json!({
-                "declaredLanguages": "ru,en"
-            }),
-        );
+        snapshot(code, declared(Some("ru,en")), expect![[r#""#]]);
+    }
 
-        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    #[test]
+    fn test_all_languages_with_escaped_quotes() {
+        let code = r#"Функция ПодписьКоробки(Коробка)
+	Возврат СтрШаблон(НСтр("en = ""Baker's box %1""; ru = 'Коробка пекаря %1'"), Коробка.Номер);
+КонецФункции
+"#;
+        snapshot(code, declared(Some("ru,en")), expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_empty_nstr_in_template() {
+        let code = r#"Функция ПодписьКоробки(Коробка)
+	Возврат СтрШаблон(НСтр(), Коробка.Номер);
+КонецФункции
+"#;
+        snapshot(
+            code,
+            declared(Some("ru,en")),
+            expect![[r#"
+            MultilingualStringUsingWithTemplate @ 2:20..2:26
+              message: Добавьте строки для языков: [en, ru]
+              severity: Major"#]],
+        );
     }
 
     #[test]
     fn test_nstr_outside_template_not_detected() {
-        let code = r#"
-Процедура Тест()
-    // This should NOT fire - NStr is not in StrTemplate
-    Текст = НСтр("ru='Привет'");
+        let code = r#"Процедура Приветствие()
+	Текст = НСтр("ru = 'Добро пожаловать'");
+	Сообщить(Текст);
 КонецПроцедуры
 "#;
-        let mut config = DiagnosticsConfig::default();
-        config.parameters.insert(
-            DiagnosticCode::MultilingualStringUsingWithTemplate,
-            serde_json::json!({
-                "declaredLanguages": "ru,en"
-            }),
-        );
-
-        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+        snapshot(code, declared(Some("ru,en")), expect![[r#""#]]);
     }
 }

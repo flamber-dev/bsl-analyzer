@@ -44,131 +44,114 @@ mod tests {
     use super::*;
     use crate::test_utils::check_diagnostics_snapshot_for;
     use expect_test::expect;
+
     #[test]
-    fn test_from_java_fixture() {
-        let code = r#"Процедура Проверка1()
-
-    Цвет  = Новый Цвет(255, 255, 255);
-    Рамка = Новый Рамка(ТипРамки);
-    Шрифт = Новый Шрифт();
-
+    fn test_style_items_and_other_constructors_are_silent() {
+        let code = r#"Процедура ОформитьПоле(Поле)
+	Поле.ЦветТекста = ЦветаСтиля.ЦветОсобогоТекста;
+	Поле.Шрифт = ШрифтыСтиля.ШрифтЗаголовка;
+	Параметры = Новый Структура("Цвет, Шрифт", Поле.ЦветТекста, Поле.Шрифт);
+	Отбор = Новый("Массив");
+	Текст = Новый ТекстовыйДокумент;
 КонецПроцедуры
-
-Color  = New Color(255, 255, 255);
-Border = New Border(BorderType);
-Font   = New Font();
-
-Шрифт2 = Новый("Шрифт");
-Рамка2 = Новый("Рамка", ТипРамки);
-Цвет2  = Новый("Цвет", 255, 255, 255);
-
-Запрос = Новый Запрос();
-НоваяСтруктура = Новый Структура("Рамка");
-Запрос = Новый Запрос(
-    "ВЫБРАТЬ
-    |   1 КАК Поле1,
-    |   2 КАК Поле2"
-);
-
-ХранилищеШрифт = Новый ХрадилищеДанных(Новый("Шрифт"));
-ХранилищеРамка = Новый ХрадилищеДанных(Новый("Рамка", ТипРамки));
-ХранилищеЦвет  = Новый ХрадилищеДанных(Новый("Цвет", 255, 255, 255));
-
-ХранилищеШрифт = Новый ХрадилищеДанных(Новый Шрифт());
-ХранилищеРамка = Новый ХрадилищеДанных(Новый Рамка(ТипРамки));
-ХранилищеЦвет  = Новый ХрадилищеДанных(Новый Цвет(255, 255, 255));"#;
+"#;
         check_diagnostics_snapshot_for(
             code,
             DiagnosticCode::StyleElementConstructors,
-            expect![[r#"
-                StyleElementConstructors @ 3:13..3:38
-                  message: Замените конструктор Цвет на получение элемента стиля
-                  severity: Error
-                StyleElementConstructors @ 4:13..4:34
-                  message: Замените конструктор Рамка на получение элемента стиля
-                  severity: Error
-                StyleElementConstructors @ 5:13..5:26
-                  message: Замените конструктор Шрифт на получение элемента стиля
-                  severity: Error
-                StyleElementConstructors @ 9:10..9:34
-                  message: Замените конструктор Color на получение элемента стиля
-                  severity: Error
-                StyleElementConstructors @ 10:10..10:32
-                  message: Замените конструктор Border на получение элемента стиля
-                  severity: Error
-                StyleElementConstructors @ 11:10..11:20
-                  message: Замените конструктор Font на получение элемента стиля
-                  severity: Error
-                StyleElementConstructors @ 13:10..13:24
-                  message: Замените конструктор Шрифт на получение элемента стиля
-                  severity: Error
-                StyleElementConstructors @ 14:10..14:34
-                  message: Замените конструктор Рамка на получение элемента стиля
-                  severity: Error
-                StyleElementConstructors @ 15:10..15:38
-                  message: Замените конструктор Цвет на получение элемента стиля
-                  severity: Error
-                StyleElementConstructors @ 25:40..25:54
-                  message: Замените конструктор Шрифт на получение элемента стиля
-                  severity: Error
-                StyleElementConstructors @ 26:40..26:64
-                  message: Замените конструктор Рамка на получение элемента стиля
-                  severity: Error
-                StyleElementConstructors @ 27:40..27:68
-                  message: Замените конструктор Цвет на получение элемента стиля
-                  severity: Error
-                StyleElementConstructors @ 29:40..29:53
-                  message: Замените конструктор Шрифт на получение элемента стиля
-                  severity: Error
-                StyleElementConstructors @ 30:40..30:61
-                  message: Замените конструктор Рамка на получение элемента стиля
-                  severity: Error
-                StyleElementConstructors @ 31:40..31:65
-                  message: Замените конструктор Цвет на получение элемента стиля
-                  severity: Error"#]],
+            expect![[r#""#]],
         );
     }
 
     #[test]
     fn test_direct_constructor_russian() {
-        let code = r#"Процедура Тест()
-    Цвет = Новый Цвет(255, 255, 255);
-КонецПроцедуры"#;
+        let code = r#"Процедура ОформитьПоле(Поле)
+	Поле.ЦветТекста = Новый Цвет(200, 30, 30);
+	Поле.Шрифт = Новый Шрифт(, 12, Истина);
+	Поле.Рамка = Новый Рамка(ТипРамкиЭлементаУправления.Одинарная, 1);
+КонецПроцедуры
+"#;
         check_diagnostics_snapshot_for(
             code,
             DiagnosticCode::StyleElementConstructors,
             expect![[r#"
-                StyleElementConstructors @ 2:12..2:37
+                StyleElementConstructors @ 2:20..2:43
                   message: Замените конструктор Цвет на получение элемента стиля
+                  severity: Error
+                StyleElementConstructors @ 3:15..3:40
+                  message: Замените конструктор Шрифт на получение элемента стиля
+                  severity: Error
+                StyleElementConstructors @ 4:15..4:67
+                  message: Замените конструктор Рамка на получение элемента стиля
                   severity: Error"#]],
         );
     }
 
     #[test]
     fn test_string_constructor_russian() {
-        let code = r#"Процедура Тест()
-    Шрифт = Новый("Шрифт");
-КонецПроцедуры"#;
+        let code = r#"ЦветПредупреждения = Новый("Цвет", 250, 180, 0);
+ШрифтПримечания = Новый("Шрифт", , 8);
+РамкаКарточки = Новый("Рамка", ТипРамкиЭлементаУправления.Двойная);
+"#;
         check_diagnostics_snapshot_for(
             code,
             DiagnosticCode::StyleElementConstructors,
             expect![[r#"
-                StyleElementConstructors @ 2:13..2:27
+                StyleElementConstructors @ 1:22..1:48
+                  message: Замените конструктор Цвет на получение элемента стиля
+                  severity: Error
+                StyleElementConstructors @ 2:19..2:38
                   message: Замените конструктор Шрифт на получение элемента стиля
+                  severity: Error
+                StyleElementConstructors @ 3:17..3:67
+                  message: Замените конструктор Рамка на получение элемента стиля
                   severity: Error"#]],
         );
     }
 
     #[test]
-    fn test_no_diagnostic_for_other_types() {
-        let code = r#"Процедура Тест()
-    Запрос = Новый Запрос();
-    Структура = Новый Структура("Рамка");
-КонецПроцедуры"#;
+    fn test_english_constructors() {
+        let code = r#"Procedure Decorate(Field)
+	Field.TextColor = New Color(10, 120, 60);
+	Field.Font = New Font(, 10);
+	Field.Border = New Border(ControlBorderType.Single);
+EndProcedure
+"#;
         check_diagnostics_snapshot_for(
             code,
             DiagnosticCode::StyleElementConstructors,
-            expect![[r#""#]],
+            expect![[r#"
+                StyleElementConstructors @ 2:20..2:42
+                  message: Замените конструктор Color на получение элемента стиля
+                  severity: Error
+                StyleElementConstructors @ 3:15..3:29
+                  message: Замените конструктор Font на получение элемента стиля
+                  severity: Error
+                StyleElementConstructors @ 4:17..4:53
+                  message: Замените конструктор Border на получение элемента стиля
+                  severity: Error"#]],
+        );
+    }
+
+    #[test]
+    fn test_nested_constructors() {
+        let code = r#"Настройки = Новый Соответствие;
+Настройки.Вставить("Акцент", Новый ХранилищеЗначения(Новый Цвет(0, 90, 160)));
+Настройки.Вставить("Подпись", Новый ХранилищеЗначения(Новый("Шрифт", , 9)));
+Настройки.Вставить("Окантовка", Новый("ХранилищеЗначения", Новый Рамка(ТипРамкиЭлементаУправления.Выпуклая)));
+"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::StyleElementConstructors,
+            expect![[r#"
+                StyleElementConstructors @ 2:54..2:76
+                  message: Замените конструктор Цвет на получение элемента стиля
+                  severity: Error
+                StyleElementConstructors @ 3:55..3:74
+                  message: Замените конструктор Шрифт на получение элемента стиля
+                  severity: Error
+                StyleElementConstructors @ 4:60..4:108
+                  message: Замените конструктор Рамка на получение элемента стиля
+                  severity: Error"#]],
         );
     }
 }

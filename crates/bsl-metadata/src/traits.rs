@@ -1,4 +1,4 @@
-use crate::enums::{ModuleType, ObjectBelonging, SupportVariant};
+use crate::enums::{ModuleType, ObjectBelonging};
 use std::any::Any;
 use uuid::Uuid;
 
@@ -10,8 +10,6 @@ pub trait MdObject: Any {
     fn comment(&self) -> Option<&str>;
 
     fn object_belonging(&self) -> ObjectBelonging;
-
-    fn support_variant(&self) -> SupportVariant;
 
     fn as_any(&self) -> &dyn Any;
 }

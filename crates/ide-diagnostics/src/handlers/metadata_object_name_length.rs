@@ -177,156 +177,151 @@ fn check_register(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{check_metadata_diagnostic, check_metadata_diagnostic_with_config};
     use crate::DiagnosticsConfig;
     use std::sync::Arc;
 
-    const LONG_NAME: &str =
-        "ОченьДлинноеИмяОбъектаКотороеВызываетПроблемыВРаботеАТакжеОшибкиВыгрузкиКонфигурации";
+    /// A metadata name of exactly `chars` characters.
+    fn name_of(chars: usize) -> String {
+        let stem = "ЖурналПриемкиТоваровНаРаспределительныйЦентр";
+        let stem_chars = stem.chars().count();
+        assert!(chars >= stem_chars);
+        format!("{stem}{}", "Я".repeat(chars - stem_chars))
+    }
 
-    fn make_metadata_with_common_module(module: bsl_metadata::CommonModule) -> ModuleMetadata {
+    fn at_threshold() -> String {
+        name_of(DEFAULT_MAX_LENGTH)
+    }
+
+    fn over_threshold() -> String {
+        name_of(DEFAULT_MAX_LENGTH + 1)
+    }
+
+    fn expected_message(name: &str, max: usize) -> String {
+        format!("Rename the metadata object `{name}` so that the name length is less than {max}")
+    }
+
+    fn base_metadata(module_type: bsl_metadata::ModuleType) -> ModuleMetadata {
         ModuleMetadata {
-            module_type: bsl_metadata::ModuleType::CommonModule,
+            module_type,
             execution_context: None,
+            common_module: None,
+            mdo: None,
+            register: None,
+            http_service: None,
+            web_service: None,
+            integration_service: None,
+            form: None,
+        }
+    }
+
+    fn common_module(name: &str) -> ModuleMetadata {
+        let module = bsl_metadata::CommonModule::builder().name(name).build();
+        ModuleMetadata {
             common_module: Some(Arc::new(module)),
-            mdo: None,
-            register: None,
-            http_service: None,
-            web_service: None,
-            integration_service: None,
-            form: None,
+            ..base_metadata(bsl_metadata::ModuleType::CommonModule)
         }
     }
 
-    fn make_metadata_with_mdo(mdo: bsl_metadata::MetadataObject) -> ModuleMetadata {
+    fn document(name: &str) -> ModuleMetadata {
+        let mdo = bsl_metadata::MetadataObject::new(bsl_metadata::MdoType::Document, name);
         ModuleMetadata {
-            module_type: bsl_metadata::ModuleType::ObjectModule,
-            execution_context: None,
-            common_module: None,
             mdo: Some(Arc::new(mdo)),
-            register: None,
-            http_service: None,
-            web_service: None,
-            integration_service: None,
-            form: None,
+            ..base_metadata(bsl_metadata::ModuleType::ObjectModule)
         }
     }
 
-    fn make_metadata_with_register(register: bsl_metadata::Register) -> ModuleMetadata {
+    fn accumulation_register(name: &str) -> ModuleMetadata {
+        let register = bsl_metadata::Register::builder()
+            .name(name)
+            .mdo_type(bsl_metadata::MdoType::AccumulationRegister)
+            .build();
         ModuleMetadata {
-            module_type: bsl_metadata::ModuleType::ManagerModule,
-            execution_context: None,
-            common_module: None,
-            mdo: None,
             register: Some(Arc::new(register)),
-            http_service: None,
-            web_service: None,
-            integration_service: None,
-            form: None,
+            ..base_metadata(bsl_metadata::ModuleType::ManagerModule)
         }
     }
 
-    fn default_config() -> DiagnosticsConfig {
-        DiagnosticsConfig::default()
+    fn messages(diagnostics: &[Diagnostic]) -> Vec<String> {
+        diagnostics.iter().map(|d| d.message.clone()).collect()
     }
 
     #[test]
-    fn test_common_module_long_name() {
-        let module = bsl_metadata::CommonModule::builder().name(LONG_NAME).build();
-
-        let metadata = make_metadata_with_common_module(module);
-        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
-
-        assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message.contains(LONG_NAME));
+    fn test_names_are_built_to_length() {
+        assert_eq!(at_threshold().chars().count(), 80);
+        assert_eq!(over_threshold().chars().count(), 81);
     }
 
     #[test]
     fn test_common_module_short_name() {
-        let module = bsl_metadata::CommonModule::builder().name("ОбщийМодуль").build();
+        let diagnostics =
+            check_metadata_diagnostic(common_module(&at_threshold()), "", from_metadata);
+        assert!(diagnostics.is_empty());
+    }
 
-        let metadata = make_metadata_with_common_module(module);
-        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
+    #[test]
+    fn test_common_module_long_name() {
+        let name = over_threshold();
+        let diagnostics = check_metadata_diagnostic(common_module(&name), "", from_metadata);
+        assert_eq!(messages(&diagnostics), [expected_message(&name, 80)]);
+        assert_eq!(diagnostics[0].range, syntax::MODULE_RANGE);
+    }
 
+    #[test]
+    fn test_metadata_object_short_name() {
+        let diagnostics = check_metadata_diagnostic(document(&at_threshold()), "", from_metadata);
         assert!(diagnostics.is_empty());
     }
 
     #[test]
     fn test_metadata_object_long_name() {
-        let mdo = bsl_metadata::MetadataObject::new(bsl_metadata::MdoType::Catalog, LONG_NAME);
-
-        let metadata = make_metadata_with_mdo(mdo);
-        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
-
-        assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message.contains(LONG_NAME));
-    }
-
-    #[test]
-    fn test_register_long_name() {
-        let register = bsl_metadata::Register::builder()
-            .name(LONG_NAME)
-            .mdo_type(bsl_metadata::MdoType::InformationRegister)
-            .build();
-
-        let metadata = make_metadata_with_register(register);
-        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
-
-        assert_eq!(diagnostics.len(), 1);
-        assert!(diagnostics[0].message.contains(LONG_NAME));
+        let name = over_threshold();
+        let diagnostics = check_metadata_diagnostic(document(&name), "", from_metadata);
+        assert_eq!(messages(&diagnostics), [expected_message(&name, 80)]);
     }
 
     #[test]
     fn test_register_short_name() {
-        let register = bsl_metadata::Register::builder()
-            .name("РегистрСведений")
-            .mdo_type(bsl_metadata::MdoType::InformationRegister)
-            .build();
-
-        let metadata = make_metadata_with_register(register);
-        let diagnostics = crate::test_utils::check_metadata_diagnostic(metadata, "", from_metadata);
-
+        let diagnostics =
+            check_metadata_diagnostic(accumulation_register(&at_threshold()), "", from_metadata);
         assert!(diagnostics.is_empty());
     }
 
     #[test]
+    fn test_register_long_name() {
+        let name = over_threshold();
+        let diagnostics =
+            check_metadata_diagnostic(accumulation_register(&name), "", from_metadata);
+        assert_eq!(messages(&diagnostics), [expected_message(&name, 80)]);
+    }
+
+    #[test]
     fn test_disabled_diagnostic() {
-        let module = bsl_metadata::CommonModule::builder().name(LONG_NAME).build();
-
-        let metadata = make_metadata_with_common_module(module);
-
         let mut config = DiagnosticsConfig::default();
         config.disabled.push(DiagnosticCode::MetadataObjectNameLength);
-
-        let diagnostics = crate::test_utils::check_metadata_diagnostic_with_config(
-            metadata,
+        let diagnostics = check_metadata_diagnostic_with_config(
+            common_module(&over_threshold()),
             "",
             config,
             from_metadata,
         );
-
         assert!(diagnostics.is_empty());
     }
 
     #[test]
     fn test_custom_max_length() {
-        let module = bsl_metadata::CommonModule::builder().name("ШортМодуль").build();
-
-        let metadata = make_metadata_with_common_module(module);
-
         let mut config = DiagnosticsConfig::default();
         config.parameters.insert(
             DiagnosticCode::MetadataObjectNameLength,
-            serde_json::json!({"maxMetadataObjectNameLength": 5}),
+            serde_json::json!({"maxMetadataObjectNameLength": 7}),
         );
-
-        let diagnostics = crate::test_utils::check_metadata_diagnostic_with_config(
-            metadata,
+        let diagnostics = check_metadata_diagnostic_with_config(
+            common_module("Приемка1"),
             "",
             config,
             from_metadata,
         );
-
-        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(messages(&diagnostics), [expected_message("Приемка1", 7)]);
     }
 
     #[test]
@@ -336,38 +331,42 @@ mod tests {
         assert!(has_modules(&MdoType::Catalog));
         assert!(has_modules(&MdoType::Document));
         assert!(has_modules(&MdoType::BusinessProcess));
+        assert!(has_modules(&MdoType::Task));
+        assert!(has_modules(&MdoType::ChartOfAccounts));
+        assert!(has_modules(&MdoType::ChartOfCharacteristicTypes));
 
-        assert!(!has_modules(&MdoType::Enum));
         assert!(!has_modules(&MdoType::Constant));
+        assert!(!has_modules(&MdoType::Enum));
+        assert!(!has_modules(&MdoType::AccumulationRegister));
         assert!(!has_modules(&MdoType::InformationRegister));
-    }
-
-    #[test]
-    fn test_long_name_is_84_chars() {
-        assert_eq!(LONG_NAME.chars().count(), 84);
     }
 
     #[test]
     fn test_session_module_checks_no_module_objects() {
         use ide_db::RootDatabaseImpl;
-        let mut bsl_config = bsl_metadata::Configuration::new("TestConfig");
+        let mut configuration = bsl_metadata::Configuration::new("Склад");
 
-        let catalog = bsl_metadata::MetadataObject::new(bsl_metadata::MdoType::Catalog, LONG_NAME);
-        bsl_config.add_metadata_object(catalog);
-
-        let constant =
-            bsl_metadata::MetadataObject::new(bsl_metadata::MdoType::Constant, LONG_NAME);
-        bsl_config.add_metadata_object(constant);
+        let with_modules = over_threshold();
+        configuration.add_metadata_object(bsl_metadata::MetadataObject::new(
+            bsl_metadata::MdoType::Document,
+            &with_modules,
+        ));
+        let without_modules = format!("{}Ц", at_threshold());
+        configuration.add_metadata_object(bsl_metadata::MetadataObject::new(
+            bsl_metadata::MdoType::Enum,
+            &without_modules,
+        ));
+        configuration.add_metadata_object(bsl_metadata::MetadataObject::new(
+            bsl_metadata::MdoType::Constant,
+            at_threshold(),
+        ));
 
         let db = RootDatabaseImpl::new();
-        let file_id = vfs::FileId(0);
-        let diagnostics_config = default_config();
-
+        let config = DiagnosticsConfig::default();
         let provider = ide_db::SalsaProvider::new(&db, None);
-        let ctx = crate::DiagnosticsContext::new(&diagnostics_config, file_id, &provider);
+        let ctx = crate::DiagnosticsContext::new(&config, vfs::FileId(0), &provider);
 
-        let diagnostics = check_session_module(&bsl_config, &ctx);
-
-        assert_eq!(diagnostics.len(), 1);
+        let diagnostics = check_session_module(&configuration, &ctx);
+        assert_eq!(messages(&diagnostics), [expected_message(&without_modules, 80)]);
     }
 }

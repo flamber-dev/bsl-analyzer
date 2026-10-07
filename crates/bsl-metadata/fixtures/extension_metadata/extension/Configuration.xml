@@ -8,6 +8,7 @@
     </Properties>
     <ChildObjects>
       <Document>Заказ</Document>
+      <Document>Локальный</Document>
       <CommonModule>Сервер</CommonModule>
       <CommonModule>СерверЗапросов</CommonModule>
       <CommonModule>СерверСеанса</CommonModule>

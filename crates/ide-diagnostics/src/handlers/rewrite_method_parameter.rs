@@ -493,283 +493,269 @@ fn expr_uses_binding(body: &hir::Body, expr_id: ExprId, binding_id: BindingId) -
 
 #[cfg(test)]
 mod tests {
-    use crate::test_utils::{check_diagnostics_snapshot_for, format_diags};
+    use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
     use expect_test::expect;
 
+    fn check(code: &str, expected: expect_test::Expect) {
+        check_diagnostics_snapshot_for(code, DiagnosticCode::RewriteMethodParameter, expected);
+    }
+
+    #[test]
+    fn test_read_before_write_is_silent() {
+        let code = r#"Процедура Установить(Знач Уставка)
+	Журнал.Добавить(Уставка);
+	Уставка = 21;
+КонецПроцедуры
+"#;
+        check(code, expect![[r#""#]]);
+    }
+
     #[test]
     fn test_simple_overwrite() {
-        let code = r#"Процедура Тест1(Знач Парам1)
-    Парам1 = 10; // ошибка
-КонецПроцедуры"#;
-
-        check_diagnostics_snapshot_for(
+        let code = r#"Процедура Установить(Знач Уставка)
+	Уставка = 21;
+КонецПроцедуры
+"#;
+        check(
             code,
-            DiagnosticCode::RewriteMethodParameter,
             expect![[r#"
-            RewriteMethodParameter @ 2:5..2:11
-              message: Переприсваивание параметра метода 'Парам1'
+            RewriteMethodParameter @ 2:2..2:9
+              message: Переприсваивание параметра метода 'Уставка'
               severity: Warning"#]],
         );
     }
 
     #[test]
     fn test_no_diagnostic_for_by_ref() {
-        let code = r#"Процедура Тест2(Парам21, Знач Парам22)
-    Парам21 = 10; // не ошибка - by-ref параметр
-КонецПроцедуры"#;
+        let code = r#"Процедура Установить(Уставка, Знач Режим)
+	Уставка = 21;
+КонецПроцедуры
+"#;
+        check(code, expect![[r#""#]]);
+    }
 
-        check_diagnostics_snapshot_for(
+    #[test]
+    fn test_default_parameter_overwrite() {
+        let code = r#"Процедура Установить(Знач Уставка = 20, Знач Гистерезис = 1)
+	Уставка = 22;
+КонецПроцедуры
+"#;
+        check(
             code,
-            DiagnosticCode::RewriteMethodParameter,
-            expect![[r#""#]],
+            expect![[r#"
+            RewriteMethodParameter @ 2:2..2:9
+              message: Переприсваивание параметра метода 'Уставка'
+              severity: Warning"#]],
         );
     }
 
     #[test]
     fn test_self_assign_no_diagnostic() {
-        let code = r#"Процедура Тест4(Знач Парам41)
-    Парам41 = Парам41; // не ошибка - self-assign
-КонецПроцедуры"#;
+        let code = r#"Процедура Установить(Знач Уставка)
+	Уставка = Уставка;
+КонецПроцедуры
+"#;
+        check(code, expect![[r#""#]]);
+    }
 
-        check_diagnostics_snapshot_for(
+    #[test]
+    fn test_self_assign_does_not_count_as_use() {
+        // Self-assignments are skipped; the overwrite after them is the first real use.
+        let code = r#"Процедура Установить(Знач Уставка, Знач Режим)
+	Уставка = Уставка;
+	Уставка = 21;
+	Режим = Режим;
+	Режим = Режим;
+	Режим = "Авто";
+КонецПроцедуры
+"#;
+        check(
             code,
-            DiagnosticCode::RewriteMethodParameter,
-            expect![[r#""#]],
+            expect![[r#"
+            RewriteMethodParameter @ 3:2..3:9
+              message: Переприсваивание параметра метода 'Уставка'
+              severity: Warning
+            RewriteMethodParameter @ 6:2..6:7
+              message: Переприсваивание параметра метода 'Режим'
+              severity: Warning"#]],
         );
     }
 
     #[test]
     fn test_used_in_expression_no_diagnostic() {
-        let code = r#"Процедура Тест5(Знач Парам51)
-    Парам51 = Метод(Парам51); // не ошибка - используется в RHS
-КонецПроцедуры"#;
+        let code = r#"Процедура Установить(Знач Уставка, Знач Поправка, Знач Датчик)
+	Уставка = Округлить(Уставка);
+	Поправка = 0.5 * Поправка;
+	Датчик = Датчик.Резервный;
+КонецПроцедуры
+"#;
+        check(code, expect![[r#""#]]);
+    }
 
-        check_diagnostics_snapshot_for(
+    #[test]
+    fn test_member_writes_and_reads_are_uses() {
+        // Writing or reading a member of the parameter uses its value, so the later overwrite is silent.
+        let code = r#"Процедура Настроить(Знач Котел, Знач Насос)
+	Котел.Мощность = 10;
+	Насос.Обороты = Насос.Минимум;
+	Насос = Неопределено;
+КонецПроцедуры
+"#;
+        check(code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_overwrite_then_read_is_flagged() {
+        let code = r#"Процедура Установить(Знач Уставка)
+	Уставка = 21;
+	Термостат.Применить(Уставка);
+КонецПроцедуры
+"#;
+        check(
             code,
-            DiagnosticCode::RewriteMethodParameter,
-            expect![[r#""#]],
+            expect![[r#"
+            RewriteMethodParameter @ 2:2..2:9
+              message: Переприсваивание параметра метода 'Уставка'
+              severity: Warning"#]],
         );
+    }
+
+    #[test]
+    fn test_parameter_never_written() {
+        let code = r#"Функция Нагреть(Знач Уставка)
+	Текущая = Термостат.Температура;
+	Возврат Уставка - Текущая;
+КонецФункции
+"#;
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_default_guard_idiom_no_diagnostic() {
-        let code = r#"Процедура Тест(Знач Вариант = Неопределено)
-    Если Вариант = Неопределено Тогда
-        Вариант = ТекущаяДатаСеанса(); // не ошибка - вычисление дефолта
-    КонецЕсли;
-КонецПроцедуры"#;
-
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::RewriteMethodParameter,
-            expect![[r#""#]],
-        );
+        let code = r#"Процедура Запланировать(Знач Момент = Неопределено)
+	Если Момент = Неопределено Тогда
+		Момент = ТекущаяДатаСеанса();
+	КонецЕсли;
+КонецПроцедуры
+"#;
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_read_inside_call_in_condition_no_diagnostic() {
-        let code = r#"Функция Тест(Знач Значение)
-    Если Не ЗначениеЗаполнено(Значение) Тогда
-        Значение = ТекущаяДатаСеанса(); // не ошибка - прочитан в ЗначениеЗаполнено
-    КонецЕсли;
-    Возврат Значение;
-КонецФункции"#;
-
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::RewriteMethodParameter,
-            expect![[r#""#]],
-        );
+        let code = r#"Функция Расписание(Знач График)
+	Если Не ЗначениеЗаполнено(График) Тогда
+		График = Новый Массив;
+	КонецЕсли;
+	Возврат График;
+КонецФункции
+"#;
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_read_with_cyrillic_case_mismatch_no_diagnostic() {
-        // Объявление и использование различаются регистром кириллицы (н/Н):
-        // BSL регистронезависим, чтение в условии должно подавлять диагностику.
-        let code = r#"Функция Тест(Знач КодИнсп = Неопределено)
-    Если КодИНСП = Неопределено ИЛИ ПустаяСтрока(КодИНСП) Тогда
-        КодИНСП = "0000";
-    КонецЕсли;
-    Возврат КодИнсп;
-КонецФункции"#;
-
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::RewriteMethodParameter,
-            expect![[r#""#]],
-        );
+        // Declaration and uses differ by Cyrillic case; BSL names are case-insensitive.
+        let code = r#"Функция Зона(Знач КодЗоны = Неопределено)
+	Если КОДЗОНЫ = Неопределено ИЛИ ПустаяСтрока(кодзоны) Тогда
+		КОДЗОНЫ = "Холл";
+	КонецЕсли;
+	Возврат КодЗоны;
+КонецФункции
+"#;
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_read_in_elsif_condition_no_diagnostic() {
-        let code = r#"Процедура Тест(Знач Режим)
-    Если Ложь Тогда
-        Возврат;
-    ИначеЕсли Режим = "А" Тогда
-        Режим = "Б"; // не ошибка - прочитан в условии ИначеЕсли
-    КонецЕсли;
-КонецПроцедуры"#;
-
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::RewriteMethodParameter,
-            expect![[r#""#]],
-        );
+        let code = r#"Процедура Переключить(Знач Режим)
+	Если Термостат.Выключен Тогда
+		Возврат;
+	ИначеЕсли Режим = "Эко" Тогда
+		Режим = "Комфорт";
+	КонецЕсли;
+КонецПроцедуры
+"#;
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_read_in_sibling_branch_does_not_suppress() {
-        // Чтение параметра в ветке Тогда взаимоисключающе с перезаписью в
-        // ветке ИначеЕсли — оно не должно подавлять диагностику.
-        let code = r#"Процедура Тест(Знач Парам)
-    Если Условие1 Тогда
-        Значение = Парам; // другая ветка исполнения
-    ИначеЕсли Условие2 Тогда
-        Парам = 10; // ошибка - на этом пути Парам не прочитан
-    КонецЕсли;
-КонецПроцедуры"#;
-
-        check_diagnostics_snapshot_for(
+        // The read in Тогда is mutually exclusive with the overwrite in ИначеЕсли.
+        let code = r#"Процедура Переключить(Знач Режим)
+	Если Термостат.Ручной Тогда
+		Термостат.Режим = Режим;
+	ИначеЕсли Термостат.Ночь Тогда
+		Режим = "Ночь";
+	КонецЕсли;
+КонецПроцедуры
+"#;
+        check(
             code,
-            DiagnosticCode::RewriteMethodParameter,
             expect![[r#"
-            RewriteMethodParameter @ 5:9..5:14
-              message: Переприсваивание параметра метода 'Парам'
+            RewriteMethodParameter @ 5:3..5:8
+              message: Переприсваивание параметра метода 'Режим'
               severity: Warning"#]],
         );
     }
 
     #[test]
     fn test_read_in_preceding_sibling_if_suppresses() {
-        // Если весь оператор Если предшествует перезаписи (перезапись — следующий
-        // оператор), чтение в любой его ветке считается использованием до записи.
-        let code = r#"Процедура Тест(Знач Парам)
-    Если Условие Тогда
-        Значение = Парам;
-    КонецЕсли;
-    Парам = 10; // не ошибка - Парам прочитан в предшествующем Если
-КонецПроцедуры"#;
-
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::RewriteMethodParameter,
-            expect![[r#""#]],
-        );
+        // A read anywhere in a whole Если that precedes the overwrite counts as a use.
+        let code = r#"Процедура Переключить(Знач Режим)
+	Если Термостат.Ручной Тогда
+		Термостат.Режим = Режим;
+	КонецЕсли;
+	Режим = "Авто";
+КонецПроцедуры
+"#;
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_rewrite_after_unrelated_guard_is_flagged() {
-        let code = r#"Процедура Тест(Знач Парам)
-    Если Истина Тогда
-        Парам = 10; // ошибка - параметр нигде не прочитан до перезаписи
-    КонецЕсли;
-КонецПроцедуры"#;
-
-        check_diagnostics_snapshot_for(
+        let code = r#"Процедура Переключить(Знач Режим)
+	Если Термостат.Ночь Тогда
+		Режим = "Ночь";
+	КонецЕсли;
+КонецПроцедуры
+"#;
+        check(
             code,
-            DiagnosticCode::RewriteMethodParameter,
             expect![[r#"
-            RewriteMethodParameter @ 3:9..3:14
-              message: Переприсваивание параметра метода 'Парам'
+            RewriteMethodParameter @ 3:3..3:8
+              message: Переприсваивание параметра метода 'Режим'
               severity: Warning"#]],
         );
     }
 
     #[test]
-    fn test_java_fixture_all_16_cases() {
-        let code = r#"Процедура Тест1(Знач Парам1)
-    Парам1 = 10; // ошибка
+    fn test_several_methods_in_one_module() {
+        // Each method is analysed on its own: overwrites in the first and the last are
+        // reported, the read-first method between them is not.
+        let code = r#"Процедура Первая(Знач Уставка)
+	Уставка = 21;
 КонецПроцедуры
 
-Процедура Тест2(Парам21, Знач Парам22)
-    Парам21 = 10; // не ошибка
-КонецПроцедуры
+Функция Вторая(Знач Уставка)
+	Возврат Уставка + 1;
+КонецФункции
 
-Процедура Тест3(Знач Парам31 = 1, Знач Парам32 = 2 )
-    Парам31 = 3; // ошибка
+Процедура Третья(Знач Режим, Знач Уставка)
+	Режим = "Авто";
+	Уставка = Уставка;
 КонецПроцедуры
-
-Процедура Тест4(Знач Парам41)
-    Парам41 = Парам41; // не ошибка
-КонецПроцедуры
-
-Процедура Тест5(Знач Парам51)
-    Парам51 = Метод(Парам51); // не ошибка
-КонецПроцедуры
-
-Процедура Тест6(Знач Парам61)
-    Парам61 = Парам61;
-    Парам61 = 12; // ошибка
-КонецПроцедуры
-
-Процедура Тест7(Знач Парам71)
-    Парам71 = Парам71;
-    Парам71 = Парам71;
-    Парам71 = Парам71;
-    Парам71 = 12; // ошибка
-КонецПроцедуры
-
-Процедура Тест8(Знач Парам81) // для покрытия
-    ЛокальнаяПеременная = 10;
-КонецПроцедуры
-
-Процедура Тест9(Знач Парам91)
-    Парам91 = 12; // ошибка
-    Значение = Парам91;
-КонецПроцедуры
-
-Процедура Тест10(Знач Парам101)
-    Значение = Парам101; // не ошибка
-КонецПроцедуры
-
-Процедура Тест11(Знач Парам111)
-    Парам111 = Парам111.Реквизит; // не ошибка
-КонецПроцедуры
-
-Процедура Тест12(Знач Парам121)
-    Парам121 = Парам121 + Выражение; // не ошибка
-КонецПроцедуры
-
-Процедура Тест13(Знач Парам131)
-    Парам131 = 1 + Парам131; // не ошибка
-    Возврат Парам131;
-КонецПроцедуры
-
-Процедура Тест14(Знач Парам141)
-    Парам141.Значение = 10; // не ошибка
-КонецПроцедуры
-
-Процедура Тест15(Знач Парам151)
-    Парам151.Значение1 = Парам151.Значение2; // не ошибка
-    Парам151 = 10; // не ошибка
-КонецПроцедуры
-
-Процедура Тест16(Знач Парам161)
-    Парам161.Значение = Парам161; // не ошибка
-    Парам161 = 10; // не ошибка
-КонецПроцедуры"#;
-        let diagnostics = crate::test_utils::check_hir_diagnostic(code);
-        let rewrite_diags = diagnostics
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::RewriteMethodParameter)
-            .collect::<Vec<_>>();
-        expect![[r#"
-            RewriteMethodParameter @ 2:5..2:11
-              message: Переприсваивание параметра метода 'Парам1'
+"#;
+        check(
+            code,
+            expect![[r#"
+            RewriteMethodParameter @ 2:2..2:9
+              message: Переприсваивание параметра метода 'Уставка'
               severity: Warning
-            RewriteMethodParameter @ 10:5..10:12
-              message: Переприсваивание параметра метода 'Парам31'
-              severity: Warning
-            RewriteMethodParameter @ 23:5..23:12
-              message: Переприсваивание параметра метода 'Парам61'
-              severity: Warning
-            RewriteMethodParameter @ 30:5..30:12
-              message: Переприсваивание параметра метода 'Парам71'
-              severity: Warning
-            RewriteMethodParameter @ 38:5..38:12
-              message: Переприсваивание параметра метода 'Парам91'
-              severity: Warning"#]]
-        .assert_eq(&format_diags(code, &rewrite_diags));
+            RewriteMethodParameter @ 10:2..10:7
+              message: Переприсваивание параметра метода 'Режим'
+              severity: Warning"#]],
+        );
     }
 }

@@ -17,7 +17,7 @@ impl LoweringContext<'_> {
             crate::source_map::TokenCategory::ClauseKeyword,
         );
 
-        self.collect_or_tokens_excluding_subqueries(where_clause.syntax());
+        self.report_or_in_where(where_clause.syntax());
 
         let expr_node = where_clause.syntax().children().find(|n| {
             matches!(
@@ -310,25 +310,23 @@ impl LoweringContext<'_> {
         }
     }
 
-    fn collect_or_tokens_excluding_subqueries(&mut self, node: &syntax::SyntaxNode) {
-        for child in node.children_with_tokens() {
-            match child {
-                syntax::NodeOrToken::Token(token) => {
-                    if token.kind() == syntax::SyntaxKind::KW_OR {
-                        self.diagnostics
-                            .push(SdblDiagnostic::LogicalOrInWhere { range: token.text_range() });
-                    }
+    /// Reports every disjunction of this query's selection condition.
+    ///
+    /// Nested queries are skipped: each of them is lowered as a query of its own and reports
+    /// its own condition, so descending here would report the same keyword twice.
+    fn report_or_in_where(&mut self, where_clause: &syntax::SyntaxNode) {
+        let mut walk = where_clause.preorder_with_tokens();
+        while let Some(event) = walk.next() {
+            let syntax::WalkEvent::Enter(element) = event else {
+                continue;
+            };
+            match element {
+                syntax::NodeOrToken::Node(node) if is_nested_query(&node) => walk.skip_subtree(),
+                syntax::NodeOrToken::Token(token) if token.kind() == syntax::SyntaxKind::KW_OR => {
+                    self.diagnostics
+                        .push(SdblDiagnostic::LogicalOrInWhere { range: token.text_range() });
                 }
-                syntax::NodeOrToken::Node(child_node) => {
-                    if !matches!(
-                        child_node.kind(),
-                        syntax::SyntaxKind::SDBL_SUBQUERY
-                            | syntax::SyntaxKind::SDBL_SUBQUERY_EXPR
-                            | syntax::SyntaxKind::SDBL_SELECT_QUERY
-                    ) {
-                        self.collect_or_tokens_excluding_subqueries(&child_node);
-                    }
-                }
+                _ => {}
             }
         }
     }
@@ -382,4 +380,13 @@ fn simple_selected_output_ref<'a>(
     })?;
 
     Some((column_ref, matched_field))
+}
+
+fn is_nested_query(node: &syntax::SyntaxNode) -> bool {
+    matches!(
+        node.kind(),
+        syntax::SyntaxKind::SDBL_SUBQUERY
+            | syntax::SyntaxKind::SDBL_SUBQUERY_EXPR
+            | syntax::SyntaxKind::SDBL_QUERY
+    )
 }

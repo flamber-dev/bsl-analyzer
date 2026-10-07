@@ -104,18 +104,40 @@ mod tests {
     use crate::DiagnosticCode;
     use expect_test::expect;
 
+    fn check(code: &str, expected: expect_test::Expect) {
+        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expected);
+    }
+
+    /// A bank-upload procedure whose `Исключение` branch holds `handler`.
+    fn in_except(handler: &str) -> String {
+        format!(
+            "Процедура ВыгрузитьВБанк(Пакет, Ссылка)\n\tПопытка\n\t\tПакет.Отправить();\n\tИсключение\n{handler}\tКонецПопытки;\nКонецПроцедуры\n"
+        )
+    }
+
+    // ── Обязательные параметры ─────────────────────────────────────────────
+
     #[test]
-    fn test_wrong_number_params() {
-        let code = r#"
-Процедура Тест()
-    ЗаписьЖурналаРегистрации("Событие");
+    fn test_correct_usage_outside_except() {
+        let code = r#"Процедура ЗаписатьОтказБанка(Ответ)
+	ЗаписьЖурналаРегистрации("Банк.Выгрузка",
+		УровеньЖурналаРегистрации.Предупреждение, , Ответ,
+		Ответ.Текст);
 КонецПроцедуры
 "#;
-        check_diagnostics_snapshot_for(
+        check(code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_wrong_number_params() {
+        let code = r#"Процедура ЗаписатьОтказБанка(Ответ)
+	ЗаписьЖурналаРегистрации("Банк.Выгрузка");
+КонецПроцедуры
+"#;
+        check(
             code,
-            DiagnosticCode::UsageWriteLogEvent,
             expect![[r#"
-            UsageWriteLogEvent @ 3:5..3:40
+            UsageWriteLogEvent @ 2:2..2:43
               message: Неверное число параметров метода
               severity: Hint"#]],
         );
@@ -123,16 +145,14 @@ mod tests {
 
     #[test]
     fn test_two_params_wrong_count() {
-        let code = r#"
-Процедура Тест()
-    ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка);
+        let code = r#"Процедура ЗаписатьОтказБанка(Ответ)
+	ЗаписьЖурналаРегистрации("Банк.Выгрузка", УровеньЖурналаРегистрации.Предупреждение);
 КонецПроцедуры
 "#;
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::UsageWriteLogEvent,
             expect![[r#"
-            UsageWriteLogEvent @ 3:5..3:74
+            UsageWriteLogEvent @ 2:2..2:85
               message: Неверное число параметров метода
               severity: Hint"#]],
         );
@@ -140,16 +160,14 @@ mod tests {
 
     #[test]
     fn test_four_params_wrong_count() {
-        let code = r#"
-Процедура Тест()
-    ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка, , );
+        let code = r#"Процедура ЗаписатьОтказБанка(Ответ)
+	ЗаписьЖурналаРегистрации("Банк.Выгрузка", УровеньЖурналаРегистрации.Предупреждение, , Ответ);
 КонецПроцедуры
 "#;
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::UsageWriteLogEvent,
             expect![[r#"
-            UsageWriteLogEvent @ 3:5..3:78
+            UsageWriteLogEvent @ 2:2..2:94
               message: Неверное число параметров метода
               severity: Hint"#]],
         );
@@ -157,18 +175,16 @@ mod tests {
 
     #[test]
     fn test_no_second_parameter() {
-        let code = r#"
-Процедура Тест()
-    ЗаписьЖурналаРегистрации("Событие",
-      ,
-      , , ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
+        let code = r#"Процедура ЗаписатьОтказБанка(Ответ)
+	ЗаписьЖурналаРегистрации("Банк.Выгрузка",
+		,
+		, Ответ, Ответ.Текст);
 КонецПроцедуры
 "#;
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::UsageWriteLogEvent,
             expect![[r#"
-            UsageWriteLogEvent @ 3:5..5:62
+            UsageWriteLogEvent @ 2:2..4:24
               message: Не указан 2й параметр с типом "УровеньЖурналаРегистрации"
               severity: Hint"#]],
         );
@@ -176,414 +192,29 @@ mod tests {
 
     #[test]
     fn test_no_comment() {
-        let code = r#"
-Процедура Тест()
-    ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка, , , );
+        let code = r#"Процедура ЗаписатьОтказБанка(Ответ)
+	ЗаписьЖурналаРегистрации("Банк.Выгрузка", УровеньЖурналаРегистрации.Предупреждение, , Ответ, );
 КонецПроцедуры
 "#;
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::UsageWriteLogEvent,
             expect![[r#"
-            UsageWriteLogEvent @ 3:5..3:80
+            UsageWriteLogEvent @ 2:2..2:96
               message: Не указан 5й параметр "Комментарий"
               severity: Hint"#]],
         );
     }
 
     #[test]
-    fn test_wrong_log_level_in_except() {
-        let code = r#"
-Процедура Тест()
-    Попытка
-        Метод();
-    Исключение
-        ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Предупреждение, , ,
-            "Текст");
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::UsageWriteLogEvent,
-            expect![[r#"
-            UsageWriteLogEvent @ 6:9..7:21
-              message: Нужно указывать уровень "Ошибка" при записи в журнал регистрации внутри блока Исключение-КонецПопытки
-              severity: Hint"#]],
-        );
-    }
-
-    #[test]
-    fn test_missing_detail_error_in_except() {
-        let code = r#"
-Процедура Тест()
-    Попытка
-        Метод();
-    Исключение
-        ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка, , ,
-            ОписаниеОшибки());
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::UsageWriteLogEvent,
-            expect![[r#"
-            UsageWriteLogEvent @ 6:9..7:30
-              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
-              severity: Hint"#]],
-        );
-    }
-
-    #[test]
-    fn test_plain_string_comment_in_except() {
-        let code = r#"
-Процедура Тест()
-    Попытка
-        Метод();
-    Исключение
-        ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка, , ,
-            "Комментарий 1");
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::UsageWriteLogEvent,
-            expect![[r#"
-            UsageWriteLogEvent @ 6:9..7:29
-              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
-              severity: Hint"#]],
-        );
-    }
-
-    #[test]
-    fn test_concatenation_without_detail_error_in_except() {
-        let code = r#"
-Процедура Тест()
-    Попытка
-        Метод();
-    Исключение
-        ТекстОшибки = "Описание" + Метод();
-        ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка, , ,
-            "Еще текст " + ТекстОшибки + Метод());
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::UsageWriteLogEvent,
-            expect![[r#"
-            UsageWriteLogEvent @ 7:9..8:50
-              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
-              severity: Hint"#]],
-        );
-    }
-
-    #[test]
-    fn test_unassigned_variable_in_except() {
-        let code = r#"
-Процедура Тест()
-    Попытка
-        Метод();
-    Исключение
-        ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка, , ,
-            "Еще текст " + НетПрисвоения);
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::UsageWriteLogEvent,
-            expect![[r#"
-            UsageWriteLogEvent @ 6:9..7:42
-              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
-              severity: Hint"#]],
-        );
-    }
-
-    #[test]
-    fn test_variable_assigned_above_try_used_in_except() {
-        let code = r#"
-Процедура Тест()
-    ТекстОшибки = "";
-    Попытка
-        А = 10;
-    Исключение
-        ЗаписьЖурналаРегистрации("Событие",
-            УровеньЖурналаРегистрации.Ошибка,,,
-            ТекстОшибки);
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
-    }
-
-    #[test]
-    fn test_correct_usage_outside_except() {
-        let code = r#"
-Процедура Тест()
-    ЗаписьЖурналаРегистрации("Событие",
-        УровеньЖурналаРегистрации.Ошибка, , ,
-        ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
-    }
-
-    #[test]
-    fn test_correct_usage_in_except_with_raise() {
-        let code = r#"
-Процедура Тест()
-    Попытка
-        Метод();
-    Исключение
-        ЗаписьЖурналаРегистрации("Событие",
-            УровеньЖурналаРегистрации.Ошибка, , ,
-            ОписаниеОшибки());
-        ВызватьИсключение;
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
-    }
-
-    #[test]
-    fn test_correct_usage_in_except_with_detail() {
-        let code = r#"
-Процедура Тест()
-    Попытка
-        Метод();
-    Исключение
-        ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка, , ,
-            ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
-    }
-
-    #[test]
-    fn test_variable_with_detail_error() {
-        let code = r#"
-Процедура Тест()
-    Попытка
-        Метод();
-    Исключение
-        ТекстОшибки = ПодробноеПредставлениеОшибки(ИнформацияОбОшибке());
-        ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка, , ,
-            ТекстОшибки);
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
-    }
-
-    #[test]
-    fn test_brief_error_used_directly_as_comment_in_except() {
-        let code = r#"
-Процедура Тест()
-    Попытка
-        СоздатьФайлНаДиске();
-    Исключение
-        ЗаписьЖурналаРегистрации("Событие",
-            УровеньЖурналаРегистрации.Ошибка,,,
-            КраткоеПредставлениеОшибки(ИнформацияОбОшибке()));
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::UsageWriteLogEvent,
-            expect![[r#"
-            UsageWriteLogEvent @ 6:9..8:62
-              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
-              severity: Hint"#]],
-        );
-    }
-
-    #[test]
-    fn test_variable_traced_to_brief_error_in_except() {
-        let code = r#"
-Процедура Тест()
-    Попытка
-        СоздатьФайлНаДиске();
-    Исключение
-        ТекстСообщения = КраткоеПредставлениеОшибки(ИнформацияОбОшибке());
-        ЗаписьЖурналаРегистрации("Событие",
-            УровеньЖурналаРегистрации.Ошибка,,,
-            ТекстСообщения);
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::UsageWriteLogEvent,
-            expect![[r#"
-            UsageWriteLogEvent @ 7:9..9:28
-              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
-              severity: Hint"#]],
-        );
-    }
-
-    #[test]
-    fn test_two_variables_wrong_one_used_in_except() {
-        let code = r#"
-Процедура Тест()
-    Попытка
-        СоздатьФайлНаДиске();
-    Исключение
-        ТекстСообщения = КраткоеПредставлениеОшибки(ИнформацияОбОшибке());
-        ДругойТекстСообщения = ПодробноеПредставлениеОшибки(ИнформацияОбОшибке());
-        ЗаписьЖурналаРегистрации("Событие",
-            УровеньЖурналаРегистрации.Ошибка,,,
-            ТекстСообщения);
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::UsageWriteLogEvent,
-            expect![[r#"
-            UsageWriteLogEvent @ 8:9..10:28
-              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
-              severity: Hint"#]],
-        );
-    }
-
-    #[test]
-    fn test_brief_error_concatenated_with_description_in_except() {
-        let code = r#"
-Процедура Тест(Знач СсылкаНаДанные, Знач Блокировка)
-    Попытка
-        Блокировка.Заблокировать();
-    Исключение
-        КороткийТекстСообщения = КраткоеПредставлениеОшибки(ИнформацияОбОшибке()) + ОписаниеОшибки();
-        ЗаписьЖурналаРегистрации(
-            "Событие",
-            УровеньЖурналаРегистрации.Ошибка,
-            ,
-            СсылкаНаДанные,
-            КороткийТекстСообщения);
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::UsageWriteLogEvent,
-            expect![[r#"
-            UsageWriteLogEvent @ 7:9..12:36
-              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
-              severity: Hint"#]],
-        );
-    }
-
-    #[test]
-    fn test_variable_param_used_as_comment_outside_except() {
-        let code = r#"
-Процедура Тест(Знач ПодробноеПредставлениеОшибки)
-    ЗаписьЖурналаРегистрации("Событие",
-        УровеньЖурналаРегистрации.Ошибка,,,
-        ПодробноеПредставлениеОшибки);
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
-    }
-
-    #[test]
-    fn test_normal_write_log_with_variable_comment_outside_except() {
-        let code = r#"
-Процедура Тест(Знач ИмяСобытия, Знач СсылкаНаДанные)
-    ТекстЗаписи = ТекстОтвета();
-    ЗаписьЖурналаРегистрации(
-        ИмяСобытия,
-        УровеньЖурналаРегистрации.Ошибка,
-        ,
-        СсылкаНаДанные,
-        ТекстЗаписи);
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
-    }
-
-    #[test]
-    fn test_variable_traced_via_string_function_in_except() {
-        let code = r#"
-Процедура Тест(Знач ИмяСобытия, Знач СсылкаНаДанные)
-    Попытка
-        Блокировка.Заблокировать();
-    Исключение
-        ТекстСообщения = СтроковыеФункцииКлиентСервер.ПодставитьПараметрыВСтроку(
-            "Не удалось: %1",
-            ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
-        ЗаписьЖурналаРегистрации(
-            ИмяСобытия,
-            УровеньЖурналаРегистрации.Ошибка,
-            ,
-            СсылкаНаДанные,
-            ТекстСообщения);
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
-    }
-
-    #[test]
-    fn test_variable_traced_via_concatenation_with_detail_error_in_except() {
-        let code = r#"
-Процедура Тест(Знач ИмяСобытия, Знач СсылкаНаДанные, Знач Выборка)
-    Попытка
-        Блокировка.Заблокировать();
-    Исключение
-        ТекстСообщения =
-            "Не удалось установить разделение" + " = "
-                + Формат(Выборка.ОбластьДанных, "ЧГ=0")
-                + Символы.ПС + ПодробноеПредставлениеОшибки(ИнформацияОбОшибке());
-        ЗаписьЖурналаРегистрации(
-            ИмяСобытия,
-            УровеньЖурналаРегистрации.Ошибка,
-            ,
-            СсылкаНаДанные,
-            ТекстСообщения);
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
-    }
-
-    #[test]
-    fn test_dynamic_log_level_variable_in_except() {
-        let code = r#"
-Процедура Тест(Знач ИмяСобытия, Знач СсылкаНаДанные, Знач Выборка)
-    Попытка
-        Блокировка.Заблокировать();
-    Исключение
-        ТекстСообщения =
-            "Не удалось" + Символы.ПС + ПодробноеПредставлениеОшибки(ИнформацияОбОшибке());
-        ЗаписьЖурналаРегистрации(
-            ИмяСобытия,
-            УровеньОшибки(),
-            ,
-            СсылкаНаДанные,
-            ТекстСообщения);
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
-    }
-
-    #[test]
     fn test_english_keywords() {
-        let code = r#"
-Procedure Test()
-    WriteLogEvent("Event");
+        let code = r#"Procedure LogBankReply(Reply)
+	WriteLogEvent("Bank.Upload");
 EndProcedure
 "#;
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::UsageWriteLogEvent,
             expect![[r#"
-            UsageWriteLogEvent @ 3:5..3:27
+            UsageWriteLogEvent @ 2:2..2:30
               message: Неверное число параметров метода
               severity: Hint"#]],
         );
@@ -591,54 +222,293 @@ EndProcedure
 
     #[test]
     fn test_case_insensitive() {
-        let code = r#"
-Процедура Тест()
-    ЗАПИСЬЖУРНАЛАРЕГИСТРАЦИИ("Событие");
+        let code = r#"Процедура ЗаписатьОтказБанка(Ответ)
+	записьжурналарегистрации("Банк.Выгрузка");
 КонецПроцедуры
 "#;
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::UsageWriteLogEvent,
             expect![[r#"
-            UsageWriteLogEvent @ 3:5..3:40
+            UsageWriteLogEvent @ 2:2..2:43
               message: Неверное число параметров метода
               severity: Hint"#]],
         );
     }
 
     #[test]
-    fn test_error_processing_module() {
-        let code = r#"
-Процедура Тест()
-    Попытка
-        Метод();
-    Исключение
-        ЗаписьЖурналаРегистрации("Событие", УровеньЖР,
-            , , ОбработкаОшибок.ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
-    КонецПопытки;
+    fn test_variable_comment_outside_except() {
+        let code = r#"Процедура ЗаписатьОтказБанка(Знач ИмяСобытия, Знач Ответ)
+	Причина = РазобратьОтвет(Ответ);
+	ЗаписьЖурналаРегистрации(
+		ИмяСобытия,
+		УровеньЖурналаРегистрации.Ошибка,
+		,
+		Ответ,
+		Причина);
 КонецПроцедуры
 "#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
+        check(code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_parameter_named_like_detail_outside_except() {
+        let code = r#"Процедура ЗаписатьОтказБанка(Знач ПодробноеПредставлениеОшибки)
+	ЗаписьЖурналаРегистрации("Банк.Выгрузка",
+		УровеньЖурналаРегистрации.Ошибка, , ,
+		ПодробноеПредставлениеОшибки);
+КонецПроцедуры
+"#;
+        check(code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_error_processing_detail_in_string_concat_outside_except() {
+        let code = r#"Процедура ЗаписатьОтказБанка(Знач ИмяСобытия)
+	ЗаписьЖурналаРегистрации(ИмяСобытия,
+		УровеньЖурналаРегистрации.Ошибка, , ,
+		"Банк отклонил: " + ОбработкаОшибок.ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
+КонецПроцедуры
+"#;
+        check(code, expect![[r#""#]]);
+    }
+
+    // ── Внутри Исключение: уровень ────────────────────────────────────────
+
+    #[test]
+    fn test_wrong_log_level_in_except() {
+        let code = in_except(
+            "\t\tЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Информация, , Ссылка,\n\t\t\tПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));\n",
+        );
+        check(
+            &code,
+            expect![[r#"
+            UsageWriteLogEvent @ 5:3..6:55
+              message: Нужно указывать уровень "Ошибка" при записи в журнал регистрации внутри блока Исключение-КонецПопытки
+              severity: Hint"#]],
+        );
+    }
+
+    #[test]
+    fn test_dynamic_log_level_in_except() {
+        let code = in_except(
+            "\t\tЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньДляБанка(), , Ссылка,\n\t\t\tПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));\n",
+        );
+        check(&code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_variable_log_level_with_error_processing_detail() {
+        let code = in_except(
+            "\t\tЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖР, , Ссылка,\n\t\t\tОбработкаОшибок.ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));\n",
+        );
+        check(&code, expect![[r#""#]]);
+    }
+
+    // ── Внутри Исключение: комментарий ────────────────────────────────────
+
+    #[test]
+    fn test_correct_usage_in_except_with_detail() {
+        let code = in_except(
+            "\t\tЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Ошибка, , Ссылка,\n\t\t\tПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));\n",
+        );
+        check(&code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_missing_detail_error_in_except() {
+        let code = in_except(
+            "\t\tЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Ошибка, , Ссылка,\n\t\t\tОписаниеОшибки());\n",
+        );
+        check(
+            &code,
+            expect![[r#"
+            UsageWriteLogEvent @ 5:3..6:21
+              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
+              severity: Hint"#]],
+        );
+    }
+
+    #[test]
+    fn test_correct_usage_in_except_with_raise() {
+        let code = in_except(
+            "\t\tЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Ошибка, , Ссылка,\n\t\t\tОписаниеОшибки());\n\t\tВызватьИсключение;\n",
+        );
+        check(&code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_plain_string_comment_in_except() {
+        let code = in_except(
+            "\t\tЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Ошибка, , Ссылка,\n\t\t\t\"Пакет не принят\");\n",
+        );
+        check(
+            &code,
+            expect![[r#"
+            UsageWriteLogEvent @ 5:3..6:22
+              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
+              severity: Hint"#]],
+        );
+    }
+
+    #[test]
+    fn test_concatenation_without_detail_error_in_except() {
+        let code = in_except(
+            "\t\tПричина = \"Код \" + Пакет.КодОтвета();\n\t\tЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Ошибка, , Ссылка,\n\t\t\tПричина + \" / \" + Пакет.Статус());\n",
+        );
+        check(
+            &code,
+            expect![[r#"
+            UsageWriteLogEvent @ 6:3..7:37
+              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
+              severity: Hint"#]],
+        );
+    }
+
+    #[test]
+    fn test_unassigned_variable_in_except() {
+        let code = in_except(
+            "\t\tЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Ошибка, , Ссылка,\n\t\t\t\"Отказ: \" + НеизвестнаяПричина);\n",
+        );
+        check(
+            &code,
+            expect![[r#"
+            UsageWriteLogEvent @ 5:3..6:35
+              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
+              severity: Hint"#]],
+        );
+    }
+
+    #[test]
+    fn test_variable_assigned_above_try_used_in_except() {
+        let code = r#"Процедура ВыгрузитьВБанк(Пакет, Ссылка)
+	Причина = "";
+	Попытка
+		Пакет.Отправить();
+	Исключение
+		ЗаписьЖурналаРегистрации("Банк.Выгрузка",
+			УровеньЖурналаРегистрации.Ошибка, , Ссылка,
+			Причина);
+	КонецПопытки;
+КонецПроцедуры
+"#;
+        check(code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_variable_with_detail_error() {
+        let code = in_except(
+            "\t\tПричина = ПодробноеПредставлениеОшибки(ИнформацияОбОшибке());\n\t\tЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Ошибка, , Ссылка,\n\t\t\tПричина);\n",
+        );
+        check(&code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_variable_traced_via_string_function_in_except() {
+        let code = in_except(
+            "\t\tПричина = СтрШаблон(\"Банк отклонил пакет: %1\",\n\t\t\tПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));\n\t\tЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Ошибка, , Ссылка,\n\t\t\tПричина);\n",
+        );
+        check(&code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_variable_traced_via_concatenation_with_detail_error_in_except() {
+        let code = in_except(
+            "\t\tПричина =\n\t\t\t\"Пакет \" + Пакет.Номер\n\t\t\t\t+ Символы.ПС + ПодробноеПредставлениеОшибки(ИнформацияОбОшибке());\n\t\tЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Ошибка, , Ссылка,\n\t\t\tПричина);\n",
+        );
+        check(&code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_brief_error_used_directly_as_comment_in_except() {
+        let code = in_except(
+            "\t\tЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Ошибка, , Ссылка,\n\t\t\tКраткоеПредставлениеОшибки(ИнформацияОбОшибке()));\n",
+        );
+        check(
+            &code,
+            expect![[r#"
+            UsageWriteLogEvent @ 5:3..6:53
+              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
+              severity: Hint"#]],
+        );
+    }
+
+    #[test]
+    fn test_variable_traced_to_brief_error_in_except() {
+        let code = in_except(
+            "\t\tПричина = КраткоеПредставлениеОшибки(ИнформацияОбОшибке());\n\t\tЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Ошибка, , Ссылка,\n\t\t\tПричина);\n",
+        );
+        check(
+            &code,
+            expect![[r#"
+            UsageWriteLogEvent @ 6:3..7:12
+              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
+              severity: Hint"#]],
+        );
+    }
+
+    #[test]
+    fn test_two_variables_wrong_one_used_in_except() {
+        let code = in_except(
+            "\t\tКратко = КраткоеПредставлениеОшибки(ИнформацияОбОшибке());\n\t\tПодробно = ПодробноеПредставлениеОшибки(ИнформацияОбОшибке());\n\t\tЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Ошибка, , Ссылка,\n\t\t\tКратко);\n",
+        );
+        check(
+            &code,
+            expect![[r#"
+            UsageWriteLogEvent @ 7:3..8:11
+              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
+              severity: Hint"#]],
+        );
+    }
+
+    #[test]
+    fn test_brief_error_concatenated_with_description_in_except() {
+        let code = in_except(
+            "\t\tПричина = КраткоеПредставлениеОшибки(ИнформацияОбОшибке()) + ОписаниеОшибки();\n\t\tЗаписьЖурналаРегистрации(\n\t\t\t\"Банк.Выгрузка\",\n\t\t\tУровеньЖурналаРегистрации.Ошибка,\n\t\t\t,\n\t\t\tСсылка,\n\t\t\tПричина);\n",
+        );
+        check(
+            &code,
+            expect![[r#"
+            UsageWriteLogEvent @ 6:3..11:12
+              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
+              severity: Hint"#]],
+        );
+    }
+
+    // ── То же через ОбработкаОшибок ───────────────────────────────────────
+
+    #[test]
+    fn test_error_processing_module_variable_traced_to_detail() {
+        let code = in_except(
+            "\t\tПричина = ОбработкаОшибок.ПодробноеПредставлениеОшибки(ИнформацияОбОшибке());\n\t\tЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Ошибка, , Ссылка,\n\t\t\tПричина);\n",
+        );
+        check(&code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_error_processing_module_string_function_in_except() {
+        let code = in_except(
+            "\t\tПричина = СтрШаблон(\"Отказ банка: %1\",\n\t\t\tОбработкаОшибок.ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));\n\t\tЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Ошибка, , Ссылка,\n\t\t\tПричина);\n",
+        );
+        check(&code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_error_processing_module_concatenation_with_detail_in_except() {
+        let code = in_except(
+            "\t\tПричина = \"Пакет \" + Пакет.Номер\n\t\t\t+ Символы.ПС + ОбработкаОшибок.ПодробноеПредставлениеОшибки(ИнформацияОбОшибке());\n\t\tЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Ошибка, , Ссылка,\n\t\t\tПричина);\n",
+        );
+        check(&code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_error_processing_module_brief_used_directly() {
-        let code = r#"
-Процедура Тест()
-    Попытка
-        СоздатьФайлНаДиске();
-    Исключение
-        ЗаписьЖурналаРегистрации("Событие",
-            УровеньЖурналаРегистрации.Ошибка,,,
-            ОбработкаОшибок.КраткоеПредставлениеОшибки(ИнформацияОбОшибке()));
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::UsageWriteLogEvent,
+        let code = in_except(
+            "\t\tЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Ошибка, , Ссылка,\n\t\t\tОбработкаОшибок.КраткоеПредставлениеОшибки(ИнформацияОбОшибке()));\n",
+        );
+        check(
+            &code,
             expect![[r#"
-            UsageWriteLogEvent @ 6:9..8:78
+            UsageWriteLogEvent @ 5:3..6:69
               message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
               severity: Hint"#]],
         );
@@ -646,23 +516,13 @@ EndProcedure
 
     #[test]
     fn test_error_processing_module_variable_traced_to_brief() {
-        let code = r#"
-Процедура Тест()
-    Попытка
-        СоздатьФайлНаДиске();
-    Исключение
-        ТекстСообщения = ОбработкаОшибок.КраткоеПредставлениеОшибки(ИнформацияОбОшибке());
-        ЗаписьЖурналаРегистрации("Событие",
-            УровеньЖурналаРегистрации.Ошибка,,,
-            ТекстСообщения);
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::UsageWriteLogEvent,
+        let code = in_except(
+            "\t\tПричина = ОбработкаОшибок.КраткоеПредставлениеОшибки(ИнформацияОбОшибке());\n\t\tЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Ошибка, , Ссылка,\n\t\t\tПричина);\n",
+        );
+        check(
+            &code,
             expect![[r#"
-            UsageWriteLogEvent @ 7:9..9:28
+            UsageWriteLogEvent @ 6:3..7:12
               message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
               severity: Hint"#]],
         );
@@ -670,24 +530,13 @@ EndProcedure
 
     #[test]
     fn test_error_processing_module_two_variables_wrong_one_used() {
-        let code = r#"
-Процедура Тест()
-    Попытка
-        СоздатьФайлНаДиске();
-    Исключение
-        ТекстСообщения = ОбработкаОшибок.КраткоеПредставлениеОшибки(ИнформацияОбОшибке());
-        ДругойТекстСообщения = ОбработкаОшибок.ПодробноеПредставлениеОшибки(ИнформацияОбОшибке());
-        ЗаписьЖурналаРегистрации("Событие",
-            УровеньЖурналаРегистрации.Ошибка,,,
-            ТекстСообщения);
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::UsageWriteLogEvent,
+        let code = in_except(
+            "\t\tКратко = ОбработкаОшибок.КраткоеПредставлениеОшибки(ИнформацияОбОшибке());\n\t\tПодробно = ОбработкаОшибок.ПодробноеПредставлениеОшибки(ИнформацияОбОшибке());\n\t\tЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Ошибка, , Ссылка,\n\t\t\tКратко);\n",
+        );
+        check(
+            &code,
             expect![[r#"
-            UsageWriteLogEvent @ 8:9..10:28
+            UsageWriteLogEvent @ 7:3..8:11
               message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
               severity: Hint"#]],
         );
@@ -695,115 +544,15 @@ EndProcedure
 
     #[test]
     fn test_error_processing_module_brief_concatenated_with_description() {
-        let code = r#"
-Процедура Тест(Знач СсылкаНаДанные, Знач Блокировка)
-    Попытка
-        Блокировка.Заблокировать();
-    Исключение
-        КороткийТекстСообщения = ОбработкаОшибок.КраткоеПредставлениеОшибки(ИнформацияОбОшибке()) + ОписаниеОшибки();
-        ЗаписьЖурналаРегистрации(
-            "Событие",
-            УровеньЖурналаРегистрации.Ошибка,
-            ,
-            СсылкаНаДанные,
-            КороткийТекстСообщения);
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::UsageWriteLogEvent,
+        let code = in_except(
+            "\t\tПричина = ОбработкаОшибок.КраткоеПредставлениеОшибки(ИнформацияОбОшибке()) + ОписаниеОшибки();\n\t\tЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Ошибка, , Ссылка,\n\t\t\tПричина);\n",
+        );
+        check(
+            &code,
             expect![[r#"
-            UsageWriteLogEvent @ 7:9..12:36
+            UsageWriteLogEvent @ 6:3..7:12
               message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
               severity: Hint"#]],
         );
-    }
-
-    #[test]
-    fn test_error_processing_module_variable_traced_to_detail() {
-        let code = r#"
-Процедура Тест()
-    Попытка
-        Метод();
-    Исключение
-        ТекстОшибки = ОбработкаОшибок.ПодробноеПредставлениеОшибки(ИнформацияОбОшибке());
-        ЗаписьЖурналаРегистрации("Событие", УровеньЖурналаРегистрации.Ошибка, , ,
-            ТекстОшибки);
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
-    }
-
-    #[test]
-    fn test_error_processing_module_variable_log_level_in_except() {
-        let code = r#"
-Процедура Тест()
-    Попытка
-        Метод();
-    Исключение
-        ЗаписьЖурналаРегистрации("Событие", УровеньЖР,
-            , , ОбработкаОшибок.ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
-    }
-
-    #[test]
-    fn test_error_processing_module_detail_in_string_concat_outside_except() {
-        let code = r#"
-Процедура Тест(Знач ИмяСобытия)
-    ЗаписьЖурналаРегистрации(ИмяСобытия,
-        УровеньЖурналаРегистрации.Ошибка, , ,
-        "Ошибка: " + ОбработкаОшибок.ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
-    }
-
-    #[test]
-    fn test_error_processing_module_string_function_in_except() {
-        let code = r#"
-Процедура Тест(Знач ИмяСобытия, Знач СсылкаНаДанные)
-    Попытка
-        Блокировка.Заблокировать();
-    Исключение
-        ТекстСообщения = СтроковыеФункцииКлиентСервер.ПодставитьПараметрыВСтроку(
-            "Не удалось: %1",
-            ОбработкаОшибок.ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
-        ЗаписьЖурналаРегистрации(
-            ИмяСобытия,
-            УровеньЖурналаРегистрации.Ошибка,
-            ,
-            СсылкаНаДанные,
-            ТекстСообщения);
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
-    }
-
-    #[test]
-    fn test_error_processing_module_concatenation_with_detail_in_except() {
-        let code = r#"
-Процедура Тест(Знач ИмяСобытия, Знач СсылкаНаДанные, Знач Выборка)
-    Попытка
-        Блокировка.Заблокировать();
-    Исключение
-        ТекстСообщения =
-            "Не удалось" + " = " + Формат(Выборка.ОбластьДанных, "ЧГ=0")
-                + Символы.ПС + ОбработкаОшибок.ПодробноеПредставлениеОшибки(ИнформацияОбОшибке());
-        ЗаписьЖурналаРегистрации(
-            ИмяСобытия,
-            УровеньЖурналаРегистрации.Ошибка,
-            ,
-            СсылкаНаДанные,
-            ТекстСообщения);
-    КонецПопытки;
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::UsageWriteLogEvent, expect![[r#""#]]);
     }
 }

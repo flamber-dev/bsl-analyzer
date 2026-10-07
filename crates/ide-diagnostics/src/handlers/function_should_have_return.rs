@@ -32,155 +32,127 @@ mod tests {
     use crate::test_utils::{check_hir_diagnostic, format_diags};
     use crate::DiagnosticCode;
     use expect_test::expect;
-    #[test]
-    fn test_function_without_return() {
-        let code = r#"Функция БезВозврата()
-    Перем Х;
-    Х = 42;
-КонецФункции"#;
 
-        let diagnostics = check_hir_diagnostic(code);
-        let return_diags: Vec<_> = diagnostics
+    fn check(code: &str, expected: expect_test::Expect) {
+        let diagnostics: Vec<_> = check_hir_diagnostic(code)
             .into_iter()
             .filter(|d| d.code == DiagnosticCode::FunctionShouldHaveReturn)
             .collect();
-        expect![[r#"
-            FunctionShouldHaveReturn @ 1:9..1:20
-              message: Функция должна содержать хотя бы один оператор Возврат
-              severity: Major"#]]
-        .assert_eq(&format_diags(code, &return_diags));
+        expected.assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_function_with_return() {
-        let code = r#"Функция СВозвратом()
-    Возврат 42;
-КонецФункции"#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        assert!(
-            diagnostics.iter().all(|d| d.code != DiagnosticCode::FunctionShouldHaveReturn),
-            "Function with return should not trigger diagnostic"
-        );
-    }
-
-    #[test]
-    fn test_procedure_no_return_needed() {
-        let code = r#"Процедура БезВозврата()
-    Сообщить("Привет");
-КонецПроцедуры"#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        assert!(
-            diagnostics.iter().all(|d| d.code != DiagnosticCode::FunctionShouldHaveReturn),
-            "Procedures should not trigger FunctionShouldHaveReturn"
-        );
-    }
-
-    #[test]
-    fn test_function_with_conditional_return() {
-        let code = r#"Функция Проверка(Значение)
-    Если Значение > 0 Тогда
-        Возврат Истина;
-    Иначе
-        Возврат Ложь;
-    КонецЕсли;
-КонецФункции"#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        assert!(
-            diagnostics.iter().all(|d| d.code != DiagnosticCode::FunctionShouldHaveReturn),
-            "Function with conditional returns should not trigger"
-        );
-    }
-
-    #[test]
-    fn test_multiple_functions() {
-        let code = r#"Функция Первая()
-    Возврат 1;
+        let code = r#"Функция ОстатокЛимита(Лимит, Израсходовано)
+	Остаток = Лимит - Израсходовано;
+	Возврат Макс(Остаток, 0);
 КонецФункции
+"#;
+        check(code, expect![[r#""#]]);
+    }
 
-Функция Вторая()
-    Перем Х;
-    Х = 2;
+    #[test]
+    fn test_function_without_return() {
+        let code = r#"Функция ОстатокЛимита(Лимит, Израсходовано)
+	Остаток = Лимит - Израсходовано;
+	Остаток = Макс(Остаток, 0);
 КонецФункции
-
-Функция Третья()
-    Возврат 3;
-КонецФункции"#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        let return_diags: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::FunctionShouldHaveReturn)
-            .collect();
-        expect![[r#"
-            FunctionShouldHaveReturn @ 5:9..5:15
+"#;
+        check(
+            code,
+            expect![[r#"
+            FunctionShouldHaveReturn @ 1:9..1:22
               message: Функция должна содержать хотя бы один оператор Возврат
-              severity: Major"#]]
-        .assert_eq(&format_diags(code, &return_diags));
+              severity: Major"#]],
+        );
+    }
+
+    #[test]
+    fn test_return_on_one_path_is_enough() {
+        // Presence of a single Возврат satisfies this rule; whether every path returns is
+        // AllFunctionPathMustHaveReturn's question, not this one's.
+        let code = r#"Функция ПервыйСвободныйСлот(Слоты)
+	Для Каждого Слот Из Слоты Цикл
+		Если Слот.Свободен Тогда
+			Возврат Слот;
+		КонецЕсли;
+	КонецЦикла;
+КонецФункции
+"#;
+        check(code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_procedures_need_no_return() {
+        let code = r#"Процедура ОчиститьЖурнал(Журнал)
+	Журнал.Очистить();
+КонецПроцедуры
+
+Процедура Заглушка()
+КонецПроцедуры
+
+Процедура ПрерватьОбход(Флаг)
+	Если Флаг Тогда
+		Возврат;
+	КонецЕсли;
+КонецПроцедуры
+"#;
+        check(code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_only_the_function_without_return_in_a_module() {
+        let code = r#"Процедура Подготовить()
+	Счетчик = 0;
+КонецПроцедуры
+
+Функция КодСклада(Склад)
+	Возврат Склад.Код;
+КонецФункции
+
+Функция ПутьКАрхиву(Каталог)
+	Путь = Каталог + "/архив";
+КонецФункции
+
+Функция ЕстьОшибки(Протокол)
+	Возврат Протокол.Количество() > 0;
+КонецФункции
+"#;
+        check(
+            code,
+            expect![[r#"
+            FunctionShouldHaveReturn @ 9:9..9:20
+              message: Функция должна содержать хотя бы один оператор Возврат
+              severity: Major"#]],
+        );
     }
 
     #[test]
     fn test_english_function_with_return() {
-        let code = r#"Function Add(A, B)
-    Return A + B;
-EndFunction"#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        assert!(
-            diagnostics.iter().all(|d| d.code != DiagnosticCode::FunctionShouldHaveReturn),
-            "English function with return should not trigger"
-        );
+        let code = r#"Function Clamp(Value, Upper)
+	If Value > Upper Then
+		Return Upper;
+	EndIf;
+	Return Value;
+EndFunction
+"#;
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_english_function_without_return() {
-        let code = r#"Function NoReturn()
-    Var X;
-EndFunction"#;
-
-        let diagnostics = check_hir_diagnostic(code);
-        let return_diags: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::FunctionShouldHaveReturn)
-            .collect();
-        expect![[r#"
-            FunctionShouldHaveReturn @ 1:10..1:18
-              message: Функция должна содержать хотя бы один оператор Возврат
-              severity: Major"#]]
-        .assert_eq(&format_diags(code, &return_diags));
-    }
-
-    #[test]
-    fn test_fixture_only_function_without_return_triggers() {
-        let code = r#"Функция ФункцияБезВозврата()
-    ПолезныйКод = 0;
-КонецФункции
-
-Функция ФункцияСВозвратом()
-    Возврат "ЧтоНибудь";
-КонецФункции
-
-Процедура ПроцедураБезВозврата()
-
-КонецПроцедуры
-
-Процедура ПроцедураСВозвратом()
-    Возврат;
-КонецПроцедуры
+        let code = r#"Function Clamp(Value, Upper)
+	If Value > Upper Then
+		Value = Upper;
+	EndIf;
+EndFunction
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-
-        let return_diags: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::FunctionShouldHaveReturn)
-            .collect();
-
-        expect![[r#"
-            FunctionShouldHaveReturn @ 1:9..1:27
+        check(
+            code,
+            expect![[r#"
+            FunctionShouldHaveReturn @ 1:10..1:15
               message: Функция должна содержать хотя бы один оператор Возврат
-              severity: Major"#]]
-        .assert_eq(&format_diags(code, &return_diags));
+              severity: Major"#]],
+        );
     }
 }

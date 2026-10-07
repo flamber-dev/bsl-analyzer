@@ -57,32 +57,29 @@ mod tests {
     use crate::{DiagnosticCode, DiagnosticsConfig};
     use expect_test::expect;
 
-    fn make_method_size_code() -> String {
-        let mut s = String::new();
-        s.push_str("Процедура ПустаяПроцедура()\n\n КонецПроцедуры\n\n");
-        s.push_str("Функция ФункцияВОднуСтроку() КонецФункции\n\n");
-        s.push_str("Процедура Процедура201Строка()\n\n");
-        for _ in 0..202 {
-            s.push_str("    А = 0;\n");
-        }
-        s.push_str("\n КонецПроцедуры\n\n");
-        s.push_str("Процедура Процедура200Строк()\n\n");
-        for _ in 0..201 {
-            s.push_str("    А = 0;\n");
-        }
-        s.push_str("\n КонецПроцедуры\n\n");
-        s.push_str("Функция Функция201Строка()\n\n");
-        for _ in 0..202 {
-            s.push_str("    А = 0;\n");
-        }
-        s.push_str("\n КонецФункции\n\n");
-        s.push_str("Функция Функция200Строк()\n\n");
-        for _ in 0..201 {
-            s.push_str("    А = 0;\n");
-        }
-        s.push_str("\n КонецФункции\n\n");
-        s.push_str("Функция А(А=0)\n\n КонецФункции\n");
-        s
+    /// A method whose node spans `size` lines by the documented formula
+    /// `S = line(end) − line(start)`: the header (with its annotations), body lines,
+    /// the end keyword.
+    fn method(header: &str, end: &str, size: usize) -> String {
+        let header_lines = header.lines().count();
+        assert!(size >= header_lines);
+        let body: String =
+            (header_lines..size).map(|i| format!("\tОстаток = Остаток - {i};\n")).collect();
+        format!("{header}\n{body}{end}\n")
+    }
+
+    /// Module of methods around the default threshold 200, plus short ones.
+    fn module() -> String {
+        [
+            "Процедура Заглушка()\n\nКонецПроцедуры\n".to_string(),
+            "Функция Ноль() Возврат 0; КонецФункции\n".to_string(),
+            method("Процедура СписатьНаПороге()", "КонецПроцедуры", 200),
+            method("Процедура СписатьСверхПорога()", "КонецПроцедуры", 201),
+            method("&НаСервере\nФункция ОстатокНаПороге()", "КонецФункции", 200),
+            method("&НаСервере\nФункция ОстатокСверхПорога()", "КонецФункции", 201),
+            "Функция СПараметром(Шаг = 1)\nКонецФункции\n".to_string(),
+        ]
+        .join("\n")
     }
 
     fn method_size_config(max: serde_json::Value) -> DiagnosticsConfig {
@@ -136,99 +133,88 @@ mod tests {
 
     #[test]
     fn test_comprehensive() {
-        let code = make_method_size_code();
         check_diagnostics_snapshot_for(
-            &code,
+            &module(),
             DiagnosticCode::MethodSize,
             expect![[r#"
-                MethodSize @ 7:11..7:29
-                  message: Длина метода "Процедура201Строка" равна 205, что больше установленного лимита в 200 строк
+                MethodSize @ 209:11..209:29
+                  message: Длина метода "СписатьСверхПорога" равна 201, что больше установленного лимита в 200 строк
                   severity: Warning
-                MethodSize @ 214:11..214:28
-                  message: Длина метода "Процедура200Строк" равна 204, что больше установленного лимита в 200 строк
-                  severity: Warning
-                MethodSize @ 420:9..420:25
-                  message: Длина метода "Функция201Строка" равна 205, что больше установленного лимита в 200 строк
-                  severity: Warning
-                MethodSize @ 627:9..627:24
-                  message: Длина метода "Функция200Строк" равна 204, что больше установленного лимита в 200 строк
+                MethodSize @ 615:9..615:27
+                  message: Длина метода "ОстатокСверхПорога" равна 201, что больше установленного лимита в 200 строк
                   severity: Warning"#]],
         );
     }
 
     #[test]
     fn test_configure_threshold_20() {
-        let code = make_method_size_code();
-        let mut config = DiagnosticsConfig::default();
-        let mut params = serde_json::Map::new();
-        params.insert("maxMethodSize".to_string(), serde_json::Value::Number(20.into()));
-        config.parameters.insert(DiagnosticCode::MethodSize, serde_json::Value::Object(params));
-
-        let diagnostics = check_hir_diagnostic_with_config(&code, config, crate::diagnostics);
-        let diagnostics: Vec<_> =
-            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::MethodSize).collect();
+        let code = module();
+        let diagnostics: Vec<_> = check_hir_diagnostic_with_config(
+            &code,
+            method_size_config(20.into()),
+            crate::diagnostics,
+        )
+        .into_iter()
+        .filter(|d| d.code == DiagnosticCode::MethodSize)
+        .collect();
         expect![[r#"
-            MethodSize @ 7:11..7:29
-              message: Длина метода "Процедура201Строка" равна 205, что больше установленного лимита в 20 строк
+            MethodSize @ 7:11..7:26
+              message: Длина метода "СписатьНаПороге" равна 200, что больше установленного лимита в 20 строк
               severity: Warning
-            MethodSize @ 214:11..214:28
-              message: Длина метода "Процедура200Строк" равна 204, что больше установленного лимита в 20 строк
+            MethodSize @ 209:11..209:29
+              message: Длина метода "СписатьСверхПорога" равна 201, что больше установленного лимита в 20 строк
               severity: Warning
-            MethodSize @ 420:9..420:25
-              message: Длина метода "Функция201Строка" равна 205, что больше установленного лимита в 20 строк
+            MethodSize @ 413:9..413:24
+              message: Длина метода "ОстатокНаПороге" равна 200, что больше установленного лимита в 20 строк
               severity: Warning
-            MethodSize @ 627:9..627:24
-              message: Длина метода "Функция200Строк" равна 204, что больше установленного лимита в 20 строк
+            MethodSize @ 615:9..615:27
+              message: Длина метода "ОстатокСверхПорога" равна 201, что больше установленного лимита в 20 строк
               severity: Warning"#]].assert_eq(&format_diags(&code, &diagnostics));
     }
 
     #[test]
     fn test_empty_method() {
-        let code = r#"Процедура Пустая()
-
-КонецПроцедуры"#;
-
+        let code = "Функция Пусто()\n\n\nКонецФункции\n";
         check_diagnostics_snapshot_for(code, DiagnosticCode::MethodSize, expect![[r#""#]]);
     }
 
     #[test]
     fn test_one_liner() {
-        let code = r#"Функция Тест() КонецФункции"#;
-
+        let code = "Процедура Пауза() КонецПроцедуры\n";
         check_diagnostics_snapshot_for(code, DiagnosticCode::MethodSize, expect![[r#""#]]);
     }
 
     #[test]
     fn test_three_line_method_exceeds_threshold_1() {
-        let code = "Процедура Тест()\n    А = 1;\nКонецПроцедуры";
+        let code = "Функция Шаг()\n\tВозврат 1;\nКонецФункции\n";
         expect![[r#"
-            MethodSize @ 1:11..1:15
-              message: Длина метода "Тест" равна 2, что больше установленного лимита в 1 строк
+            MethodSize @ 1:9..1:12
+              message: Длина метода "Шаг" равна 2, что больше установленного лимита в 1 строк
               severity: Warning"#]]
         .assert_eq(&method_size_diags(code, 1));
     }
 
     #[test]
     fn test_two_line_method_equals_threshold_1() {
-        let code = "Процедура Тест()\nКонецПроцедуры";
+        let code = "Функция Шаг()\nКонецФункции\n";
         expect![[r#""#]].assert_eq(&method_size_diags(code, 1));
     }
 
     #[test]
     fn method_size_small_spans_and_strict_thresholds() {
         for (start, end) in [
-            ("Процедура", "КонецПроцедуры"),
-            ("Функция", "КонецФункции"),
-            ("Procedure", "EndProcedure"),
             ("Function", "EndFunction"),
+            ("Процедура", "КонецПроцедуры"),
+            ("Procedure", "EndProcedure"),
+            ("Функция", "КонецФункции"),
         ] {
-            for size in 0..=4 {
-                let separator = if size == 0 { " ".to_owned() } else { "\n".repeat(size) };
-                let code = format!("{start} Test(){separator}{end}");
-                for max in [0, 1, size as i64] {
+            for size in 0..=5 {
+                let gap = if size == 0 { " ".to_owned() } else { "\n".repeat(size) };
+                let code = format!("{start} Узел(){gap}{end}");
+                for max in [size as i64, 1, 0] {
                     let config = method_size_config(max.into());
                     if size as i64 > max {
-                        assert_method_size_report(&code, config, "Test", size as u32, max as u32);
+                        assert_method_size_report(&code, config, "Узел", size as u32, max as u32);
                     } else {
                         assert!(
                             method_size_diagnostics(&code, config).is_empty(),
@@ -242,21 +228,22 @@ mod tests {
 
     #[test]
     fn method_size_node_range_variations() {
+        // Annotations, comments and blank lines inside the node count; lines outside do not.
         for (code, size) in [
-            ("Procedure Test()\n    A = 1; B = 2;\nEndProcedure", 2),
-            ("Procedure Test()\n\n    A = 1;\nEndProcedure", 3),
-            ("Procedure Test()\n    // comment\n    A = 1;\nEndProcedure", 3),
-            ("&AtServer\nProcedure Test()\n    A = 1;\nEndProcedure", 3),
-            ("&НаСервере\nФункция Test()\n    // комментарий\n\nКонецФункции", 4),
+            ("Функция Узел()\n\tВозврат 1; // итог\nКонецФункции", 2),
+            ("Procedure Узел()\n\n\n    X = 1;\nEndProcedure", 4),
+            ("Процедура Узел()\n\t// пояснение\n\tХ = 1;\nКонецПроцедуры", 3),
+            ("&НаКлиенте\nПроцедура Узел()\nКонецПроцедуры", 2),
+            ("&AtServer\n&Перед(\"Прочее\")\nFunction Узел()\n\n    Return 0;\nEndFunction", 5),
         ] {
-            for prefix in ["", "// outside\n\n\n"] {
-                for suffix in ["", "\n\n// outside\n"] {
+            for prefix in ["", "// снаружи\n\n"] {
+                for suffix in ["", "\n// после\n\n"] {
                     for newline in ["\n", "\r\n"] {
                         let file = format!("{prefix}{code}{suffix}").replace('\n', newline);
                         assert_method_size_report(
                             &file,
                             method_size_config(1.into()),
-                            "Test",
+                            "Узел",
                             size,
                             1,
                         );
@@ -268,38 +255,38 @@ mod tests {
 
     #[test]
     fn method_size_default_boundary_and_non_integer_fallback() {
-        let equal = format!("Procedure Test()\n{}EndProcedure", "    A = 1;\n".repeat(199));
-        let over = format!("Procedure Test()\n{}EndProcedure", "    A = 1;\n".repeat(200));
+        let at = method("Функция Узел()", "КонецФункции", 200);
+        let over = method("Функция Узел()", "КонецФункции", 201);
         for config in [
             DiagnosticsConfig::default(),
             method_size_config(200.into()),
             method_size_config(serde_json::Value::Null),
-            method_size_config(serde_json::json!("1")),
-            method_size_config(serde_json::json!(1.5)),
-            method_size_config(serde_json::json!(true)),
+            method_size_config(serde_json::json!("7")),
+            method_size_config(serde_json::json!(2.5)),
+            method_size_config(serde_json::json!(false)),
             method_size_config(serde_json::json!(u64::MAX)),
         ] {
-            assert!(method_size_diagnostics(&equal, config.clone()).is_empty());
-            assert_method_size_report(&over, config, "Test", 201, 200);
+            assert!(method_size_diagnostics(&at, config.clone()).is_empty());
+            assert_method_size_report(&over, config, "Узел", 201, 200);
         }
     }
 
     #[test]
     fn method_size_threshold_keeps_i64_to_u32_cast() {
-        let code = "Procedure Test()\n    A = 1;\nEndProcedure";
+        let code = "Функция Узел()\n\tВозврат 2;\nКонецФункции";
         for (configured, effective) in [
-            (-1_i64, u32::MAX),
-            (-4_294_967_296, 0),
-            (-4_294_967_295, 1),
-            (-4_294_967_294, 2),
-            (4_294_967_296, 0),
-            (4_294_967_297, 1),
-            (i64::MIN, 0),
             (i64::MAX, u32::MAX),
+            (-1_i64, u32::MAX),
+            (4_294_967_297, 1),
+            (4_294_967_296, 0),
+            (-4_294_967_294, 2),
+            (-4_294_967_295, 1),
+            (-4_294_967_296, 0),
+            (i64::MIN, 0),
         ] {
             let config = method_size_config(configured.into());
             if effective < 2 {
-                assert_method_size_report(code, config, "Test", 2, effective);
+                assert_method_size_report(code, config, "Узел", 2, effective);
             } else {
                 assert!(method_size_diagnostics(code, config).is_empty(), "{configured}");
             }
@@ -308,9 +295,9 @@ mod tests {
 
     #[test]
     fn method_size_disabled_keeps_other_diagnostics() {
-        let code = "Procedure Test()\n    A = A;\nEndProcedure";
+        let code = "Процедура Узел(Х)\n\tХ = Х;\nКонецПроцедуры";
         let enabled = method_size_config(1.into());
-        assert_method_size_report(code, enabled.clone(), "Test", 2, 1);
+        assert_method_size_report(code, enabled.clone(), "Узел", 2, 1);
         let mut disabled = enabled.clone();
         disabled.disabled.push(DiagnosticCode::MethodSize);
         assert!(method_size_diagnostics(code, disabled.clone()).is_empty());

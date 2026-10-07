@@ -33,7 +33,7 @@
 use std::collections::HashSet;
 
 const MODULE: &str = include_str!("fixtures/Module.bsl");
-const QUERY: &str = include_str!("fixtures/user_query_with_highlighting_issue.sdbl");
+const QUERY: &str = include_str!("fixtures/sdbl_independent_package.sdbl");
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Lang {

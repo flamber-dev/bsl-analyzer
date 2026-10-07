@@ -3,7 +3,7 @@ use crate::defined_type::DefinedType;
 use crate::error::Result;
 use crate::event_subscription::EventSubscription;
 use crate::http_service::HTTPService;
-use crate::metadata_object::{AttributeType, MdoType, MetadataObject, Name};
+use crate::metadata_object::{MdoType, MetadataObject, Name};
 use crate::register::Register;
 use crate::role::Role;
 use crate::scheduled_job::ScheduledJob;
@@ -13,7 +13,6 @@ use intern::NormName;
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
 use stdx::case::CaseExt;
 use uuid::Uuid;
 
@@ -164,11 +163,6 @@ impl Configuration {
             web_services: Vec::new(),
             integration_services: Vec::new(),
         }
-    }
-
-    pub fn from_xml_file(path: impl AsRef<Path>) -> Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        Self::from_xml_str(&content)
     }
 
     pub fn from_xml_str(xml: &str) -> Result<Self> {
@@ -364,14 +358,6 @@ impl Configuration {
         self.use_ordinary_form_in_managed_application
     }
 
-    pub fn set_use_managed_form_in_ordinary_application(&mut self, value: bool) {
-        self.use_managed_form_in_ordinary_application = value;
-    }
-
-    pub fn set_use_ordinary_form_in_managed_application(&mut self, value: bool) {
-        self.use_ordinary_form_in_managed_application = value;
-    }
-
     pub fn metadata_objects(&self) -> &[MetadataObject] {
         &self.metadata_objects
     }
@@ -483,11 +469,6 @@ impl Configuration {
     pub fn find_metadata_object(&self, mdo_type: MdoType, name: &str) -> Option<&MetadataObject> {
         let idx = *self.metadata_objects_by_key.get(&(mdo_type, NormName::intern(name)))?;
         self.metadata_objects.get(idx)
-    }
-
-    pub fn find_constant_type(&self, name: &str) -> Option<&AttributeType> {
-        self.find_metadata_object(MdoType::Constant, name)
-            .and_then(|mdo| mdo.constant_type.as_ref())
     }
 
     pub fn registers(&self) -> &[Register] {
@@ -753,6 +734,7 @@ fn index_document_recorders(
 mod tests {
     use super::*;
     use crate::enums::ReturnValueReuse;
+    use crate::metadata_object::AttributeType;
 
     #[test]
     fn test_configuration_creation() {

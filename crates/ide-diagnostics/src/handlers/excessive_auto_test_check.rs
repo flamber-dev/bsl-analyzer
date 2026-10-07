@@ -134,244 +134,170 @@ pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
 mod tests {
     use super::check_body;
     use crate::test_utils::*;
+    use expect_test::expect;
+
+    fn check(code: &str, expected: expect_test::Expect) {
+        let diagnostics = check_body_diagnostic(code, check_body);
+        expected.assert_eq(&format_diags(code, &diagnostics));
+    }
+
     #[test]
-    fn test_russian_property_with_blank_lines() {
-        let code = r#"
-Процедура ПриСозданииНаСервере()
-
-    Если Параметры.Свойство("АвтоТест") Тогда
-
-        Возврат;
-
-    КонецЕсли;
-
+    fn test_branch_with_useful_action_is_silent() {
+        let code = r#"&НаСервере
+Процедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)
+	Если Параметры.Свойство("АвтоТест") Тогда
+		ЗаполнитьДемоДанными();
+		Возврат;
+	КонецЕсли;
+	ЗагрузитьГрафикПолива();
 КонецПроцедуры
 "#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
-    }
-
-    #[test]
-    fn test_russian_equality_with_comment() {
-        let code = r#"
-Процедура ОбработкаЗаполнения(ДанныеЗаполнения, ТестЗаполения, СтандартнаяОбработка)
-
-    // Пропускаем обработку, чтобы гарантировать получение формы при передаче параметра "АвтоТест"
-    Если ДанныеЗаполнения = "АвтоТест" Тогда
-        Возврат;
-    КонецЕсли;
-
-КонецПроцедуры
-"#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
-    }
-
-    #[test]
-    fn test_russian_property_on_local_variable() {
-        let code = r#"
-Процедура ПроверитьВыполение(Перечень)
-
-    Если Перечень.Свойство("АвтоТест") Тогда
-
-        Возврат;
-
-    КонецЕсли;
-
-КонецПроцедуры
-"#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
-    }
-
-    #[test]
-    fn test_russian_multiple_statements_no_error() {
-        let code = r#"
-Процедура БезОшибок()
-
-    Перечень.Вставить("АвтоТест", "АвтоТест");
-
-    Если Перечень.Свойство("АвтоТест") Тогда
-
-        ВыполняемДействиеСПеречнем(Перечень);
-        Возврат;
-
-    КонецЕсли;
-
-КонецПроцедуры
-"#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        assert_eq!(diagnostics.len(), 0, "Should NOT flag when multiple statements in body");
-    }
-
-    #[test]
-    fn test_english_property_with_annotation() {
-        let code = r#"
-&AtServer
-Procedure OnCreateAtServer()
-
-    If Parameters.Property("AutoTest") Then
-        Return;
-    EndIf;
-
-EndProcedure
-"#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
-    }
-
-    #[test]
-    fn test_english_equality_check() {
-        let code = r#"
-Procedure Filling()
-
-    If VariableName = "AutoTest" Then
-        Return;
-    EndIf;
-
-EndProcedure
-"#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
-    }
-
-    #[test]
-    fn test_english_property_with_blank_lines() {
-        let code = r#"
-Procedure Check(List)
-
-    If List.Property("AutoTest") Then
-
-        Return;
-
-    EndIf;
-
-EndProcedure
-"#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
-    }
-
-    #[test]
-    fn test_english_multiple_statements_no_error() {
-        let code = r#"
-Procedure NoError(List)
-
-    If List.Property("AutoTest") Then
-
-        List.Delete("AutoTest");
-        Return;
-
-    EndIf;
-
-EndProcedure
-"#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        assert_eq!(diagnostics.len(), 0, "Should NOT flag when multiple statements");
-    }
-
-    #[test]
-    fn test_top_level_if_not_in_procedure() {
-        let code = r#"
-Если Отказ Тогда
-
-    Возврат;
-
-КонецЕсли;
-"#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        assert_eq!(diagnostics.len(), 0, "Top-level if without AutoTest should not flag");
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_russian_property() {
-        let code = r#"
-Процедура Тест()
-    Если Параметры.Свойство("АвтоТест") Тогда
-        Возврат;
-    КонецЕсли;
+        let code = r#"&НаСервере
+Процедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)
+	Если Параметры.Свойство("АвтоТест") Тогда
+		Возврат;
+	КонецЕсли;
+	ЗагрузитьГрафикПолива();
 КонецПроцедуры
 "#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
+        check(
+            code,
+            expect![[r#"
+            ExcessiveAutoTestCheck @ 3:2..5:12
+              message: Избыточная проверка устаревшего параметра 'АвтоТест'
+              severity: Information"#]],
+        );
     }
 
     #[test]
-    fn test_english_property() {
-        let code = r#"
-Procedure Test()
-    If Parameters.Property("AutoTest") Then
-        Return;
-    EndIf;
-EndProcedure
+    fn test_russian_property_on_other_structure_with_blank_lines() {
+        let code = r#"Процедура ПодготовитьСмену(НастройкиСмены)
+
+	// Служебная проверка для запуска без интерфейса
+
+	Если НастройкиСмены.Свойство("АвтоТест") Тогда
+
+		Возврат;
+
+	КонецЕсли;
+
+	НастройкиСмены.Вставить("Начало", ТекущаяДата());
+КонецПроцедуры
 "#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
+        check(
+            code,
+            expect![[r#"
+            ExcessiveAutoTestCheck @ 5:2..9:12
+              message: Избыточная проверка устаревшего параметра 'АвтоТест'
+              severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_russian_equality() {
-        let code = r#"
-Процедура Тест()
-    Если Переменная = "АвтоТест" Тогда
-        Возврат;
-    КонецЕсли;
+        let code = r#"Процедура ОбработкаЗаполнения(ДанныеЗаполнения, ТекстЗаполнения, СтандартнаяОбработка)
+	Если ДанныеЗаполнения = "АвтоТест" Тогда
+		Возврат;
+	КонецЕсли;
+	Ответственный = ПользователиКлиентСервер.ТекущийПользователь();
 КонецПроцедуры
 "#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
+        check(
+            code,
+            expect![[r#"
+            ExcessiveAutoTestCheck @ 2:2..4:12
+              message: Избыточная проверка устаревшего параметра 'АвтоТест'
+              severity: Information"#]],
+        );
+    }
+
+    #[test]
+    fn test_english_property_with_annotation() {
+        let code = r#"&AtServer
+Procedure OnCreateAtServer(Cancel, StandardProcessing)
+
+	If Parameters.Property("AutoTest") Then
+		Return;
+	EndIf;
+
+	LoadSchedule();
+EndProcedure
+"#;
+        check(
+            code,
+            expect![[r#"
+            ExcessiveAutoTestCheck @ 4:2..6:8
+              message: Избыточная проверка устаревшего параметра 'АвтоТест'
+              severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_english_equality() {
-        let code = r#"
-Procedure Test()
-    If Variable = "AutoTest" Then
-        Return;
-    EndIf;
+        let code = r#"Procedure Filling(FillingData, StandardProcessing)
+	If FillingData = "AutoTest" Then
+
+		Return;
+
+	EndIf;
 EndProcedure
 "#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
+        check(
+            code,
+            expect![[r#"
+            ExcessiveAutoTestCheck @ 2:2..6:8
+              message: Избыточная проверка устаревшего параметра 'АвтоТест'
+              severity: Information"#]],
+        );
     }
 
     #[test]
-    fn test_multiple_statements_no_error() {
-        let code = r#"
-Процедура Тест()
-    Если Параметры.Свойство("АвтоТест") Тогда
-        Действие();
-        Возврат;
-    КонецЕсли;
-КонецПроцедуры
+    fn test_english_branch_with_useful_action_is_silent() {
+        let code = r#"Procedure PrepareShift(ShiftSettings)
+	If ShiftSettings.Property("AutoTest") Then
+		ShiftSettings.Delete("AutoTest");
+		Return;
+	EndIf;
+EndProcedure
 "#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        assert_eq!(diagnostics.len(), 0, "Should NOT flag when multiple statements");
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_no_return_no_error() {
-        let code = r#"
-Процедура Тест()
-    Если Параметры.Свойство("АвтоТест") Тогда
-        Действие();
-    КонецЕсли;
+        let code = r#"Процедура ПодготовитьСмену(НастройкиСмены)
+	Если НастройкиСмены.Свойство("АвтоТест") Тогда
+		НастройкиСмены.Удалить("АвтоТест");
+	КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        assert_eq!(diagnostics.len(), 0, "Should NOT flag when no return");
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_no_autotest_check() {
-        let code = r#"
-Процедура Тест()
-    Если Параметры.Свойство("ДругойПараметр") Тогда
-        Возврат;
-    КонецЕсли;
+        let code = r#"Процедура ПодготовитьСмену(НастройкиСмены)
+	Если НастройкиСмены.Свойство("Ночная") Тогда
+		Возврат;
+	КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        assert_eq!(diagnostics.len(), 0, "Should NOT flag without AutoTest");
+        check(code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_top_level_if_not_in_procedure() {
+        let code = r#"Если НеЗапускать Тогда
+
+	Возврат;
+
+КонецЕсли;
+"#;
+        check(code, expect![[r#""#]]);
     }
 }

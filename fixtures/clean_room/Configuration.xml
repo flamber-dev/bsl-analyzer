@@ -1,0 +1,9 @@
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+  <Configuration uuid="15300000-0000-4000-8000-000000000006">
+    <Properties>
+      <Name>Наблюдения</Name>
+      <UseManagedFormInOrdinaryApplication>true</UseManagedFormInOrdinaryApplication>
+      <UseOrdinaryFormInManagedApplication>true</UseOrdinaryFormInManagedApplication>
+    </Properties>
+  </Configuration>
+</MetaDataObject>

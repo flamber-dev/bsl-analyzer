@@ -70,49 +70,46 @@ mod tests {
     use crate::test_utils::*;
     use crate::{DiagnosticCode, DiagnosticsConfig};
     use expect_test::expect;
+
+    fn check(code: &str, expected: expect_test::Expect) {
+        check_diagnostics_snapshot_for(code, DiagnosticCode::IfConditionComplexity, expected);
+    }
+
     #[test]
     fn test_simple_condition() {
-        let code = r#"Процедура Тест()
-    Если А И Б Тогда
-        Сообщить("OK");
-    КонецЕсли;
-КонецПроцедуры"#;
-
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::IfConditionComplexity,
-            expect![[r#""#]],
-        );
+        let code = r#"Процедура Полить(Грядка)
+	Если Грядка.Сухая ИЛИ Грядка.Жарко Тогда
+		Грядка.Полить();
+	КонецЕсли;
+КонецПроцедуры
+"#;
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_at_threshold() {
-        let code = r#"Процедура Тест()
-    Если А И Б ИЛИ В Тогда
-        Сообщить("OK");
-    КонецЕсли;
-КонецПроцедуры"#;
-
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::IfConditionComplexity,
-            expect![[r#""#]],
-        );
+        // Complexity is the number of logical operators plus one: two operators is 3.
+        let code = r#"Процедура Полить(Грядка)
+	Если Грядка.Сухая И Грядка.Засеяна ИЛИ Грядка.Жарко Тогда
+		Грядка.Полить();
+	КонецЕсли;
+КонецПроцедуры
+"#;
+        check(code, expect![""]);
     }
 
     #[test]
     fn test_complex_condition() {
-        let code = r#"Процедура Тест()
-    Если А И Б ИЛИ В И Г Тогда
-        Сообщить("OK");
-    КонецЕсли;
-КонецПроцедуры"#;
-
-        check_diagnostics_snapshot_for(
+        let code = r#"Процедура Полить(Грядка)
+	Если Грядка.Сухая И Грядка.Засеяна ИЛИ Грядка.Жарко И Грядка.Теплица Тогда
+		Грядка.Полить();
+	КонецЕсли;
+КонецПроцедуры
+"#;
+        check(
             code,
-            DiagnosticCode::IfConditionComplexity,
             expect![[r#"
-                IfConditionComplexity @ 2:10..2:25
+                IfConditionComplexity @ 2:7..2:70
                   message: Условие имеет сложность 4 (максимум 3). Упростите условие или вынесите части в переменные.
                   severity: Information"#]],
         );
@@ -120,19 +117,18 @@ mod tests {
 
     #[test]
     fn test_elseif_complex() {
-        let code = r#"Процедура Тест()
-    Если А Тогда
-        Сообщить("1");
-    ИначеЕсли Б И В ИЛИ Г И Д Тогда
-        Сообщить("2");
-    КонецЕсли;
-КонецПроцедуры"#;
-
-        check_diagnostics_snapshot_for(
+        let code = r#"Процедура Полить(Грядка)
+	Если Грядка.Дождь Тогда
+		Возврат;
+	ИначеЕсли Грядка.Сухая И Грядка.Засеяна ИЛИ Грядка.Жарко И Грядка.Теплица Тогда
+		Грядка.Полить();
+	КонецЕсли;
+КонецПроцедуры
+"#;
+        check(
             code,
-            DiagnosticCode::IfConditionComplexity,
             expect![[r#"
-                IfConditionComplexity @ 4:15..4:30
+                IfConditionComplexity @ 4:12..4:75
                   message: Условие имеет сложность 4 (максимум 3). Упростите условие или вынесите части в переменные.
                   severity: Information"#]],
         );
@@ -140,17 +136,16 @@ mod tests {
 
     #[test]
     fn test_english_condition() {
-        let code = r#"Procedure Test()
-    If A And B Or C And D Then
-        Message("OK");
-    EndIf;
-EndProcedure"#;
-
-        check_diagnostics_snapshot_for(
+        let code = r#"Procedure Water(Bed)
+	If Bed.Dry And Bed.Sown Or Bed.Hot And Bed.Greenhouse Then
+		Bed.Water();
+	EndIf;
+EndProcedure
+"#;
+        check(
             code,
-            DiagnosticCode::IfConditionComplexity,
             expect![[r#"
-                IfConditionComplexity @ 2:8..2:26
+                IfConditionComplexity @ 2:5..2:55
                   message: Условие имеет сложность 4 (максимум 3). Упростите условие или вынесите части в переменные.
                   severity: Information"#]],
         );
@@ -158,110 +153,102 @@ EndProcedure"#;
 
     #[test]
     fn test_large_multiline_condition() {
-        let code = r#"Процедура Тест()
-    Если ИдентификаторОбъекта = "АнализСубконто"
-        ИЛИ ИдентификаторОбъекта = "АнализСчета"
-        ИЛИ ИдентификаторОбъекта = "ОборотноСальдоваяВедомость"
-        ИЛИ ИдентификаторОбъекта = "ОборотноСальдоваяВедомостьПоСчету"
-        ИЛИ ИдентификаторОбъекта = "ОборотыМеждуСубконто"
-        ИЛИ ИдентификаторОбъекта = "ОборотыСчета"
-        ИЛИ ИдентификаторОбъекта = "СводныеПроводки"
-        ИЛИ ИдентификаторОбъекта = "ГлавнаяКнига"
-        ИЛИ ИдентификаторОбъекта = "ШахматнаяВедомость" Тогда
-        Возврат;
-    КонецЕсли;
-КонецПроцедуры"#;
-
-        check_diagnostics_snapshot_for(
+        let code = r#"Функция ЭтоОвощ(Культура)
+	Если Культура = "Морковь"
+		ИЛИ Культура = "Свекла"
+		ИЛИ Культура = "Капуста"
+		ИЛИ Культура = "Лук"
+		ИЛИ Культура = "Чеснок"
+		ИЛИ Культура = "Редис" Тогда
+		Возврат Истина;
+	КонецЕсли;
+	Возврат Ложь;
+КонецФункции
+"#;
+        check(
             code,
-            DiagnosticCode::IfConditionComplexity,
             expect![[r#"
-                IfConditionComplexity @ 2:10..10:56
-                  message: Условие имеет сложность 9 (максимум 3). Упростите условие или вынесите части в переменные.
-                  severity: Information"#]],
+            IfConditionComplexity @ 2:7..7:25
+              message: Условие имеет сложность 6 (максимум 3). Упростите условие или вынесите части в переменные.
+              severity: Information"#]],
         );
     }
 
     #[test]
     fn test_nested_outer_pass_inner_warn() {
-        let code = r#"Процедура Тест()
-    Если ИдентификаторОбъекта = "АнализСубконто"
-        ИЛИ ИдентификаторОбъекта = "АнализСчета" Тогда
-        Если ИдентификаторОбъекта = "ОборотыМеждуСубконто"
-            ИЛИ ИдентификаторОбъекта = "ОборотыСчета"
-            ИЛИ ИдентификаторОбъекта = "СводныеПроводки"
-            ИЛИ ИдентификаторОбъекта = "ШахматнаяВедомость" Тогда
-            Возврат;
-        КонецЕсли;
-    КонецЕсли;
-КонецПроцедуры"#;
-
-        check_diagnostics_snapshot_for(
+        let code = r#"Процедура Рассадить(Культура)
+	Если Культура = "Томат"
+		ИЛИ Культура = "Перец" Тогда
+		Если Культура.Сорт = "Ранний"
+			ИЛИ Культура.Сорт = "Средний"
+			ИЛИ Культура.Сорт = "Поздний"
+			ИЛИ Культура.Сорт = "Гибрид" Тогда
+			Возврат;
+		КонецЕсли;
+	КонецЕсли;
+КонецПроцедуры
+"#;
+        check(
             code,
-            DiagnosticCode::IfConditionComplexity,
             expect![[r#"
-                IfConditionComplexity @ 4:14..7:60
-                  message: Условие имеет сложность 4 (максимум 3). Упростите условие или вынесите части в переменные.
-                  severity: Information"#]],
+            IfConditionComplexity @ 4:8..7:32
+              message: Условие имеет сложность 4 (максимум 3). Упростите условие или вынесите части в переменные.
+              severity: Information"#]],
+        );
+    }
+
+    #[test]
+    fn test_if_and_elseif_both_complex() {
+        let code = r#"Функция Сезон(Месяц)
+	Если Месяц = 12
+		ИЛИ Месяц = 1
+		ИЛИ Месяц = 2
+		ИЛИ Месяц = 13 Тогда
+		Возврат "Зима";
+	ИначеЕсли Месяц = 3
+		ИЛИ Месяц = 4
+		ИЛИ Месяц = 5
+		ИЛИ Месяц = 6
+		ИЛИ Месяц = 7 Тогда
+		Возврат "Тепло";
+	Иначе
+		Возврат "Осень";
+	КонецЕсли;
+КонецФункции
+"#;
+        check(
+            code,
+            expect![[r#"
+            IfConditionComplexity @ 2:7..5:17
+              message: Условие имеет сложность 4 (максимум 3). Упростите условие или вынесите части в переменные.
+              severity: Information
+            IfConditionComplexity @ 7:12..11:16
+              message: Условие имеет сложность 5 (максимум 3). Упростите условие или вынесите части в переменные.
+              severity: Information"#]],
         );
     }
 
     #[test]
     fn test_sub_default_threshold_emits() {
-        let code = r#"Процедура Тест()
-    Если А И Б Тогда
-        Сообщить("OK");
-    КонецЕсли;
-КонецПроцедуры"#;
-
+        let code = r#"Процедура Полить(Грядка)
+	Если Грядка.Сухая ИЛИ Грядка.Жарко Тогда
+		Грядка.Полить();
+	КонецЕсли;
+КонецПроцедуры
+"#;
         let mut config = DiagnosticsConfig::default();
         config.parameters.insert(
             DiagnosticCode::IfConditionComplexity,
             serde_json::json!({ "maxIfConditionComplexity": 1 }),
         );
-
-        let diagnostics = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
-        let if_diags: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::IfConditionComplexity)
-            .collect();
+        let diagnostics: Vec<_> =
+            check_hir_diagnostic_with_config(code, config, crate::diagnostics)
+                .into_iter()
+                .filter(|d| d.code == DiagnosticCode::IfConditionComplexity)
+                .collect();
         expect![[r#"
-            IfConditionComplexity @ 2:10..2:15
+            IfConditionComplexity @ 2:7..2:36
               message: Условие имеет сложность 2 (максимум 1). Упростите условие или вынесите части в переменные.
-              severity: Information"#]].assert_eq(&format_diags(code, &if_diags));
-    }
-
-    #[test]
-    fn test_if_and_elseif_both_complex() {
-        let code = r#"Процедура Тест()
-    Если ИдентификаторОбъекта = "ИД1"
-        ИЛИ ИдентификаторОбъекта = "ИД2"
-        ИЛИ ИдентификаторОбъекта = "ИД3"
-        ИЛИ ИдентификаторОбъекта = "ИД4" Тогда
-        Возврат;
-    ИначеЕсли ИдентификаторОбъекта = "ИД5"
-        ИЛИ ИдентификаторОбъекта = "ИД6"
-        ИЛИ ИдентификаторОбъекта = "ИД7"
-        ИЛИ ИдентификаторОбъекта = "ИД8"
-        ИЛИ ИдентификаторОбъекта = "ИД9"
-        ИЛИ ИдентификаторОбъекта = "ИД10"
-        ИЛИ ИдентификаторОбъекта = "ИД10" Тогда
-        Возврат;
-    Иначе
-        Возврат;
-    КонецЕсли;
-КонецПроцедуры"#;
-
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::IfConditionComplexity,
-            expect![[r#"
-                IfConditionComplexity @ 2:10..5:41
-                  message: Условие имеет сложность 4 (максимум 3). Упростите условие или вынесите части в переменные.
-                  severity: Information
-                IfConditionComplexity @ 7:15..13:42
-                  message: Условие имеет сложность 7 (максимум 3). Упростите условие или вынесите части в переменные.
-                  severity: Information"#]],
-        );
+              severity: Information"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 }

@@ -1,4 +1,4 @@
-use crate::enums::{ModuleType, ObjectBelonging, ReturnValueReuse, SupportVariant};
+use crate::enums::{ModuleType, ObjectBelonging, ReturnValueReuse};
 use crate::traits::{MdObject, Module};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
@@ -29,9 +29,6 @@ pub struct CommonModule {
 
     #[serde(rename = "extendedConfigurationObject", default)]
     extended_configuration_object: Option<Uuid>,
-
-    #[serde(rename = "supportVariant", default)]
-    support_variant: SupportVariant,
 
     #[serde(rename = "protected", default)]
     protected: bool,
@@ -174,10 +171,6 @@ impl MdObject for CommonModule {
         self.object_belonging
     }
 
-    fn support_variant(&self) -> SupportVariant {
-        self.support_variant
-    }
-
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -205,7 +198,6 @@ pub struct CommonModuleBuilder {
     uri: Option<String>,
     object_belonging: ObjectBelonging,
     extended_configuration_object: Option<Uuid>,
-    support_variant: SupportVariant,
     protected: bool,
     server: Option<bool>,
     global: Option<bool>,
@@ -306,7 +298,6 @@ impl CommonModuleBuilder {
             uri: self.uri,
             object_belonging: self.object_belonging,
             extended_configuration_object: self.extended_configuration_object,
-            support_variant: self.support_variant,
             protected: self.protected,
             server: self.server,
             global: self.global,

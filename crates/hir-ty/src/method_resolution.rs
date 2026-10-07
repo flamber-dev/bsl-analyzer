@@ -307,6 +307,7 @@ pub fn resolve_user_call(
             }
             Err(
                 kind @ (UnresolvedMethodKind::MethodNotExport
+                | UnresolvedMethodKind::SelfMethodNotExport
                 | UnresolvedMethodKind::ReceiverNotResolved
                 | UnresolvedMethodKind::ReceiverNameAbsent),
             ) => {

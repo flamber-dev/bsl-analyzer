@@ -4849,15 +4849,9 @@ mod tests {
         if !deny_access(&edited) {
             return;
         }
+        let store = Store::in_memory().unwrap();
         let (result, warns) = warns_during(|| {
-            cache.full_refresh(
-                &baseline,
-                &roots,
-                None,
-                32,
-                BaselineHashMode::RawFileBytes,
-                &Store::in_memory().unwrap(),
-            )
+            cache.full_refresh(&baseline, &roots, None, 32, BaselineHashMode::RawFileBytes, &store)
         });
         restore_access(&edited);
         result.unwrap();

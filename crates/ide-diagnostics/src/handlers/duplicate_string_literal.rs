@@ -284,189 +284,211 @@ mod tests {
     use crate::test_utils::*;
     use expect_test::expect;
 
+    fn snapshot(code: &str, expected: expect_test::Expect) -> Vec<Diagnostic> {
+        let diagnostics = check_body_diagnostic(code, check_body);
+        expected.assert_eq(&format_diags(code, &diagnostics));
+        diagnostics
+    }
+
     #[test]
     fn test_duplicate_in_method() {
-        let code = r#"Процедура Метод1()
-    Ц = "Строка2";
-    Если Ц = "Строка2" Тогда
-        Ф = ВРег("Строка2") + НРег("Строка3");
-    Иначе
-        Ф = НРег("Строка2");
-    КонецЕсли;
-КонецПроцедуры"#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        expect![[r#"
-            DuplicateStringLiteral @ 2:9..2:18
-              message: Необходимо избавиться от многократного использования строкового литерала ""Строка2""
-              severity: Information"#]].assert_eq(&format_diags(code, &diagnostics));
-        assert!(diagnostics[0].message.contains("Строка2"));
+        let code = r#"Функция ВидУчастка(Участок)
+	Если Участок.Вид = "Поливочный" Тогда
+		Возврат СтрШаблон("%1", "Поливочный");
+	КонецЕсли;
+	Участок.Вид = "Поливочный";
+	Возврат "Сухой";
+КонецФункции
+"#;
+        let diagnostics = snapshot(
+            code,
+            expect![[r#"
+            DuplicateStringLiteral @ 2:21..2:33
+              message: Необходимо избавиться от многократного использования строкового литерала ""Поливочный""
+              severity: Information"#]],
+        );
+        assert!(diagnostics[0].message.contains("Поливочный"));
     }
 
     #[test]
     fn test_duplicate_case_insensitive_in_method() {
-        let code = r#"Процедура Метод2()
-    Ц2 = "Строка22";
-    Если Ц2 = "Строка22" Тогда
-        Ф2 = Метод7("строка22");
-    Иначе
-        Ф2 = ("Строка3" + "Строка4" + "СтрОкА22");
-    КонецЕсли;
-КонецПроцедуры"#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        expect![[r#"
-            DuplicateStringLiteral @ 2:10..2:20
-              message: Необходимо избавиться от многократного использования строкового литерала ""Строка22""
-              severity: Information"#]].assert_eq(&format_diags(code, &diagnostics));
-        assert!(diagnostics[0].message.contains("Строка22"));
+        let code = r#"Процедура ОтметитьЗасуху(Журнал)
+	Журнал.Добавить("засуха");
+	Журнал.Добавить("ЗАСУХА" + "!");
+	Если Журнал[0] = "Засуха" Тогда
+		Журнал.Очистить();
+	КонецЕсли;
+КонецПроцедуры
+"#;
+        let diagnostics = snapshot(
+            code,
+            expect![[r#"
+            DuplicateStringLiteral @ 2:18..2:26
+              message: Необходимо избавиться от многократного использования строкового литерала ""засуха""
+              severity: Information"#]],
+        );
+        assert!(diagnostics[0].message.contains("засуха"));
     }
 
     #[test]
-    fn test_case_insensitive() {
-        let code = r#"
-Процедура Тест()
-    А = "Ошибка";
-    Б = "ошибка";
-    В = "ОШИБКА";
+    fn test_case_sensitive_mode_keeps_spellings_apart() {
+        let code = r#"Процедура ОтметитьЗасуху(Журнал)
+	Журнал.Добавить("засуха");
+	Журнал.Добавить("ЗАСУХА" + "!");
+	Если Журнал[0] = "Засуха" Тогда
+		Журнал.Очистить();
+	КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        expect![[r#"
-            DuplicateStringLiteral @ 3:9..3:17
-              message: Необходимо избавиться от многократного использования строкового литерала ""Ошибка""
-              severity: Information"#]].assert_eq(&format_diags(code, &diagnostics));
-    }
-
-    #[test]
-    fn test_min_length_filter() {
-        let code = r#"
-Процедура Тест()
-    А = "OK";
-    Б = "OK";
-    В = "OK";
-КонецПроцедуры
-"#;
-        let diagnostics = check_body_diagnostic(code, check_body);
+        let mut config = crate::DiagnosticsConfig::all_enabled();
+        config.parameters.insert(
+            DiagnosticCode::DuplicateStringLiteral,
+            serde_json::json!({"caseSensitive": true}),
+        );
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_threshold() {
-        let code = r#"
-Процедура Тест()
-    А = "Текст1";
-    Б = "Текст1";
+        let code = r#"Процедура Подписать(Табличка)
+	Табличка.Верх = "Огурцы, сорт Апрельский";
+	Табличка.Низ = "Огурцы, сорт Апрельский";
 КонецПроцедуры
 "#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+        snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_exceeds_threshold() {
-        let code = r#"
-Процедура Тест()
-    А = "Текст1";
-    Б = "Текст1";
-    В = "Текст1";
+        let code = r#"Процедура Подписать(Табличка)
+	Табличка.Верх = "Огурцы, сорт Апрельский";
+	Табличка.Низ = "Огурцы, сорт Апрельский";
+	Табличка.Бок = "Огурцы, сорт Апрельский";
 КонецПроцедуры
 "#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        expect![[r#"
-            DuplicateStringLiteral @ 3:9..3:17
-              message: Необходимо избавиться от многократного использования строкового литерала ""Текст1""
-              severity: Information"#]].assert_eq(&format_diags(code, &diagnostics));
+        snapshot(
+            code,
+            expect![[r#"
+            DuplicateStringLiteral @ 2:18..2:43
+              message: Необходимо избавиться от многократного использования строкового литерала ""Огурцы, сорт Апрельский""
+              severity: Information"#]],
+        );
+    }
+
+    #[test]
+    fn test_min_length_filter() {
+        // Literal length is measured in bytes with the quotes: `"ab"` is four.
+        let code = r#"Процедура Разметить(Ряд)
+	Ряд.Начало = "ab";
+	Ряд.Середина = "ab";
+	Ряд.Конец = "ab";
+КонецПроцедуры
+"#;
+        snapshot(code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_min_length_boundary() {
+        let code = r#"Процедура Разметить(Ряд)
+	Ряд.Начало = "abc";
+	Ряд.Середина = "abc";
+	Ряд.Конец = "abc";
+КонецПроцедуры
+"#;
+        snapshot(
+            code,
+            expect![[r#"
+            DuplicateStringLiteral @ 2:15..2:20
+              message: Необходимо избавиться от многократного использования строкового литерала ""abc""
+              severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_excluded_methods_type() {
-        let code = r#"
-Процедура Тест()
-    А = Тип("СправочникСсылка.Товары");
-    Б = Тип("СправочникСсылка.Товары");
-    В = Тип("СправочникСсылка.Товары");
+        let code = r#"Процедура ПроверитьТипы(Значение)
+	Ссылка = Тип("СправочникСсылка.Культуры");
+	Пустая = Тип("СправочникСсылка.Культуры");
+	Если ТипЗнч(Значение) = Тип("СправочникСсылка.Культуры") Тогда
+		Возврат;
+	КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+        snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_excluded_methods_type_english() {
-        let code = r#"
-Процедура Тест()
-    А = Type("CatalogRef.Goods");
-    Б = Type("CatalogRef.Goods");
-    В = Type("CatalogRef.Goods");
-КонецПроцедуры
+        let code = r#"Procedure CheckTypes(Value)
+	First = Type("CatalogRef.Crops");
+	Second = Type("CatalogRef.Crops");
+	Third = Type("CatalogRef.Crops");
+EndProcedure
 "#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+        snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_excluded_methods_mixed_with_regular() {
-        let code = r#"
-Процедура Тест()
-    А = Тип("СправочникСсылка.Товары");
-    Б = Тип("СправочникСсылка.Товары");
-    В = "СправочникСсылка.Товары";
-    Г = "СправочникСсылка.Товары";
-    Д = "СправочникСсылка.Товары";
+        let code = r#"Процедура ПроверитьТипы(Значение)
+	Ссылка = Тип("СправочникСсылка.Культуры");
+	Пустая = Тип("СправочникСсылка.Культуры");
+	Имя1 = "СправочникСсылка.Культуры";
+	Имя2 = "СправочникСсылка.Культуры";
+	Имя3 = "СправочникСсылка.Культуры";
 КонецПроцедуры
 "#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        expect![[r#"
-            DuplicateStringLiteral @ 5:9..5:34
-              message: Необходимо избавиться от многократного использования строкового литерала ""СправочникСсылка.Товары""
-              severity: Information"#]].assert_eq(&format_diags(code, &diagnostics));
+        snapshot(
+            code,
+            expect![[r#"
+            DuplicateStringLiteral @ 4:9..4:36
+              message: Необходимо избавиться от многократного использования строкового литерала ""СправочникСсылка.Культуры""
+              severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_excluded_type_description_constructor() {
-        let code = r#"
-Процедура Тест()
-    ТаблицаДанных.Колонки.Добавить("ОстаткиПоЯчейкам", Новый ОписаниеТипов("Число", , , Новый КвалификаторыЧисла(10, 3)));
-    ТаблицаДанных.Колонки.Добавить("ОстаткиНаСкладе", Новый ОписаниеТипов("Число", , , Новый КвалификаторыЧисла(10, 3)));
-    ТаблицаДанных.Колонки.Добавить("Разница", Новый ОписаниеТипов("Число", , , Новый КвалификаторыЧисла(10, 3)));
+        let code = r#"Процедура ДобавитьКолонки(Таблица)
+	Таблица.Колонки.Добавить("Литры", Новый ОписаниеТипов("Число", , , Новый КвалификаторыЧисла(8, 2)));
+	Таблица.Колонки.Добавить("Норма", Новый ОписаниеТипов("Число", , , Новый КвалификаторыЧисла(8, 2)));
+	Таблица.Колонки.Добавить("Остаток", Новый ОписаниеТипов("Число", , , Новый КвалификаторыЧисла(8, 2)));
 КонецПроцедуры
 "#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+        snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_groups_emitted_in_source_order() {
-        let code = r#"
-Процедура Тест()
-    А = "Первый литерал";
-    Б = "Второй литерал";
-    В = "Первый литерал";
-    Г = "Второй литерал";
-    Д = "Первый литерал";
-    Е = "Второй литерал";
+        let code = r#"Процедура Распределить(Схема)
+	Схема.А1 = "Северная грядка";
+	Схема.А2 = "Южная грядка";
+	Схема.Б1 = "Северная грядка";
+	Схема.Б2 = "Южная грядка";
+	Схема.В1 = "Северная грядка";
+	Схема.В2 = "Южная грядка";
 КонецПроцедуры
 "#;
         let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 2);
-        assert!(diagnostics[0].message.contains("Первый литерал"));
-        assert!(diagnostics[1].message.contains("Второй литерал"));
+        assert!(diagnostics[0].message.contains("Северная грядка"));
+        assert!(diagnostics[1].message.contains("Южная грядка"));
     }
 
     #[test]
     fn test_separate_scopes() {
-        let code = r#"
-Процедура Метод1()
-    А = "Текст1";
-    Б = "Текст1";
+        let code = r#"Процедура Утро(Журнал)
+	Журнал.Добавить("Полив выполнен");
+	Журнал.Добавить("Полив выполнен");
 КонецПроцедуры
 
-Процедура Метод2()
-    В = "Текст1";
-    Г = "Текст1";
+Процедура Вечер(Журнал)
+	Журнал.Добавить("Полив выполнен");
+	Журнал.Добавить("Полив выполнен");
 КонецПроцедуры
 "#;
-        let diagnostics = check_body_diagnostic(code, check_body);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+        snapshot(code, expect![[r#""#]]);
     }
 
     /// Свод по файлу: одинаковые литералы двух методов считаются вместе и
@@ -474,7 +496,7 @@ mod tests {
     /// молчит на файловом входе — область там метод.
     #[test]
     fn file_mode_counts_across_methods() {
-        let code = "Процедура А()\n\tХ = \"Строка\";\n\tУ = \"Строка\";\nКонецПроцедуры\nПроцедура Б()\n\tЗ = \"Строка\";\nКонецПроцедуры\n";
+        let code = "Процедура Утро(Ж)\n\tЖ.Добавить(\"Полив\");\nКонецПроцедуры\nПроцедура Вечер(Ж)\n\tЖ.Добавить(\"Полив\");\n\tЖ.Добавить(\"Полив\");\nКонецПроцедуры\n";
         let mut config = crate::DiagnosticsConfig::all_enabled();
         config.parameters.insert(
             DiagnosticCode::DuplicateStringLiteral,
@@ -482,7 +504,8 @@ mod tests {
         );
         let file = check_ast_diagnostic_with_config(code, config.clone(), check);
         assert_eq!(file.len(), 1, "{file:?}");
-        assert_eq!(u32::from(file[0].range.start()), 30, "первое вхождение — в А");
+        let first = code.find("\"Полив\"").unwrap();
+        assert_eq!(u32::from(file[0].range.start()) as usize, first, "первое вхождение — в Утро");
         let bodies = check_body_diagnostic_with_config(code, config, check_body);
         assert!(bodies.is_empty(), "в режиме файла тела молчат");
 

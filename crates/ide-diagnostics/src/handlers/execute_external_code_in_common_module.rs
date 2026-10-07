@@ -111,56 +111,75 @@ mod tests {
     use ide_db::RootDatabaseImpl;
     use std::rc::Rc;
     use vfs::{FileId, FileSet, VfsPath};
-    fn check_violations_directly(code: &str) -> Vec<Diagnostic> {
+
+    fn context_for(
+        code: &str,
+        config: DiagnosticsConfig,
+    ) -> (RootDatabaseImpl, FileId, Rc<DiagnosticsConfig>) {
         let mut db = RootDatabaseImpl::new();
 
         let mut file_set = FileSet::default();
         let file_id = FileId(0);
-        file_set.insert(file_id, VfsPath::new("/test/Module.bsl"));
+        file_set.insert(file_id, VfsPath::new("/ОбменСКассой/Module.bsl"));
 
         let source_root = SourceRoot::new_local(file_set);
         db.set_source_root(SourceRootId(0), source_root);
         db.set_file_source_root(file_id, SourceRootId(0));
         db.set_file_text(file_id, code);
 
-        let config = Rc::new(DiagnosticsConfig::all_enabled());
+        (db, file_id, Rc::new(config))
+    }
+
+    fn check_violations_directly(code: &str) -> Vec<Diagnostic> {
+        let (db, file_id, config) = context_for(code, DiagnosticsConfig::all_enabled());
         let provider = ide_db::SalsaProvider::new(&db, None);
         let ctx = DiagnosticsContext::new(&config, file_id, &provider);
-
         detect_violations(&ctx)
+    }
+
+    fn module(
+        server: bool,
+        external_connection: bool,
+        ordinary_client: bool,
+        managed_client: bool,
+    ) -> bsl_metadata::CommonModule {
+        bsl_metadata::CommonModule::builder()
+            .name("ОбменСКассой")
+            .server(server)
+            .external_connection(external_connection)
+            .client_ordinary_application(ordinary_client)
+            .client_managed_application(managed_client)
+            .build()
     }
 
     #[test]
     fn test_detect_execute_statement() {
-        let code = r#"
-Процедура ВыполнитьПроизвольныйКод(Строка)
-    Выполнить(Строка);
+        let code = r#"Процедура ПрименитьПравилоОкругления(ТекстПравила)
+	Выполнить(ТекстПравила);
 КонецПроцедуры
 
-Функция РассчитатьЧтоТоИзСтроки(Строка)
-    Возврат Вычислить(Строка);
+Функция СуммаПоПравилу(ТекстПравила, Чек)
+	Возврат Вычислить(ТекстПравила);
 КонецФункции
 
-Функция БезОшибок(Строка)
-    Возврат ВычислитьЧтоТо(Строка);
+Функция СуммаБезПравила(Чек)
+	Возврат ВычислитьИтог(Чек);
 КонецФункции
-
 "#;
         let diagnostics = check_violations_directly(code);
         expect![[r#"
-            ExecuteExternalCodeInCommonModule @ 3:5..3:23
+            ExecuteExternalCodeInCommonModule @ 2:2..2:26
               message: Execution of external code in a common module on a server is a potential vulnerability
               severity: Warning
-            ExecuteExternalCodeInCommonModule @ 7:13..7:30
+            ExecuteExternalCodeInCommonModule @ 6:10..6:33
               message: Execution of external code in a common module on a server is a potential vulnerability
               severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_no_configuration_returns_empty() {
-        let code = r#"
-Процедура Тест()
-    Выполнить(Строка);
+        let code = r#"Процедура ПрименитьПравилоОкругления(ТекстПравила)
+	Выполнить(ТекстПравила);
 КонецПроцедуры
 "#;
         check_diagnostics_snapshot_for(
@@ -171,102 +190,139 @@ mod tests {
     }
 
     #[test]
-    fn test_qualified_eval_ignored() {
-        let code = r#"
-Функция ВычислитьЗначение(Объект)
-    Возврат Объект.Вычислить();
+    fn test_qualified_and_similar_names_ignored() {
+        let code = r#"Функция СуммаПоПравилу(Касса, Чек)
+	Промежуточная = Касса.Вычислить(Чек);
+	Касса.Выполнить();
+	Возврат ВычислитьИтог(Промежуточная);
 КонецФункции
 "#;
         let diagnostics = check_violations_directly(code);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
-    }
-
-    #[test]
-    fn test_similar_method_name_ignored() {
-        let code = r#"
-Функция БезОшибок(Строка)
-    Возврат ВычислитьЧтоТо(Строка);
-КонецФункции
-"#;
-        let diagnostics = check_violations_directly(code);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
-    }
-
-    #[test]
-    fn test_should_check_server_module() {
-        let module = bsl_metadata::CommonModule::builder()
-            .name("ТестовыйМодуль")
-            .server(true)
-            .external_connection(false)
-            .client_ordinary_application(false)
-            .client_managed_application(false)
-            .build();
-
-        assert!(should_check_module(&module, true));
-    }
-
-    #[test]
-    fn test_should_check_external_connection_module() {
-        let module = bsl_metadata::CommonModule::builder()
-            .name("ТестовыйМодуль")
-            .server(false)
-            .external_connection(true)
-            .client_ordinary_application(false)
-            .client_managed_application(false)
-            .build();
-
-        assert!(should_check_module(&module, true));
-    }
-
-    #[test]
-    fn test_should_check_ordinary_client_module() {
-        let module = bsl_metadata::CommonModule::builder()
-            .name("ТестовыйМодуль")
-            .server(false)
-            .external_connection(false)
-            .client_ordinary_application(true)
-            .client_managed_application(false)
-            .build();
-
-        assert!(should_check_module(&module, true));
-        assert!(!should_check_module(&module, false));
     }
 
     #[test]
     fn test_should_not_check_client_managed_module() {
-        let module = bsl_metadata::CommonModule::builder()
-            .name("ТестовыйМодуль")
-            .server(false)
-            .external_connection(false)
-            .client_ordinary_application(false)
-            .client_managed_application(true)
-            .build();
+        let managed = module(false, false, false, true);
+        assert!(!should_check_module(&managed, true));
+        assert!(!should_check_module(&managed, false));
+    }
 
-        assert!(!should_check_module(&module, true));
-        assert!(!should_check_module(&module, false));
+    #[test]
+    fn test_should_check_server_module() {
+        assert!(should_check_module(&module(true, false, false, false), false));
+        assert!(should_check_module(&module(true, false, false, true), false));
+    }
+
+    #[test]
+    fn test_should_check_external_connection_module() {
+        assert!(should_check_module(&module(false, true, false, false), false));
+        assert!(should_check_module(&module(false, true, false, true), false));
+    }
+
+    #[test]
+    fn test_should_check_ordinary_client_module() {
+        for managed in [false, true] {
+            let ordinary = module(false, false, true, managed);
+            assert!(should_check_module(&ordinary, true));
+            assert!(!should_check_module(&ordinary, false));
+        }
+    }
+
+    const CONFIGURED_SOURCE: &str = r#"Процедура РассчитатьНадбавку(Формула, Калькулятор)
+	Выполнить(Формула);
+	Надбавка = Вычислить(Формула);
+	Калькулятор.Вычислить(Формула);
+КонецПроцедуры
+"#;
+
+    fn check_configured_module(
+        server: bool,
+        external: bool,
+        ordinary: bool,
+        config: DiagnosticsConfig,
+    ) -> Vec<Diagnostic> {
+        let fixture = test_fixture::CfeFixtureBuilder::new("").build();
+        let modules = fixture.root().join("CommonModules");
+        let ext = modules.join("Caller/Ext");
+        std::fs::create_dir_all(&ext).expect("create CommonModule directory");
+        std::fs::write(ext.join("Module.bsl"), CONFIGURED_SOURCE).expect("write CommonModule body");
+        std::fs::write(
+            modules.join("Caller.xml"),
+            format!(
+                r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses">
+<CommonModule uuid="52000000-0000-0000-0000-000000000001"><Properties>
+<Name>Caller</Name>
+<ClientManagedApplication>true</ClientManagedApplication>
+<Server>{server}</Server>
+<ExternalConnection>{external}</ExternalConnection>
+<ClientOrdinaryApplication>{ordinary}</ClientOrdinaryApplication>
+</Properties></CommonModule>
+</MetaDataObject>"#
+            ),
+        )
+        .expect("write CommonModule metadata");
+        check_with_cfe_config(CONFIGURED_SOURCE, fixture, config)
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::ExecuteExternalCodeInCommonModule)
+            .collect()
+    }
+
+    fn assert_configured_violations(diagnostics: &[Diagnostic]) {
+        expect![[r#"
+            ExecuteExternalCodeInCommonModule @ 2:2..2:21
+              message: Execution of external code in a common module on a server is a potential vulnerability
+              severity: Warning
+            ExecuteExternalCodeInCommonModule @ 3:13..3:31
+              message: Execution of external code in a common module on a server is a potential vulnerability
+              severity: Warning"#]]
+        .assert_eq(&format_diags(CONFIGURED_SOURCE, diagnostics));
+    }
+
+    #[test]
+    fn configured_module_flags_select_external_code_diagnostics() {
+        for ordinary_app_support in [false, true] {
+            let config = DiagnosticsConfig { ordinary_app_support, ..Default::default() };
+            assert!(check_configured_module(false, false, false, config.clone()).is_empty());
+            assert_configured_violations(&check_configured_module(
+                true,
+                false,
+                false,
+                config.clone(),
+            ));
+            assert_configured_violations(&check_configured_module(
+                false,
+                true,
+                false,
+                config.clone(),
+            ));
+            let ordinary = check_configured_module(false, false, true, config);
+            if ordinary_app_support {
+                assert_configured_violations(&ordinary);
+            } else {
+                assert!(ordinary.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn configured_module_disabling_has_a_positive_control() {
+        let mut config = DiagnosticsConfig::default();
+        assert_configured_violations(&check_configured_module(true, false, false, config.clone()));
+        config.disabled.push(DiagnosticCode::ExecuteExternalCodeInCommonModule);
+        assert!(check_configured_module(true, false, false, config).is_empty());
     }
 
     #[test]
     fn test_disabled_config() {
-        let mut db = RootDatabaseImpl::new();
-
-        let mut file_set = FileSet::default();
-        let file_id = FileId(0);
-        file_set.insert(file_id, VfsPath::new("/test/Module.bsl"));
-
-        let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), source_root);
-        db.set_file_source_root(file_id, SourceRootId(0));
-        db.set_file_text(file_id, "");
-
+        let code = "Процедура П(Т)\n\tВыполнить(Т);\nКонецПроцедуры\n";
         let mut config = DiagnosticsConfig::default();
         config.disabled.push(DiagnosticCode::ExecuteExternalCodeInCommonModule);
-        let config = Rc::new(config);
-
+        let (db, file_id, config) = context_for(code, config);
         let provider = ide_db::SalsaProvider::new(&db, None);
         let ctx = DiagnosticsContext::new(&config, file_id, &provider);
 
         let diagnostics = check(&ctx);
-        expect![[r#""#]].assert_eq(&format_diags("", &diagnostics));
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 }

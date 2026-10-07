@@ -33,84 +33,83 @@ mod tests {
     use crate::{DiagnosticCode, DiagnosticsConfig};
     use expect_test::expect;
 
+    fn check(code: &str, expected: expect_test::Expect) {
+        check_diagnostics_snapshot_for(code, DiagnosticCode::TernaryOperatorUsage, expected);
+    }
+
     #[test]
-    fn test_from_java_fixture() {
-        let code = r#"
-ПериодПо = ?(Шапка.ЭтоУвольнение
-           , Шапка.Дата
-           , ?(Шапка.ЭтоАванс
-             , Дата(Год(Шапка.ПериодРегистрации)
-                   , Месяц(Шапка.ПериодРегистрации)
-                   , 15
-                   )
-             , КонецМесяца(Шапка.ПериодРегистрации)
-             )
-            );
-
-Статус = ?(ПолучитьСкидку() > МаксимальныйПроцент, "Особый клиент", "Обычный клиент");
-
-Если ?(ПолучитьСкидку() > МаксимальныйПроцент, Истина, Ложь) Тогда
-    Возврат Истина;
-Иначе
-    Возврат Ложь;
-КонецЕсли;"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::TernaryOperatorUsage,
-            expect![[r#"
-                TernaryOperatorUsage @ 2:12..11:14
-                  message: Используйте конструкцию Если-Иначе вместо тернарного оператора
-                  severity: Information
-                TernaryOperatorUsage @ 4:14..10:15
-                  message: Используйте конструкцию Если-Иначе вместо тернарного оператора
-                  severity: Information
-                TernaryOperatorUsage @ 13:10..13:86
-                  message: Используйте конструкцию Если-Иначе вместо тернарного оператора
-                  severity: Information
-                TernaryOperatorUsage @ 15:6..15:61
-                  message: Используйте конструкцию Если-Иначе вместо тернарного оператора
-                  severity: Information"#]],
-        );
+    fn test_if_else_is_silent() {
+        let code = r#"Функция ТарифДоставки(Заказ)
+	Если Заказ.Срочный Тогда
+		Ставка = 2;
+	Иначе
+		Ставка = 1;
+	КонецЕсли;
+	Возврат Ставка;
+КонецФункции
+"#;
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_simple_ternary() {
-        let code = r#"Процедура Тест()
-    Результат = ?(Условие, Истина, Ложь);
-КонецПроцедуры"#;
-        check_diagnostics_snapshot_for(
+        let code = r#"Функция ТарифДоставки(Заказ)
+	Ставка = ?(Заказ.Срочный, 2, 1);
+	Возврат Ставка;
+КонецФункции
+"#;
+        check(
             code,
-            DiagnosticCode::TernaryOperatorUsage,
             expect![[r#"
-                TernaryOperatorUsage @ 2:17..2:41
-                  message: Используйте конструкцию Если-Иначе вместо тернарного оператора
-                  severity: Information"#]],
+            TernaryOperatorUsage @ 2:11..2:33
+              message: Используйте конструкцию Если-Иначе вместо тернарного оператора
+              severity: Information"#]],
+        );
+    }
+
+    #[test]
+    fn test_ternary_in_condition() {
+        let code = r#"Процедура ПроверитьУпаковку(Заказ)
+	Если ?(Заказ.Вес > 30, Истина, Заказ.Хрупкий) Тогда
+		Заказ.НужнаОбрешетка = Истина;
+	КонецЕсли;
+КонецПроцедуры
+"#;
+        check(
+            code,
+            expect![[r#"
+            TernaryOperatorUsage @ 2:7..2:47
+              message: Используйте конструкцию Если-Иначе вместо тернарного оператора
+              severity: Information"#]],
         );
     }
 
     #[test]
     fn test_nested_ternary() {
-        let code = r#"Процедура Тест()
-    Результат = ?(Условие1, ?(Условие2, 1, 2), 3);
-КонецПроцедуры"#;
-        check_diagnostics_snapshot_for(
+        let code = r#"Ставка = ?(Заказ.Срочный
+	, ?(Заказ.Вес > 30
+		, 5
+		, 3)
+	, 1);
+"#;
+        check(
             code,
-            DiagnosticCode::TernaryOperatorUsage,
             expect![[r#"
-                TernaryOperatorUsage @ 2:17..2:50
-                  message: Используйте конструкцию Если-Иначе вместо тернарного оператора
-                  severity: Information
-                TernaryOperatorUsage @ 2:29..2:46
-                  message: Используйте конструкцию Если-Иначе вместо тернарного оператора
-                  severity: Information"#]],
+            TernaryOperatorUsage @ 1:10..5:6
+              message: Используйте конструкцию Если-Иначе вместо тернарного оператора
+              severity: Information
+            TernaryOperatorUsage @ 2:4..4:7
+              message: Используйте конструкцию Если-Иначе вместо тернарного оператора
+              severity: Information"#]],
         );
     }
 
     #[test]
     fn test_disabled_by_default() {
-        let code = r#"Процедура Тест()
-    Результат = ?(Условие, Истина, Ложь);
-КонецПроцедуры"#;
+        let code = r#"Функция ТарифДоставки(Заказ)
+	Возврат ?(Заказ.Срочный, 2, 1);
+КонецФункции
+"#;
         let diagnostics =
             check_hir_diagnostic_with_config(code, DiagnosticsConfig::default(), |ctx| {
                 crate::diagnostics(ctx)

@@ -20,6 +20,17 @@ struct Files {
     disabled_cached_server: FileId,
     enabled_cached_server: FileId,
     named_cached_server: FileId,
+    borrowed_form: FileId,
+    borrowed_base_form_form: FileId,
+    borrowed_unicode_form: FileId,
+    own_owner_form: FileId,
+    borrowed_ordinary_form: FileId,
+    unpaired_form: FileId,
+    base_form: FileId,
+    base_unicode_form: FileId,
+    base_base_form_form: FileId,
+    base_own_owner_form: FileId,
+    base_ordinary_form: FileId,
 }
 
 struct Fixture {
@@ -52,6 +63,20 @@ fn setup(external_sees_extension: bool) -> Fixture {
         enabled_cached_server: FileId(9),
         borrowed_session_cached_server: FileId(10),
         explicit_unknown_cached_server: FileId(11),
+        borrowed_form: FileId(12),
+        borrowed_base_form_form: FileId(13),
+        borrowed_unicode_form: FileId(14),
+        own_owner_form: FileId(15),
+        borrowed_ordinary_form: FileId(16),
+        unpaired_form: FileId(17),
+        base_form: FileId(18),
+        base_unicode_form: FileId(19),
+        base_base_form_form: FileId(20),
+        base_own_owner_form: FileId(21),
+        base_ordinary_form: FileId(22),
+    };
+    let form = |root: &Path, owner: &str, name: &str| {
+        root.join(format!("Documents/{owner}/Forms/{name}/Ext/Form/Module.bsl"))
     };
     let paths = [
         (files.base_object, base.join("Documents/Заказ/Ext/ObjectModule.bsl")),
@@ -81,6 +106,17 @@ fn setup(external_sees_extension: bool) -> Fixture {
             files.enabled_cached_server,
             extension.join("CommonModules/СерверВключаемый/Ext/Module.bsl"),
         ),
+        (files.borrowed_form, form(&extension, "Заказ", "ФормаДокумента")),
+        (files.borrowed_base_form_form, form(&extension, "Заказ", "ФормаСBaseForm")),
+        (files.borrowed_unicode_form, form(&extension, "Заказ", "формаёж")),
+        (files.own_owner_form, form(&extension, "Локальный", "ФормаДокумента")),
+        (files.borrowed_ordinary_form, form(&extension, "Заказ", "ОбычнаяФорма")),
+        (files.unpaired_form, form(&extension, "Заказ", "БезПары")),
+        (files.base_form, form(&base, "Заказ", "ФормаДокумента")),
+        (files.base_unicode_form, form(&base, "Заказ", "ФормаЁж")),
+        (files.base_base_form_form, form(&base, "Заказ", "ФормаСBaseForm")),
+        (files.base_own_owner_form, form(&base, "Локальный", "ФормаДокумента")),
+        (files.base_ordinary_form, form(&base, "Заказ", "ОбычнаяФорма")),
     ];
 
     let mut db = RootDatabaseImpl::new();
@@ -599,4 +635,122 @@ fn extension_metadata_fixture_files_exist_at_the_expected_roots() {
     {
         assert!(Path::new(&root).join(relative).is_file(), "missing fixture file {relative}");
     }
+}
+
+fn assert_unresolved_names(fixture: &Fixture, file: FileId, expected: &[(&str, bool)]) {
+    let unresolved = messages(fixture, file, DiagnosticCode::UnresolvedName);
+    assert_eq!(
+        unresolved.len(),
+        expected.iter().filter(|(_, reported)| *reported).count(),
+        "unexpected UnresolvedName diagnostics for {file:?}: {unresolved:?}"
+    );
+    for (name, reported) in expected {
+        assert_mentions(&unresolved, name, *reported, "UnresolvedName");
+    }
+}
+
+#[test]
+fn borrowed_form_module_resolves_base_form_attributes() {
+    use hir::DefDatabase;
+
+    let fixture = setup(true);
+    let files = &fixture.files;
+
+    for file in [files.borrowed_form, files.borrowed_base_form_form] {
+        assert_unresolved_names(
+            &fixture,
+            file,
+            &[
+                ("Объект", false),
+                ("БазовыйРеквизитФормы", false),
+                ("НетТакогоРеквизитаФормы", true),
+            ],
+        );
+    }
+    assert_unresolved_names(
+        &fixture,
+        files.borrowed_unicode_form,
+        &[
+            ("Объект", false),
+            ("БазовыйРеквизитФормы", false),
+            ("СЧЁТЧИК", false),
+            ("РасшРеквизитФормы", false),
+            ("НетТакогоРеквизитаФормы", true),
+        ],
+    );
+    assert_unresolved_names(
+        &fixture,
+        files.own_owner_form,
+        &[("ЛокальныйРеквизитФормы", false), ("БазовыйРеквизитФормы", true)],
+    );
+    assert_unresolved_names(
+        &fixture,
+        files.unpaired_form,
+        &[("СвойРеквизитФормы", false), ("БазовыйРеквизитФормы", true)],
+    );
+    for file in [
+        files.base_form,
+        files.base_unicode_form,
+        files.base_base_form_form,
+        files.base_own_owner_form,
+    ] {
+        assert_unresolved_names(
+            &fixture,
+            file,
+            &[("Объект", false), ("БазовыйРеквизитФормы", false)],
+        );
+    }
+    assert_unresolved_names(
+        &fixture,
+        files.borrowed_ordinary_form,
+        &[("БазовыйРеквизитФормы", true)],
+    );
+    assert_unresolved_names(
+        &fixture,
+        files.base_ordinary_form,
+        &[("Объект", true), ("БазовыйРеквизитФормы", true)],
+    );
+    assert!(
+        fixture
+            .analysis
+            .database()
+            .module_metadata(hir::ModuleId::new(files.borrowed_ordinary_form))
+            .form
+            .as_ref()
+            .is_some_and(|form| form.is_ordinary() && form.attributes().is_empty()),
+        "an ordinary form without a dialog gains no base attributes"
+    );
+}
+
+#[test]
+fn borrowed_form_module_types_inherited_and_overridden_attributes() {
+    let fixture = setup(true);
+    let db = fixture.analysis.database();
+    let var = |file: FileId, name: &str| {
+        let ty = db.infer(file).var_types.get(name).copied();
+        db.lookup_type(ty.unwrap_or_else(|| panic!("{name} must be typed"))).clone()
+    };
+
+    for file in [
+        fixture.files.borrowed_form,
+        fixture.files.borrowed_base_form_form,
+        fixture.files.borrowed_unicode_form,
+    ] {
+        match var(file, "данные") {
+            TypeKind::FormData { kind, underlying: Some(owner) } => {
+                assert_eq!(kind, bsl_types::facet::FormDataFacet::Structure);
+                assert_eq!(owner.mdo_type, bsl_metadata::MdoType::Document);
+                assert_eq!(owner.name.as_str(), "Заказ");
+            }
+            other => panic!("the inherited main attribute keeps its form-data type, got {other:?}"),
+        }
+    }
+    assert!(
+        matches!(var(fixture.files.borrowed_unicode_form, "счёт"), TypeKind::String(..)),
+        "the extension's счётчик wins over the base Number"
+    );
+    assert!(
+        matches!(var(fixture.files.base_unicode_form, "число"), TypeKind::Number(..)),
+        "the base keeps its own Number"
+    );
 }

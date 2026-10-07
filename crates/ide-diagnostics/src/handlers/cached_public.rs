@@ -86,294 +86,157 @@ fn is_public_region(region_name: &str) -> bool {
 }
 
 #[cfg(test)]
-fn check_with_reuse(ctx: &DiagnosticsContext, reuse: ReturnValueReuse) -> Vec<Diagnostic> {
-    if !is_cached_reuse(reuse) {
-        return Vec::new();
-    }
-
-    let region_tree = ctx.region_tree();
-
-    let public_regions: Vec<_> = region_tree
-        .regions()
-        .filter(|(_, region)| is_public_region(region.name.as_str()))
-        .collect();
-
-    if public_regions.is_empty() {
-        return Vec::new();
-    }
-
-    let item_tree = ctx.item_tree();
-
-    public_regions
-        .into_iter()
-        .filter_map(|(_, region)| {
-            let has_methods = item_tree
-                .procedures()
-                .any(|(_, proc)| region.range.contains_range(proc.source_range))
-                || item_tree
-                    .functions()
-                    .any(|(_, func)| region.range.contains_range(func.source_range));
-
-            if has_methods {
-                let code = DiagnosticCode::CachedPublic;
-                Some(Diagnostic {
-                    code,
-                    message: "Кэшируемый модуль не должен содержать методы в публичных областях"
-                        .to_string(),
-                    severity: ctx.severity(code),
-                    range: region.range,
-                    tags: ctx.tags(code),
-                    fixes: vec![],
-                })
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DiagnosticsConfig;
-    use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
-    use ide_db::{RootDatabase, RootDatabaseImpl};
-    use std::rc::Rc;
-    use test_fixture::Fixture;
-    use vfs::file_set::FileSet;
-    use vfs::VfsPath;
-    fn create_test_ctx(code: &str) -> (Rc<dyn RootDatabase>, vfs::FileId, DiagnosticsConfig) {
-        let fixture_text = format!("//- /test.bsl\n{}", code);
-        let fixture = Fixture::parse(&fixture_text);
-        let file_id = fixture.first_file().expect("fixture should have a file");
+    use crate::test_utils::{
+        check_ast_diagnostic, check_metadata_diagnostic, format_diags, make_common_module_metadata,
+    };
+    use expect_test::expect;
 
-        let mut db = RootDatabaseImpl::new();
+    /// Diagnostics of `code` as a common module with the given reuse mode.
+    fn check_cached(reuse: ReturnValueReuse, code: &str) -> Vec<Diagnostic> {
+        let module = bsl_metadata::CommonModule::builder()
+            .name("СкладскиеНастройкиПовтИсп")
+            .return_values_reuse(reuse)
+            .build();
+        check_metadata_diagnostic(make_common_module_metadata(module), code, |_, ctx| check(ctx))
+    }
 
-        let mut file_set = FileSet::new();
-        file_set.insert(file_id, VfsPath::new("/test.bsl"));
-        let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), source_root);
-        db.set_file_source_root(file_id, SourceRootId(0));
+    const MODULE: &str = r#"#Область ПрограммныйИнтерфейс
 
-        db.set_file_text(file_id, code);
-        let db = Rc::new(db) as Rc<dyn RootDatabase>;
+Функция ЕдиницаХранения(Номенклатура) Экспорт
+	Возврат Номенклатура.ЕдиницаХранения;
+КонецФункции
 
-        (db, file_id, DiagnosticsConfig::default())
+#КонецОбласти
+
+#Область СлужебныеПроцедурыИФункции
+
+Функция ПрочитатьНастройки()
+	Возврат Новый Структура;
+КонецФункции
+
+#КонецОбласти
+
+#Область Public
+
+Function DefaultWarehouse() Export
+	Return Undefined;
+EndFunction
+
+#EndRegion
+"#;
+
+    #[test]
+    fn test_during_request_finds_public_regions() {
+        let diagnostics = check_cached(ReturnValueReuse::DuringRequest, MODULE);
+        expect![[r#"
+            CachedPublic @ 1:1..7:14
+              message: Кэшируемый модуль не должен содержать методы в публичных областях
+              severity: Warning
+            CachedPublic @ 17:1..23:11
+              message: Кэшируемый модуль не должен содержать методы в публичных областях
+              severity: Warning"#]]
+        .assert_eq(&format_diags(MODULE, &diagnostics));
+    }
+
+    #[test]
+    fn test_during_session_finds_public_regions() {
+        let diagnostics = check_cached(ReturnValueReuse::DuringSession, MODULE);
+        expect![[r#"
+            CachedPublic @ 1:1..7:14
+              message: Кэшируемый модуль не должен содержать методы в публичных областях
+              severity: Warning
+            CachedPublic @ 17:1..23:11
+              message: Кэшируемый модуль не должен содержать методы в публичных областях
+              severity: Warning"#]]
+        .assert_eq(&format_diags(MODULE, &diagnostics));
+    }
+
+    #[test]
+    fn test_dont_use_skips_check() {
+        let diagnostics = check_cached(ReturnValueReuse::DontUse, MODULE);
+        assert_eq!(diagnostics.len(), 0, "DontUse means not cached");
     }
 
     #[test]
     fn test_no_common_module_metadata() {
-        let code = r#"
-#Область ПрограммныйИнтерфейс
-Процедура Метод1()
-КонецПроцедуры
-#КонецОбласти
-"#;
-        let (db, file_id, config) = create_test_ctx(code);
-        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
-        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
-
-        let diagnostics = check(&ctx);
+        let diagnostics = check_ast_diagnostic(MODULE, check);
         assert_eq!(diagnostics.len(), 0, "Should skip when no CommonModule metadata");
     }
 
     #[test]
     fn test_non_public_region_ignored() {
-        let code = r#"
-#Область СлужебныйПрограммныйИнтерфейс
-Процедура Метод1()
-КонецПроцедуры
+        let code = r#"#Область СлужебныйПрограммныйИнтерфейс
+Функция КлючКэша(Склад) Экспорт
+	Возврат Склад.Код;
+КонецФункции
 #КонецОбласти
 "#;
-        let (db, file_id, config) = create_test_ctx(code);
-        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
-        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
-
-        let diagnostics = check(&ctx);
+        let diagnostics = check_cached(ReturnValueReuse::DuringRequest, code);
         assert_eq!(diagnostics.len(), 0);
     }
 
     #[test]
     fn test_empty_public_region() {
-        let code = r#"
-#Область ПрограммныйИнтерфейс
+        let code = r#"#Область ПрограммныйИнтерфейс
+// Методы перенесены в обычный общий модуль.
+#КонецОбласти
+
+#Область СлужебныеПроцедурыИФункции
+Функция КлючКэша(Склад)
+	Возврат Склад.Код;
+КонецФункции
 #КонецОбласти
 "#;
-        let (db, file_id, config) = create_test_ctx(code);
-        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
-        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
-
-        let diagnostics = check(&ctx);
+        let diagnostics = check_cached(ReturnValueReuse::DuringRequest, code);
         assert_eq!(diagnostics.len(), 0);
     }
 
     #[test]
-    fn test_during_request_finds_public_regions() {
-        let code = r#"#Область ПрограммныйИнтерфейс
-Процедура ПолучитьНастройки()
+    fn test_multiple_methods_in_public_region() {
+        let code = r#"#Область программныйинтерфейс
+Процедура СброситьКэш() Экспорт
 КонецПроцедуры
-#КонецОбласти
-
-#Область ВнутренниеПроцедуры
-Процедура ПодготовитьКэш()
-КонецПроцедуры
-#КонецОбласти
-
-#Область Public
-Функция ПолучитьВерсию()
-    Возврат "1.0";
+Функция КлючКэша(Склад) Экспорт
+	Возврат Склад.Код;
 КонецФункции
 #КонецОбласти
 "#;
-        let (db, file_id, config) = create_test_ctx(code);
-        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
-        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
-
-        let diagnostics = check_with_reuse(&ctx, ReturnValueReuse::DuringRequest);
-
-        assert_eq!(diagnostics.len(), 2, "Should find 2 public regions with methods");
-
-        let (first_line, _, _, _) =
-            crate::test_utils::range_to_line_col(code, diagnostics[0].range);
-        assert_eq!(first_line, 0, "First diagnostic at line 0");
-
-        let (second_line, _, _, _) =
-            crate::test_utils::range_to_line_col(code, diagnostics[1].range);
-        assert_eq!(second_line, 10, "Second diagnostic at line 10");
-    }
-
-    #[test]
-    fn test_during_session_finds_public_regions() {
-        let code = r#"#Область ПрограммныйИнтерфейс
-Процедура ПолучитьНастройки()
-КонецПроцедуры
-#КонецОбласти
-
-#Область ВнутренниеПроцедуры
-Процедура ПодготовитьКэш()
-КонецПроцедуры
-#КонецОбласти
-
-#Область Public
-Функция ПолучитьВерсию()
-    Возврат "1.0";
-КонецФункции
-#КонецОбласти
-"#;
-        let (db, file_id, config) = create_test_ctx(code);
-        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
-        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
-
-        let diagnostics = check_with_reuse(&ctx, ReturnValueReuse::DuringSession);
-        assert_eq!(diagnostics.len(), 2, "DuringSession is also cached");
-    }
-
-    #[test]
-    fn test_dont_use_skips_check() {
-        let code = r#"#Область ПрограммныйИнтерфейс
-Процедура ПолучитьНастройки()
-КонецПроцедуры
-#КонецОбласти
-
-#Область ВнутренниеПроцедуры
-Процедура ПодготовитьКэш()
-КонецПроцедуры
-#КонецОбласти
-
-#Область Public
-Функция ПолучитьВерсию()
-    Возврат "1.0";
-КонецФункции
-#КонецОбласти
-"#;
-        let (db, file_id, config) = create_test_ctx(code);
-        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
-        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
-
-        let diagnostics = check_with_reuse(&ctx, ReturnValueReuse::DontUse);
-        assert_eq!(diagnostics.len(), 0, "DontUse means not cached");
+        let diagnostics = check_cached(ReturnValueReuse::DuringSession, code);
+        expect![[r#"
+            CachedPublic @ 1:1..7:14
+              message: Кэшируемый модуль не должен содержать методы в публичных областях
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_is_cached_reuse() {
-        assert!(is_cached_reuse(ReturnValueReuse::DuringRequest));
         assert!(is_cached_reuse(ReturnValueReuse::DuringSession));
+        assert!(is_cached_reuse(ReturnValueReuse::DuringRequest));
         assert!(!is_cached_reuse(ReturnValueReuse::DontUse));
+        assert!(!is_cached_reuse(ReturnValueReuse::Unknown));
     }
 
     #[test]
     fn test_is_public_region_russian() {
+        assert!(is_public_region("программныйИнтерфейс"));
+        assert!(is_public_region("ПРОГРАММНЫЙинтерфейс"));
         assert!(is_public_region("ПрограммныйИнтерфейс"));
-        assert!(is_public_region("программныйинтерфейс"));
-        assert!(is_public_region("ПРОГРАММНЫЙИНТЕРФЕЙС"));
     }
 
     #[test]
     fn test_is_public_region_english() {
+        assert!(is_public_region("pUBLIC"));
         assert!(is_public_region("Public"));
-        assert!(is_public_region("public"));
-        assert!(is_public_region("PUBLIC"));
     }
 
     #[test]
     fn test_is_not_public_region() {
         assert!(!is_public_region("СлужебныйПрограммныйИнтерфейс"));
-        assert!(!is_public_region("Private"));
+        assert!(!is_public_region("ПрограммныйИнтерфейсСклада"));
         assert!(!is_public_region("Internal"));
         assert!(!is_public_region(""));
-    }
-
-    #[test]
-    fn test_public_region_with_function() {
-        let code = r#"#Область ПрограммныйИнтерфейс
-Функция ПолучитьДанные()
-    Возврат 1;
-КонецФункции
-#КонецОбласти
-"#;
-        let (db, file_id, config) = create_test_ctx(code);
-        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
-        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
-
-        let diagnostics = check_with_reuse(&ctx, ReturnValueReuse::DuringRequest);
-        assert_eq!(diagnostics.len(), 1, "Function should trigger diagnostic");
-    }
-
-    #[test]
-    fn test_multiple_methods_in_public_region() {
-        let code = r#"#Область ПрограммныйИнтерфейс
-Процедура Первая()
-КонецПроцедуры
-Функция Вторая()
-    Возврат 1;
-КонецФункции
-#КонецОбласти
-"#;
-        let (db, file_id, config) = create_test_ctx(code);
-        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
-        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
-
-        let diagnostics = check_with_reuse(&ctx, ReturnValueReuse::DuringRequest);
-        assert_eq!(diagnostics.len(), 1, "One region = one diagnostic");
-    }
-
-    #[test]
-    fn test_nested_regions() {
-        let code = r#"#Область ПрограммныйИнтерфейс
-Процедура Метод1()
-КонецПроцедуры
-#КонецОбласти
-
-#Область СлужебныйПрограммныйИнтерфейс
-Процедура Метод2()
-КонецПроцедуры
-#КонецОбласти
-"#;
-        let (db, file_id, config) = create_test_ctx(code);
-        let provider = ide_db::SalsaProvider::new(db.as_ref(), None);
-        let ctx = DiagnosticsContext::new(&config, file_id, &provider);
-
-        let diagnostics = check_with_reuse(&ctx, ReturnValueReuse::DuringRequest);
-        assert_eq!(diagnostics.len(), 1, "Only public region triggers diagnostic");
     }
 }

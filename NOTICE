@@ -5,8 +5,8 @@ per-crate matrix and docs/legal/ for the underlying provenance audit.
 
   * Tier A crates are licensed under MIT OR Apache-2.0.
   * Tier B crates are licensed under LGPL-3.0-or-later.
-  * The shipped LSP server binary, which statically links Tier B crates,
-    is therefore distributed under LGPL-3.0-or-later. Source for all
+  * The shipped LSP server binary, which statically links a Tier B crate
+    (crates/ide-diagnostics), is therefore distributed under LGPL-3.0-or-later. Source for all
     crates is published in this repository.
 
 Architecture heritage
@@ -72,8 +72,6 @@ the working reference:
 
   * crates/lexer/src/sdbl/        (SDBL token inventory)
   * crates/parser/src/grammar/sdbl/  (SDBL grammar)
-  * crates/parser/src/grammar/    (BSL grammar layer)
-  * crates/lexer/src/lib.rs       (BSL token inventory)
   * crates/syntax/src/preproc_symbols.rs
                                   (preprocessor symbol list; the file it
                                   succeeds,
@@ -81,6 +79,16 @@ the working reference:
                                   carried a header naming the
                                   PREPROC_*_SYMBOL tokens of BSLLexer.g4 as
                                   the source)
+
+The BSL grammar layer (crates/parser/src/grammar/) and the BSL token
+inventory (crates/lexer/src/lib.rs) were listed here until 2026-10-06 and
+are not any longer: the inventory was rewritten, the grammar was attested
+rule by rule, and the programme is complete (see below). Their history is
+unchanged and is stated in the paragraphs that follow; what changed is
+that the list now names the files whose derivation history this notice keeps
+on record, including material that a completed slice, the SDBL slices or the
+owner decision O1 has since closed; being listed is not a statement that the
+derivation is still open.
 
 The last path lies outside the parser and lexer crates and was missing
 from this list until 2026-08-21. It is kept here because the omission was
@@ -119,6 +127,17 @@ others — is worse than a narrower record that holds. The remedy for the
 uncertainty is not a better map but replacement of the material, tracked
 in https://github.com/itrous/bsl-analyzer/issues/52.
 
+On 2026-10-06 that class was replaced, within a stated bound. The 40
+current test carriers whose introducing commits name an external source
+for their test material were rewritten from the normative text of this
+repository's own diagnostic documentation and the current rules; a test
+in the crate fails if a retired literal of theirs reappears verbatim.
+The carriers, the sources of the new inputs and the evidence are listed
+in docs/legal/ide-diagnostics-test-material.md. Test material whose
+introducing commit names no source is not covered by that statement:
+it is neither declared external nor declared cleaned. The record of the
+original import above stands.
+
 Two things are listed file by file, because both are established without
 heuristics: the 21 fixtures added by 4601ffcb, which that commit itself
 enumerates, and crates/parser/tests/fixtures/Module.bsl. Both are in the
@@ -146,9 +165,11 @@ The SDBL layer has since been rewritten in bounded slices from official
 1C documentation under the clean-room process described in
 docs/legal/sdbl-clean-room-slices.md, and now diverges from the upstream
 grammar in token inventory, token granularity, rule decomposition and
-operator precedence. That rewrite is not finished.
+operator precedence. That rewrite is finished; its last open item, the
+naming of the SDBL parser rules, was closed by the owner decision O1
+recorded below.
 
-The BSL layer is being rewritten the same way, under
+The BSL layer was re-derived or attested the same way, under
 docs/legal/bsl-clean-room-slices.md. All four sub-slices are complete: the
 BSL token inventory (bsl-clean-room-slice-b1.md) and the preprocessor
 symbol list with its test material (b2.md), both re-derived from Chapter
@@ -167,23 +188,19 @@ other implementation supplied a corpus-scale cross-check of a decision
 already taken. The record names its own limit: it reads commit
 messages, so a silent comparison would not appear in it.
 
-What this does and does not deliver. The BSL half of exit-criteria item
-10 is now complete: the token inventory was re-derived, the preprocessor
-symbols were re-derived, every grammar rule carries a verdict with the
-section it rests on, the test material's origin is recorded, and the
-compatibility decision is written down. It does not by itself relicense
-anything. Three items of the checklist remain open — the SDBL parser
-rule naming, the comparison of sdbl-hir against the upstream lowering,
-and the test corpus — and until they close, the crates named above stay
-under LGPL-3.0-or-later. What has changed is that for crates/parser and
-crates/lexer the only thing standing between them and Tier A is the
-remaining SDBL work, which is a position neither crate has been in
-before.
+What the BSL programme delivered. The BSL half of exit-criteria item 10
+is complete: the token inventory was re-derived, the preprocessor symbols
+were re-derived, every grammar rule carries a verdict with the section it
+rests on, the test material's origin is recorded, and the compatibility
+decision is written down. The other items of the checklist have closed
+since: the comparison of sdbl-hir, the test corpus, and the SDBL parser
+rule naming (owner decision O1). The consequence is recorded in the entry
+for crates/parser and crates/lexer below.
 
-The current assessment — what is proven, what has diverged, and what is
-still outstanding — is in docs/legal/sdbl-provenance-2026-07-audit.md.
-Until that work completes, the Tier B crates and the final binary remain
-under LGPL-3.0-or-later.
+The current assessment — what is proven, what has diverged, and what was
+outstanding — is in docs/legal/sdbl-provenance-2026-07-audit.md. The
+Tier B crate that remains, crates/ide-diagnostics, and the final binary
+stay under LGPL-3.0-or-later.
 
 Notice for crates written with a copyleft reference open
 ---------------------------------------------------------
@@ -220,7 +237,16 @@ today carries no trace of this. It is therefore stated here.
     the model is dictated by the 1C configuration export format itself,
     which is the format this crate has to read. What is inherited is the
     ontology: the set of named types, the split into traits, the builder
-    pattern, and part of the method naming.
+    pattern, and part of the method naming. That identified slice has
+    now been re-derived from 1C Designer XML artifacts (three
+    configurations and eight extensions, 97 996 documents) and from the
+    analyzer's own needs: every decision of the slice is linked to an
+    observed artifact or a consumer, the never-populated support-variant
+    stub and six public methods with neither source nor caller were
+    removed, and the rest kept its form where the derivation reached it.
+    The derivation and registry are recorded in
+    docs/legal/bsl-metadata-clean-room-slice.md. This closes that slice,
+    not the fixtures listed below or the MIT-only programme.
 
   * crates/hir-def — several diagnostic ranges and metrics were written
     to reproduce the observable output of bsl-language-server and of the
@@ -228,9 +254,83 @@ today carries no trace of this. It is therefore stated here.
     no code was copied. The behaviour was kept deliberately, so that the
     two tools report the same numbers on the same source.
 
-The identified crates/cfg slice is closed as recorded above; the licensing
-tier of crates/bsl-metadata remains under review. Per-crate licenses and the
-restrictions arising from dependencies are unchanged.
+The identified crates/cfg and crates/bsl-metadata slices are closed as
+recorded above. Per-crate licenses and the restrictions arising from
+dependencies are unchanged.
+
+Completed clean-room replacement: crates/sdbl-hir
+--------------------------------------------------
+crates/sdbl-hir was assessed as medium risk in April 2026 and not
+compared line by line; parts of its lowering had been written against
+bsl-language-server (LGPL-3.0-or-later). That is no longer the position.
+The crate has moved to MIT OR Apache-2.0 on the following record:
+
+  * a line-by-line audit of all 8 831 production lines of the crate
+    against the upstream lowering, with ten findings (F01-F10), each with
+    a disposition: docs/legal/sdbl-hir-upstream-comparison.md;
+  * independent replacements of F01-F10, each resting on a named page of
+    the 1C documentation, attested in docs/legal/sdbl-clean-room-slice13.md.
+    F07 was accepted by the owner as re-derived, the result being
+    byte-for-byte the same as before;
+  * an independent test corpus of 96 tests (95 enabled, one ignored), in which all 46 cases of the
+    old material are mapped and the old material is removed:
+    docs/legal/sdbl-corpus-integration.md.
+
+Accepted limits are stated there and repeated here. Issue #299 is a
+recovery limit accepted deliberately; its test stays ignored. Issue #301
+was a regression and was fixed by 8b931a99.
+
+This entry applies the facts recorded in those documents and draws no
+further legal conclusion. Per-crate licenses of other crates are
+unchanged by that entry. At the time it was written parser and lexer
+were still under LGPL-3.0-or-later and a build of sdbl-hir pulled them in
+through base-db and syntax; that is no longer so, see the next entry.
+
+Completed clean-room programme: crates/parser and crates/lexer
+--------------------------------------------------------------
+The grammar layers of crates/parser and crates/lexer were the origin of
+the derivation notice above: written with the grammar files of
+bsl-parser open. Both crates have moved to MIT OR Apache-2.0 on the
+following record:
+
+  * the BSL token inventory, rewritten from Chapter 4 of the 1C
+    Developer's Guide: docs/legal/bsl-clean-room-slice-b1.md;
+  * the preprocessor symbols, re-derived from section 4.8.1.2 and
+    re-verified on 2026-10-03: docs/legal/bsl-clean-room-slice-b2.md;
+  * the BSL grammar, attested rather than rewritten: 86 functions (65
+    rules and 21 predicates), 30 verdicts of re-derivation and 56 of
+    attestation, none open, gated by
+    crates/parser/tests/grammar_attestation.rs:
+    docs/legal/bsl-clean-room-slice-b3.md;
+  * the origin of the test material, established where the history
+    establishes it and stated as unestablished where it does not (it
+    was completed on 2026-10-06): docs/legal/bsl-clean-room-slice-b4.md;
+  * the SDBL layer: the lexer vocabularies, the recovery layer and the
+    test corpus recorded in docs/legal/sdbl-provenance-2026-07-audit.md,
+    and the review of the SDBL parser rule names, closed on 2026-10-05 by
+    the owner decision O1 — the names were reviewed and kept, nothing was
+    renamed: docs/legal/sdbl-rule-naming-attestation.md. That review
+    states itself that retaining a name does not prove independent
+    authorship and does not erase the grammar consultation recorded above.
+
+Accepted limits are stated in those documents and repeated here. One of
+the eight boundaries of table 4.5.4 is not observable in our tree
+(https://github.com/itrous/bsl-analyzer/issues/51). The B1 limits are the
+names inside the add-handler and remove-handler statements and the
+divergence of SyntaxKind::is_preprocessor from the inventory
+(github#47). crates/parser/tests/fixtures/Module.bsl is third-party
+content under CC BY 4.0 and is listed in LICENSING.md. The origin of the
+artifact crates/parser/tests/fixtures/user_query_with_highlighting_issue.sdbl
+was never established; it was deleted from the tree by f9053fce, before the
+base of this move, and the owner accepted that no replacement was made
+(issues 52 and 245). This is a historical record of a deleted artifact.
+
+This entry applies the facts recorded in those documents and draws no
+further legal conclusion. Of the Tier B crates only crates/ide-diagnostics
+remains, and the final binary stays under LGPL-3.0-or-later because it
+links it. No crate's dependencies changed: the licence field of the two
+manifests now inherits the workspace licence, and the product code is
+untouched. docs/legal/tier-a-provenance-audit.md records the move.
 
 Compatibility with bsl-language-server
 --------------------------------------

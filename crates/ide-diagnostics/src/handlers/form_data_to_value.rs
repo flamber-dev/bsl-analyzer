@@ -32,230 +32,117 @@ mod tests {
     use crate::test_utils::*;
     use crate::DiagnosticCode;
     use expect_test::expect;
-    #[test]
-    fn test_qualified_call_is_someone_elses_method() {
-        let code = r#"Процедура Тест()
-    Форма=Док.ПолучитьФорму("ФормаДокумента");
-    ДФ = Форма.ДанныеФормыВЗначение(Объект, Тип("ТаблицаЗначений"));
-КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let form_diags: Vec<_> =
-            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        expect![[r#""#]].assert_eq(&format_diags(code, &form_diags));
+
+    fn check(code: &str, expected: expect_test::Expect) {
+        let diagnostics: Vec<_> = check_hir_diagnostic(code)
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::FormDataToValue)
+            .collect();
+        expected.assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
-    fn test_global_call_with_server_annotation() {
+    fn test_form_context_methods_are_reported() {
         let code = r#"&НаСервере
-Функция Тест2()
-    ДФ = ДанныеФормыВЗначение(Объект, Тип("ТаблицаЗначений"));
-КонецФункции"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let form_diags: Vec<_> =
-            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        expect![[r#"
-            FormDataToValue @ 3:10..3:30
-              message: Обнаружено использование метода ДанныеФормыВЗначение
-              severity: Hint"#]]
-        .assert_eq(&format_diags(code, &form_diags));
-    }
-
-    #[test]
-    fn test_server_no_context_does_not_trigger() {
-        let code = r#"&НаСервереБезКонтекста
-Процедура Тест2()
-    ДФ = ДанныеФормыВЗначение(Объект, Тип("ТаблицаЗначений"));
-КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let form_diags: Vec<_> =
-            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        expect![[r#""#]].assert_eq(&format_diags(code, &form_diags));
-    }
-
-    #[test]
-    fn test_client_server_no_context_does_not_trigger() {
-        let code = r#"&НаКлиентеНаСервереБезКонтекста
-Процедура Тест2()
-    ДФ = ДанныеФормыВЗначение(Объект, Тип("ТаблицаЗначений"));
-КонецПроцедуры"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let form_diags: Vec<_> =
-            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        expect![[r#""#]].assert_eq(&format_diags(code, &form_diags));
-    }
-
-    #[test]
-    fn test_english_qualified_call_is_someone_elses_method() {
-        let code = r#"Procedure Test()
-    Form = Doc.GetForm("DocumentForm");
-    FD = Form.FormDataToValue(Object, Type("ValueTable"));
-EndProcedure"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let form_diags: Vec<_> =
-            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        expect![[r#""#]].assert_eq(&format_diags(code, &form_diags));
-    }
-
-    #[test]
-    fn test_english_global_call_triggers() {
-        let code = r#"Function Test2()
-    FormDataToValue(Object, Type("ValueTable"));
-EndFunction"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let form_diags: Vec<_> =
-            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        expect![[r#"
-            FormDataToValue @ 2:5..2:20
-              message: Обнаружено использование метода ДанныеФормыВЗначение
-              severity: Hint"#]]
-        .assert_eq(&format_diags(code, &form_diags));
-    }
-
-    #[test]
-    fn test_global_call_with_context() {
-        let code = r#"
-Процедура Тест()
-    ДанныеФормыВЗначение(Объект, Тип("ТаблицаЗначений"));
+Процедура ЗагрузитьСписок()
+	Таблица = ДанныеФормыВЗначение(Список, Тип("ТаблицаЗначений"));
 КонецПроцедуры
-"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let form_diags: Vec<_> =
-            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        expect![[r#"
-            FormDataToValue @ 3:5..3:25
-              message: Обнаружено использование метода ДанныеФормыВЗначение
-              severity: Hint"#]]
-        .assert_eq(&format_diags(code, &form_diags));
-    }
 
-    #[test]
-    /// Ни один тип платформы не объявляет `ДанныеФормыВЗначение` — метод живёт
-    /// только в глобальном контексте, поэтому `Получатель.ДанныеФормыВЗначение`
-    /// это чужой метод с совпавшим написанием.
-    fn test_qualified_call_with_receiver_not_reported() {
-        let code = r#"
-Процедура Тест()
-    Форма.ДанныеФормыВЗначение(Объект, Тип("ТаблицаЗначений"));
+&НаКлиенте
+Процедура ПоказатьСписок()
+	ДанныеФормыВЗначение(Список, Тип("ТаблицаЗначений"));
 КонецПроцедуры
-"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let form_diags: Vec<_> =
-            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        expect![[r#""#]].assert_eq(&format_diags(code, &form_diags));
-    }
 
-    #[test]
-    fn test_no_context_annotation_skipped() {
-        let code = r#"
-&НаСервереБезКонтекста
-Процедура Тест()
-    ДанныеФормыВЗначение(Объект, Тип("ТаблицаЗначений"));
-КонецПроцедуры
-"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let form_diags: Vec<_> =
-            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        expect![[r#""#]].assert_eq(&format_diags(code, &form_diags));
-    }
-
-    #[test]
-    fn test_client_at_server_no_context_skipped() {
-        let code = r#"
-&НаКлиентеНаСервереБезКонтекста
-Процедура Тест()
-    ДанныеФормыВЗначение(Объект, Тип("ТаблицаЗначений"));
-КонецПроцедуры
-"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let form_diags: Vec<_> =
-            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        expect![[r#""#]].assert_eq(&format_diags(code, &form_diags));
-    }
-
-    #[test]
-    fn test_server_annotation_detected() {
-        let code = r#"
-&НаСервере
-Функция Тест()
-    ДанныеФормыВЗначение(Объект, Тип("ТаблицаЗначений"));
+Функция КопияСписка()
+	Возврат ДанныеФормыВЗначение(Список, Тип("ТаблицаЗначений"));
 КонецФункции
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let form_diags: Vec<_> =
-            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        expect![[r#"
-            FormDataToValue @ 4:5..4:25
+        check(
+            code,
+            expect![[r#"
+            FormDataToValue @ 3:12..3:32
               message: Обнаружено использование метода ДанныеФормыВЗначение
-              severity: Hint"#]]
-        .assert_eq(&format_diags(code, &form_diags));
+              severity: Hint
+            FormDataToValue @ 8:2..8:22
+              message: Обнаружено использование метода ДанныеФормыВЗначение
+              severity: Hint
+            FormDataToValue @ 12:10..12:30
+              message: Обнаружено использование метода ДанныеФормыВЗначение
+              severity: Hint"#]],
+        );
     }
 
     #[test]
-    fn test_client_annotation_detected() {
-        let code = r#"
-&НаКлиенте
-Процедура Тест()
-    ДанныеФормыВЗначение(Объект, Тип("ТаблицаЗначений"));
+    fn test_contextless_methods_are_silent() {
+        let code = r#"&НаСервереБезКонтекста
+Процедура ЗагрузитьСписок()
+	Таблица = ДанныеФормыВЗначение(Список, Тип("ТаблицаЗначений"));
+КонецПроцедуры
+
+&НаКлиентеНаСервереБезКонтекста
+Функция КопияСписка()
+	Возврат ДанныеФормыВЗначение(Список, Тип("ТаблицаЗначений"));
+КонецФункции
+"#;
+        check(code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_qualified_calls_are_silent() {
+        // No platform type declares this method: with a receiver it is a different method
+        // that merely shares the spelling.
+        let code = r#"&НаСервере
+Процедура СвернутьОстатки()
+	ОкноОстатков = ПолучитьФорму("Обработка.Остатки.Форма");
+	Остатки = ОкноОстатков.ДанныеФормыВЗначение(Отбор, Тип("ДеревоЗначений"));
+	ЭтотОбъект.ДанныеФормыВЗначение(Отбор, Тип("ДеревоЗначений"));
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let form_diags: Vec<_> =
-            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        expect![[r#"
-            FormDataToValue @ 4:5..4:25
-              message: Обнаружено использование метода ДанныеФормыВЗначение
-              severity: Hint"#]]
-        .assert_eq(&format_diags(code, &form_diags));
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
-    fn test_english_keywords() {
-        let code = r#"
-Procedure Test()
-    FormDataToValue(Object, Type("ValueTable"));
+    fn test_english_qualified_and_bare_calls() {
+        let code = r#"&AtServer
+Procedure FoldBalances()
+	Balances = BalanceForm.FormDataToValue(Filter, Type("ValueTree"));
+	Tree = FormDataToValue(Filter, Type("ValueTree"));
 EndProcedure
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let form_diags: Vec<_> =
-            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        expect![[r#"
-            FormDataToValue @ 3:5..3:20
+        check(
+            code,
+            expect![[r#"
+            FormDataToValue @ 4:9..4:24
               message: Обнаружено использование метода ДанныеФормыВЗначение
-              severity: Hint"#]]
-        .assert_eq(&format_diags(code, &form_diags));
+              severity: Hint"#]],
+        );
     }
 
     #[test]
     fn test_case_insensitive() {
-        let code = r#"
-Процедура Тест()
-    ДАННЫЕФОРМЫВЗНАЧЕНИЕ(Объект, Тип("ТаблицаЗначений"));
-    ДАННЫЕформыВзначение(Объект, Тип("ТаблицаЗначений"));
+        let code = r#"Процедура СверитьКопии()
+	Первая = данныеформывзначение(Список, Тип("Массив"));
+	Вторая = ДАННЫЕФОРМЫвЗНАЧЕНИЕ(Список, Тип("Массив"));
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let form_diags: Vec<_> =
-            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        expect![[r#"
-            FormDataToValue @ 3:5..3:25
+        check(
+            code,
+            expect![[r#"
+            FormDataToValue @ 2:11..2:31
               message: Обнаружено использование метода ДанныеФормыВЗначение
               severity: Hint
-            FormDataToValue @ 4:5..4:25
+            FormDataToValue @ 3:11..3:31
               message: Обнаружено использование метода ДанныеФормыВЗначение
-              severity: Hint"#]]
-        .assert_eq(&format_diags(code, &form_diags));
+              severity: Hint"#]],
+        );
     }
 
     #[test]
     fn test_no_call_ignored() {
-        let code = r#"
-Процедура Тест()
-    Метод = ДанныеФормыВЗначение;
+        let code = r#"Процедура ЗапомнитьОбработчик()
+	Обработчик = ДанныеФормыВЗначение;
 КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let form_diags: Vec<_> =
-            diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        expect![[r#""#]].assert_eq(&format_diags(code, &form_diags));
+        check(code, expect![[r#""#]]);
     }
 }

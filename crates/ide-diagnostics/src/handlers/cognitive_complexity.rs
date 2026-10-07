@@ -66,173 +66,146 @@ mod tests {
     use ide_db::{RootDatabase, RootDatabaseImpl};
     use std::rc::Rc;
     use test_fixture::Fixture;
-    #[test]
-    fn test_simple_function() {
-        let code = r#"Функция ПростаяФункция(Параметр)
-    Возврат Параметр + 1;
-КонецФункции"#;
 
-        check_diagnostics_snapshot_for(code, DiagnosticCode::CognitiveComplexity, expect![[r#""#]]);
-    }
-
-    #[test]
-    fn test_nested_if_higher_complexity() {
-        let code = r#"Функция ВложенныеУсловия(А, Б)
-    Если А > 0 Тогда
-        Если Б > 0 Тогда
-            Возврат А + Б;
-        КонецЕсли;
-    КонецЕсли;
-    Возврат 0;
-КонецФункции"#;
-
-        check_diagnostics_snapshot_for(code, DiagnosticCode::CognitiveComplexity, expect![[r#""#]]);
-    }
-
-    #[test]
-    fn test_deeply_nested_complexity() {
-        let code = r#"Функция ГлубокаяВложенность(П1, П2, П3)
-    Если П1 > 0 Тогда
-        Если П2 > 0 Тогда
-            Для Каждого Э Из П3 Цикл
-                Если Э > 5 Тогда
-                    Возврат 1;
-                КонецЕсли;
-            КонецЦикла;
-        КонецЕсли;
-    КонецЕсли;
-    Возврат 0;
-КонецФункции"#;
-
-        check_diagnostics_snapshot_for(code, DiagnosticCode::CognitiveComplexity, expect![[r#""#]]);
-    }
-
-    #[test]
-    fn test_elseif_no_extra_nesting() {
-        let code = r#"Функция СМножественнымиУсловиями(Х)
-    Если Х = 1 Тогда
-        Возврат "один";
-    ИначеЕсли Х = 2 Тогда
-        Возврат "два";
-    ИначеЕсли Х = 3 Тогда
-        Возврат "три";
-    Иначе
-        Возврат "другое";
-    КонецЕсли;
-КонецФункции"#;
-
-        check_diagnostics_snapshot_for(code, DiagnosticCode::CognitiveComplexity, expect![[r#""#]]);
-    }
-
-    #[test]
-    fn test_custom_threshold() {
-        let code = r#"Функция Тест()
-    Если А Тогда
-        Если Б Тогда
-            Возврат 1;
-        КонецЕсли;
-    КонецЕсли;
-КонецФункции"#;
-
+    fn check_with_threshold(code: &str, threshold: i64, expected: expect_test::Expect) {
         let mut config = DiagnosticsConfig::default();
-        let mut params = serde_json::Map::new();
-        params.insert("complexityThreshold".to_string(), serde_json::Value::Number(2.into()));
-        config
-            .parameters
-            .insert(DiagnosticCode::CognitiveComplexity, serde_json::Value::Object(params));
-
-        let diagnostics = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
-        let diagnostics: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::CognitiveComplexity)
-            .collect();
-        expect![[r#"
-            CognitiveComplexity @ 1:9..1:13
-              message: Функция 'Тест' имеет когнитивную сложность 3 (максимум: 2). Упростите логику или уменьшите вложенность
-              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
+        config.parameters.insert(
+            DiagnosticCode::CognitiveComplexity,
+            serde_json::json!({ "complexityThreshold": threshold }),
+        );
+        let diagnostics: Vec<_> =
+            check_hir_diagnostic_with_config(code, config, crate::diagnostics)
+                .into_iter()
+                .filter(|d| d.code == DiagnosticCode::CognitiveComplexity)
+                .collect();
+        expected.assert_eq(&format_diags(code, &diagnostics));
     }
 
-    const COMPLEX_FUNCTION: &str = r#"Функция ОбработатьКоллекцию(Данные, Флаг)
-    Итог = 0;
-
-    Если Данные = Неопределено Тогда
-        Возврат Итог;
-    КонецЕсли;
-
-    Для Каждого Элемент Из Данные Цикл
-        Если Элемент.Актуален Тогда
-            Если Флаг Тогда
-                Для Каждого Строка Из Элемент.Строки Цикл
-                    Если Строка.Сумма > 0 Тогда
-                        Итог = Итог + Строка.Сумма;
-                    ИначеЕсли Строка.Ошибка Тогда
-                        Продолжить;
-                    Иначе
-                        Прервать;
-                    КонецЕсли;
-                КонецЦикла;
-            ИначеЕсли Элемент.Важный Тогда
-                Пока Элемент.ТребуетПроверки Цикл
-                    Итог = Итог + 1;
-                    Прервать;
-                КонецЦикла;
-            Иначе
-                Итог = Итог + 2;
-            КонецЕсли;
-        КонецЕсли;
-    КонецЦикла;
-
-    Возврат Итог;
+    /// Counted by hand with the current formula (`hir-def` metrics): a structure adds
+    /// 1 + nesting, every `И`/`ИЛИ` adds 1, `ИначеЕсли`/`Иначе` add 1 and nest their
+    /// bodies two levels below the `Если`. Если 1, Для 1, Если 2 (nesting 1),
+    /// Пока 3 (nesting 2), ИначеЕсли 1, `И` 1, Иначе 1, Исключение 4 (inside Иначе:
+    /// nesting 3), `?()` 1 — 15, the default threshold.
+    const AT_THRESHOLD: &str = r#"Функция РазложитьПосылки(Посылки, Режим)
+	Если Посылки = Неопределено Тогда
+		Возврат 0;
+	КонецЕсли;
+	Разложено = 0;
+	Для Каждого Посылка Из Посылки Цикл
+		Если Посылка.Хрупкая Тогда
+			Пока Посылка.НеПроверена() Цикл
+				Посылка.Проверить();
+			КонецЦикла;
+		ИначеЕсли Посылка.Тяжелая И Режим = 1 Тогда
+			Разложено = Разложено + 2;
+		Иначе
+			Попытка
+				Разложено = Разложено + 1;
+			Исключение
+				Продолжить;
+			КонецПопытки;
+		КонецЕсли;
+	КонецЦикла;
+	Возврат ?(Разложено > 0, Разложено, -1);
 КонецФункции
 
-Процедура БезСложности()
+Процедура БезВетвлений()
+	Сообщить("готово");
 КонецПроцедуры
 "#;
 
     #[test]
-    fn test_comprehensive() {
-        let code = COMPLEX_FUNCTION;
+    fn test_simple_function() {
+        let code = r#"Функция ВесБрутто(Посылка)
+	Возврат Посылка.Вес + Посылка.Упаковка;
+КонецФункции
+"#;
+        check_diagnostics_snapshot_for(code, DiagnosticCode::CognitiveComplexity, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_composition_at_threshold() {
         check_diagnostics_snapshot_for(
-            code,
+            AT_THRESHOLD,
+            DiagnosticCode::CognitiveComplexity,
+            expect![""],
+        );
+    }
+
+    #[test]
+    fn test_composition_over_threshold() {
+        // One more logical operator: 16.
+        let code = AT_THRESHOLD.replace("И Режим = 1 Тогда", "И Режим = 1 И Посылка.Длинная Тогда");
+        check_diagnostics_snapshot_for(
+            &code,
             DiagnosticCode::CognitiveComplexity,
             expect![[r#"
-            CognitiveComplexity @ 1:9..1:28
-              message: Функция 'ОбработатьКоллекцию' имеет когнитивную сложность 25 (максимум: 15). Упростите логику или уменьшите вложенность
+                CognitiveComplexity @ 1:9..1:25
+                  message: Функция 'РазложитьПосылки' имеет когнитивную сложность 16 (максимум: 15). Упростите логику или уменьшите вложенность
+                  severity: Warning"#]],
+        );
+    }
+
+    #[test]
+    fn test_nested_if_higher_complexity() {
+        let code = r#"Процедура ОтметитьХрупкие(Посылки)
+	Если Посылки.Количество() > 0 Тогда
+		Если Посылки[0].Хрупкая Тогда
+			Посылки[0].Отметить();
+		КонецЕсли;
+	КонецЕсли;
+КонецПроцедуры
+"#;
+        check_with_threshold(
+            code,
+            2,
+            expect![[r#"
+            CognitiveComplexity @ 1:11..1:26
+              message: Процедура 'ОтметитьХрупкие' имеет когнитивную сложность 3 (максимум: 2). Упростите логику или уменьшите вложенность
               severity: Warning"#]],
         );
     }
 
     #[test]
+    fn test_elseif_no_extra_nesting() {
+        // Если 1 + three ИначеЕсли/Иначе at 1 each, no nesting penalty: 4 is the threshold.
+        let code = r#"Функция Зона(Индекс)
+	Если Индекс < 200000 Тогда
+		Возврат "Восток";
+	ИначеЕсли Индекс < 400000 Тогда
+		Возврат "Центр";
+	ИначеЕсли Индекс < 600000 Тогда
+		Возврат "Юг";
+	Иначе
+		Возврат "Запад";
+	КонецЕсли;
+КонецФункции
+"#;
+        check_with_threshold(code, 4, expect![[r#""#]]);
+    }
+
+    #[test]
     fn test_recursion_penalty_self_call() {
-        let code = r#"Функция Факториал(N)
-    Если N <= 1 Тогда
-        Возврат 1;
-    КонецЕсли;
-    Возврат N * Факториал(N - 1);
-КонецФункции"#;
-
-        let mut config = DiagnosticsConfig::default();
-        let mut params = serde_json::Map::new();
-        params.insert("complexityThreshold".to_string(), serde_json::Value::Number(1.into()));
-        config
-            .parameters
-            .insert(DiagnosticCode::CognitiveComplexity, serde_json::Value::Object(params));
-
-        let diagnostics = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
-        let diagnostics: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::CognitiveComplexity)
-            .collect();
-        expect![[r#"
-            CognitiveComplexity @ 1:9..1:18
-              message: Функция 'Факториал' имеет когнитивную сложность 2 (максимум: 1). Упростите логику или уменьшите вложенность
-              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
+        let code = r#"Функция ГлубинаКоробки(Коробка)
+	Если Коробка.Вложенная = Неопределено Тогда
+		Возврат 1;
+	КонецЕсли;
+	Возврат 1 + ГлубинаКоробки(Коробка.Вложенная);
+КонецФункции
+"#;
+        check_with_threshold(
+            code,
+            1,
+            expect![[r#"
+            CognitiveComplexity @ 1:9..1:23
+              message: Функция 'ГлубинаКоробки' имеет когнитивную сложность 2 (максимум: 1). Упростите логику или уменьшите вложенность
+              severity: Warning"#]],
+        );
     }
 
     #[test]
     fn test_compute_hir_metrics_cognitive_value() {
-        let code = COMPLEX_FUNCTION;
-        let fixture_text = format!("//- /test.bsl\n{}", code);
+        let fixture_text = format!("//- /test.bsl\n{}", AT_THRESHOLD);
         let fixture = Fixture::parse(&fixture_text);
         let file_id = fixture.first_file().unwrap();
 
@@ -248,6 +221,8 @@ mod tests {
             db.set_file_text(*fid, &file.content);
         }
 
+        // Rationale: the test-only database is used from one thread; `RootDatabase`
+        // is consumed as `Rc<dyn …>` like the production provider.
         #[allow(clippy::arc_with_non_send_sync)]
         let db = Rc::new(db) as Rc<dyn RootDatabase>;
         let module_id = ModuleId::new(file_id);
@@ -256,6 +231,6 @@ mod tests {
         let (_, body) = module_bodies.iter_bodies().next().expect("Should have first method body");
         let metrics = hir::metrics::compute_hir_metrics(body);
 
-        assert_eq!(metrics.cognitive, 25, "ОбработатьКоллекцию should have cognitive 25");
+        assert_eq!(metrics.cognitive, 15, "РазложитьПосылки should have cognitive 15");
     }
 }
