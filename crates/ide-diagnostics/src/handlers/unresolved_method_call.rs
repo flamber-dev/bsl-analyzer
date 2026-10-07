@@ -68,6 +68,30 @@ mod tests {
     use crate::DiagnosticCode;
 
     #[test]
+    fn this_object_and_this_form_self_calls_resolve_in_form_module() {
+        // `ЭтотОбъект.Метод()` / `ЭтаФорма.Метод()` in a form module are self-references
+        // to the current module, not a module named `ЭтотОбъект`/`ЭтаФорма`. Neither may
+        // fire the "не удалось разрешить модуль" (ReceiverNotResolved) diagnostic.
+        let fixture = r#"
+//- /Catalogs/Тест/Forms/Форма/Ext/Form/Module.bsl
+Процедура МояПроцедура() Экспорт
+КонецПроцедуры
+
+Процедура Обработчик()
+    ЭтотОбъект.МояПроцедура();
+    ЭтаФорма.МояПроцедура();
+КонецПроцедуры
+"#;
+        let diags = check_hir_diagnostic_with_fixtures(fixture);
+        let umc: Vec<_> =
+            diags.iter().filter(|d| d.code == DiagnosticCode::UnresolvedMethodCall).collect();
+        assert!(
+            umc.is_empty(),
+            "ЭтотОбъект/ЭтаФорма self-calls must resolve, not fire UnresolvedMethodCall: {umc:?}"
+        );
+    }
+
+    #[test]
     fn unresolved_receiver_messages_are_neutral_for_both_reasons() {
         let receiver = Name::new("НеизвестныйПолучатель");
         for kind in

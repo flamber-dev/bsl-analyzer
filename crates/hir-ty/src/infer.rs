@@ -4242,6 +4242,35 @@ impl<'db> InferenceContext<'db> {
             return BareReceiverDispatch::Unhandled;
         }
 
+        // `ЭтотОбъект.Метод()` / `ЭтаФорма.Метод()` in a form module whose form metadata is
+        // not a readable managed form (binary `Form.bin`, or no form metadata at all) is a
+        // self-reference to the module, not a module named `ЭтотОбъект`/`ЭтаФорма`. A user
+        // method of this module resolves like a bare self-call; any other name is a platform
+        // form member we cannot enumerate, so stay silent instead of reporting the receiver
+        // as an unresolved module.
+        if is_self_name(&module_name.as_str().fold_lower())
+            && resolver.module_id().is_some_and(|module_id| {
+                self.db.module_metadata(module_id).module_type
+                    == bsl_metadata::ModuleType::FormModule
+            })
+        {
+            for arg in args {
+                self.infer_expr(*arg);
+            }
+            if let Some(method_id) = resolver.resolve_module_method(self.db, method_name) {
+                let symbol_tree = self.db.symbol_tree(method_id.module);
+                if let Some(method_symbol) = symbol_tree.find_method_by_id(method_id) {
+                    let sig = crate::method_resolution::materialise_signature_enriched(
+                        self.db,
+                        method_id,
+                        method_symbol,
+                    );
+                    return BareReceiverDispatch::Resolved(sig.ret);
+                }
+            }
+            return BareReceiverDispatch::Resolved(self.db.unknown());
+        }
+
         // A form attribute shadows module and global names for a bare receiver.
         // A typed attribute never reaches this dispatch (its receiver infers to
         // a real type); an untyped one (empty <Type/> in Form.xml) lowers to
