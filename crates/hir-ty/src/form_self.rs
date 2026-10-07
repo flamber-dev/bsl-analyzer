@@ -17,6 +17,61 @@ pub fn managed_form_platform_type_names(form: &Form) -> impl Iterator<Item = &'s
     )
 }
 
+/// Every extension the platform can mix into a managed form through its main
+/// attribute. A form whose main attribute type was not read may carry any one of
+/// them, so their union is the honest upper bound of what it adds.
+const MANAGED_FORM_EXTENSION_TYPE_NAMES: &[&str] = &[
+    "Расширение формы клиентского приложения для справочника",
+    "Расширение формы клиентского приложения для документа",
+    "Расширение формы клиентского приложения для плана видов характеристик",
+    "Расширение формы клиентского приложения для бизнес-процесса",
+    "Расширение формы клиентского приложения для задачи",
+    "Расширение формы клиентского приложения для обработки",
+    "Расширение формы клиентского приложения для отчета",
+    "Расширение формы клиентского приложения для констант",
+    "Расширение формы клиентского приложения для набора записей",
+    "Расширение формы клиентского приложения для записи регистра сведений",
+    "Расширение формы клиентского приложения для объектов",
+    "Расширение формы клиентского приложения для динамического списка",
+    "Расширение формы клиентского приложения для компоновщика настроек",
+];
+
+/// The platform types whose methods a managed form module calls without a
+/// receiver: the form itself plus the extension its main attribute mixes in.
+///
+/// A main attribute of a type that was not read (an information register record
+/// manager — the metadata parser does not model it — a defined type, a composite)
+/// cannot name its extension, so every extension is included: a bare name that
+/// misses even that union is absent on any reading of the attribute.
+pub(crate) fn managed_form_self_method_types(form: &Form) -> Vec<&'static str> {
+    let mut types = vec![FORM_TYPE_NAME];
+    let Some(attribute) = form.main_attribute() else { return types };
+    match managed_form_extension_type_name(&attribute.attr_type) {
+        Some(extension) => types.push(extension),
+        None if main_attribute_type_is_opaque(&attribute.attr_type) => {
+            types.extend_from_slice(MANAGED_FORM_EXTENSION_TYPE_NAMES)
+        }
+        None => {}
+    }
+    types
+}
+
+/// Scalars and the platform collections never carry a form extension; anything
+/// else may stand for an object the parser did not classify.
+fn main_attribute_type_is_opaque(attr_type: &AttributeType) -> bool {
+    !matches!(
+        attr_type,
+        AttributeType::String { .. }
+            | AttributeType::Number { .. }
+            | AttributeType::Boolean
+            | AttributeType::Date
+            | AttributeType::DateTime
+            | AttributeType::Uuid
+            | AttributeType::ValueStorage
+            | AttributeType::Platform(_)
+    )
+}
+
 fn managed_form_extension_type_name(attr_type: &AttributeType) -> Option<&'static str> {
     match attr_type {
         AttributeType::AnyObjectRef { mdo_type } | AttributeType::Ref { mdo_type, .. } => {
@@ -30,8 +85,14 @@ fn managed_form_extension_type_name(attr_type: &AttributeType) -> Option<&'stati
                     "Расширение формы клиентского приложения для бизнес-процесса"
                 }
                 MdoType::Task => "Расширение формы клиентского приложения для задачи",
-                MdoType::DataProcessor => "Расширение формы клиентского приложения для обработки",
-                MdoType::Report => "Расширение формы клиентского приложения для отчета",
+                // An external data processor's or report's form is extended exactly as
+                // the configuration's own: the platform lists no separate extension.
+                MdoType::DataProcessor | MdoType::ExternalDataProcessor => {
+                    "Расширение формы клиентского приложения для обработки"
+                }
+                MdoType::Report | MdoType::ExternalReport => {
+                    "Расширение формы клиентского приложения для отчета"
+                }
                 MdoType::Constant => "Расширение формы клиентского приложения для констант",
                 mdo_type if mdo_type.is_register() => {
                     "Расширение формы клиентского приложения для набора записей"
@@ -104,6 +165,46 @@ mod tests {
         assert_eq!(
             managed_form_platform_type_names(&list).collect::<Vec<_>>(),
             [FORM_TYPE_NAME, "Расширение формы клиентского приложения для динамического списка"]
+        );
+    }
+
+    /// The union stands in for an unread main attribute only while it holds every
+    /// extension the catalog knows; a new platform extension must join it.
+    #[test]
+    fn the_extension_union_is_the_catalog_extension_set() {
+        let data = PlatformDataInner::instance();
+        let mut catalog: Vec<String> = data
+            .all_types()
+            .iter()
+            .map(|ty| ty.name.to_string())
+            .filter(|name| name.starts_with("Расширение формы клиентского приложения"))
+            .collect();
+        catalog.sort();
+        let mut listed: Vec<String> =
+            MANAGED_FORM_EXTENSION_TYPE_NAMES.iter().map(|name| name.to_string()).collect();
+        listed.sort();
+        assert_eq!(listed, catalog);
+    }
+
+    #[test]
+    fn an_unread_main_attribute_widens_to_every_extension() {
+        let record = form_with_main_type(AttributeType::UnknownNamed(
+            "cfg:InformationRegisterRecordManager.Курсы".to_string(),
+        ));
+        let types = managed_form_self_method_types(&record);
+        assert!(
+            types.contains(&"Расширение формы клиентского приложения для записи регистра сведений")
+        );
+        assert_eq!(types.len(), 1 + MANAGED_FORM_EXTENSION_TYPE_NAMES.len());
+
+        let scalar = form_with_main_type(AttributeType::String { length: None });
+        assert_eq!(managed_form_self_method_types(&scalar), [FORM_TYPE_NAME]);
+
+        let external =
+            form_with_main_type(AttributeType::AnyObjectRef { mdo_type: MdoType::ExternalReport });
+        assert_eq!(
+            managed_form_self_method_types(&external),
+            [FORM_TYPE_NAME, "Расширение формы клиентского приложения для отчета"]
         );
     }
 

@@ -1110,6 +1110,25 @@ pub fn check_with_cfe_unreadable(
     )
 }
 
+/// [`check_with_cfe_unreadable`] on a chosen profile, for a rule whose default
+/// profile differs from `all_enabled` — an incomplete-surface stand has to run on
+/// the very profile the rule ships with, or it proves nothing about it.
+pub fn check_with_cfe_unreadable_config(
+    source: &str,
+    fixture: test_fixture::CfeFixture,
+    unreadable: &[&str],
+    config: crate::DiagnosticsConfig,
+) -> Vec<Diagnostic> {
+    check_cfe_at_with_unreadable_config(
+        "CommonModules/Caller/Ext/Module.bsl",
+        source,
+        fixture,
+        unreadable,
+        config,
+        crate::diagnostics,
+    )
+}
+
 /// [`check_with_cfe_unreadable`], with the analyzed file placed at `caller_relative`
 /// inside the fixture's first extension and its diagnostics produced by `run` rather
 /// than the whole registry. A diagnostic keyed to a module TYPE (the session module,

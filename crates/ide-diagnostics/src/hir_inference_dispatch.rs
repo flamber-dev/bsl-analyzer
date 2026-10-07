@@ -9,6 +9,7 @@ use hir::{
 pub(crate) const INFERENCE_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::UnresolvedName,
     DiagnosticCode::UnresolvedMethodCall,
+    DiagnosticCode::UnresolvedBareCall,
     DiagnosticCode::MismatchedArgCount,
     DiagnosticCode::TypeMismatch,
     DiagnosticCode::TypeMismatchByDocComment,
@@ -104,6 +105,7 @@ fn diagnostic_expr(diag: &InferenceDiagnostic) -> ExprId {
     match diag {
         InferenceDiagnostic::UnresolvedName { expr, .. } => *expr,
         InferenceDiagnostic::UnresolvedMethodCall { expr, .. } => *expr,
+        InferenceDiagnostic::UnresolvedBareCall { expr, .. } => *expr,
         InferenceDiagnostic::MismatchedArgCount { call_expr, .. } => *call_expr,
         InferenceDiagnostic::TypeMismatch { expr, .. } => *expr,
         InferenceDiagnostic::UnresolvedField { expr, .. } => *expr,
@@ -142,6 +144,16 @@ fn dispatch_inference_diagnostic(
                 range,
                 ctx,
             )
+        }
+        // Same token, same verdict: the bare callee IS a bare-name read, and
+        // `UnresolvedName` reports it whenever it is on. Defer to it rather than
+        // stack two errors on one range — the rule `ReceiverNameAbsent` above
+        // follows for the qualified spelling.
+        InferenceDiagnostic::UnresolvedBareCall { name, .. } => {
+            if !ctx.config.is_disabled(DiagnosticCode::UnresolvedName) {
+                return None;
+            }
+            handlers::unresolved_bare_call::from_hir(name, range, ctx)
         }
         InferenceDiagnostic::MismatchedArgCount { required_count, total_count, found, .. } => {
             handlers::mismatched_arg_count::from_hir(
