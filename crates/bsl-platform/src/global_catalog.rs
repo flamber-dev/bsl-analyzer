@@ -91,7 +91,7 @@ impl PlatformVersion {
             .strip_prefix("Version")
             .or_else(|| value.strip_prefix("Версия"))
             .map(|rest| rest.replace('_', "."));
-        let version = Self::parse_catalog(digits.as_deref().unwrap_or(value))?;
+        let version = Self::parse_release(digits.as_deref().unwrap_or(value))?;
         Some(Some(version))
     }
 }

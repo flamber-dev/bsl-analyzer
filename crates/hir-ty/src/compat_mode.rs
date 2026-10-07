@@ -134,6 +134,8 @@ mod tests {
         );
         assert_eq!(effective_mode(Some("DontUse")), None);
         assert_eq!(effective_mode(Some("8.3.x")), None);
+        assert_eq!(effective_mode(Some("8.2.13 (опечатка)")), None);
+        assert_eq!(effective_mode(Some("Version8_2_13 (опечатка)")), None);
         assert_eq!(effective_mode(None), None);
     }
 }
