@@ -385,6 +385,19 @@ impl GlobalState {
                     tracing::info!(path = %path.display(), "bumping config revision after XML change");
                     db.bump_config_for_path(path);
                 }
+                // The compatibility mode is read from the main configuration's
+                // `Configuration.xml`, not derived from the metadata revision.
+                if changed_metadata_paths.iter().any(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .and_then(bsl_conventions::conventional_of)
+                        == Some(bsl_conventions::ConventionalName::ConfigurationXml)
+                }) {
+                    crate::features_state::apply_compatibility_mode_to_db(
+                        db,
+                        self.project.as_ref(),
+                    );
+                }
             }
         }
 
@@ -1417,5 +1430,49 @@ directory = "baselines"
             ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot::Ready { .. }
         ));
         assert!(receiver.try_recv().is_err(), "recovery is silent");
+    }
+}
+
+#[cfg(test)]
+mod compatibility_mode_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// The mode lives in `Configuration.xml`, which a live session edits like any
+    /// metadata file; an input set only at project load would judge the code by the
+    /// mode the session started with until the next reload.
+    #[test]
+    fn a_configuration_xml_edit_rereads_the_compatibility_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = &dir.path().canonicalize().unwrap();
+        let cf = root.join("src/cf");
+        std::fs::create_dir_all(&cf).unwrap();
+        let xml = |mode: &str| {
+            format!(
+                "<MetaDataObject><Configuration><Properties>\
+                 <CompatibilityMode>{mode}</CompatibilityMode>\
+                 </Properties></Configuration></MetaDataObject>"
+            )
+        };
+        let xml_path = cf.join("Configuration.xml");
+        std::fs::write(&xml_path, xml("Version8_2_13")).unwrap();
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+        state.set_workspace_root(root.to_path_buf()).unwrap();
+        assert_eq!(
+            state.analysis_host.raw_database().compatibility_mode().as_deref(),
+            Some("Version8_2_13")
+        );
+
+        let changed = xml("Version8_3_17");
+        std::fs::write(&xml_path, &changed).unwrap();
+        state.vfs.write().set_file_contents(VfsPath::new(xml_path), Some(Arc::from(changed)));
+        state.process_changes(false);
+        assert_eq!(
+            state.analysis_host.raw_database().compatibility_mode().as_deref(),
+            Some("Version8_3_17")
+        );
     }
 }

@@ -121,6 +121,7 @@ pub mod ordinary_app_support;
 pub mod os_users_method;
 pub mod pairing_broken_transaction;
 pub mod parse_error;
+pub mod platform_member_hidden_by_compatibility_mode;
 pub mod platform_member_newer_than_min_version;
 pub mod postfix_access_on_expression;
 pub mod privileged_module_method_call;
@@ -500,6 +501,9 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::UnavailableInEnvironment => Some(&unavailable_in_environment::METADATA),
         DiagnosticCode::PlatformMemberNewerThanMinVersion => {
             Some(&platform_member_newer_than_min_version::METADATA)
+        }
+        DiagnosticCode::PlatformMemberHiddenByCompatibilityMode => {
+            Some(&platform_member_hidden_by_compatibility_mode::METADATA)
         }
         DiagnosticCode::ModuleAccessibility => Some(&module_accessibility::METADATA),
 

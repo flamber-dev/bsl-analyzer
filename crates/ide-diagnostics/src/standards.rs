@@ -221,6 +221,7 @@ pub fn standards(code: DiagnosticCode) -> &'static [u16] {
         DiagnosticCode::GlobalPropertyNotWritable => &[],
         DiagnosticCode::UnavailableInEnvironment => &[],
         DiagnosticCode::PlatformMemberNewerThanMinVersion => &[],
+        DiagnosticCode::PlatformMemberHiddenByCompatibilityMode => &[],
         DiagnosticCode::ModuleAccessibility => &[469],
         DiagnosticCode::AmbiguousFieldInQuery => &[],
         DiagnosticCode::AssignAliasFieldsInQuery => &[437],
