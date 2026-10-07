@@ -37,6 +37,45 @@ impl PlatformVersion {
     pub fn same_release(self, other: Self) -> bool {
         (self.major, self.minor, self.patch) == (other.major, other.minor, other.patch)
     }
+
+    /// Lenient parse of a catalog "available since" value: [`Self::parse_release`]
+    /// of the text before ` (`, so the help's suffixed spelling
+    /// `8.3.6 (в режиме совместимости с версией 8.3.6 и последующими)` reads as
+    /// `8.3.6`. Anything else is `None`, which callers treat as "no version known".
+    pub fn parse_catalog(value: &str) -> Option<Self> {
+        Self::parse_release(value.split_once(" (").map_or(value, |(base, _)| base))
+    }
+
+    /// A release as a person writes it in a setting: `8.0`, `8.3.6`, `8.3.17.1549`.
+    /// Two to four numeric parts, missing ones are 0; any other text is `None`.
+    pub fn parse_release(value: &str) -> Option<Self> {
+        let parts = value.trim().split('.').collect::<Vec<_>>();
+        if !(2..=4).contains(&parts.len()) {
+            return None;
+        }
+        let number = |part: &str| {
+            if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            part.parse::<u32>().ok()
+        };
+        let optional = |index: usize| match parts.get(index) {
+            Some(part) => number(part).map(Some),
+            None => Some(None),
+        };
+        Some(Self {
+            major: number(parts[0])?,
+            minor: number(parts[1])?,
+            patch: optional(2)?.unwrap_or(0),
+            build: optional(3)?,
+        })
+    }
+
+    /// Whether this release line (major.minor.patch) is later than `other`'s; the
+    /// build number never makes a member "newer" — catalog versions carry none.
+    pub fn release_newer_than(self, other: Self) -> bool {
+        (self.major, self.minor, self.patch) > (other.major, other.minor, other.patch)
+    }
 }
 
 impl FromStr for PlatformVersion {
@@ -336,6 +375,35 @@ mod tests {
         );
         assert!("8.3".parse::<PlatformVersion>().is_err());
         assert!("8.3.next".parse::<PlatformVersion>().is_err());
+    }
+
+    #[test]
+    fn catalog_version_parser_takes_the_help_spellings() {
+        let v = |major, minor, patch, build| PlatformVersion { major, minor, patch, build };
+        assert_eq!(PlatformVersion::parse_catalog("8.0"), Some(v(8, 0, 0, None)));
+        assert_eq!(PlatformVersion::parse_catalog("8.3.6"), Some(v(8, 3, 6, None)));
+        assert_eq!(PlatformVersion::parse_catalog("8.3.17.1549"), Some(v(8, 3, 17, Some(1549))));
+        assert_eq!(
+            PlatformVersion::parse_catalog(
+                "8.3.6 (в режиме совместимости с версией 8.3.6 и последующими)"
+            ),
+            Some(v(8, 3, 6, None))
+        );
+        assert_eq!(PlatformVersion::parse_catalog("8"), None);
+        assert_eq!(PlatformVersion::parse_catalog(""), None);
+        assert_eq!(PlatformVersion::parse_catalog("8.3.x"), None);
+        assert_eq!(PlatformVersion::parse_catalog("8.3.1.2.3"), None);
+        assert_eq!(PlatformVersion::parse_release("8.3.17.1549"), Some(v(8, 3, 17, Some(1549))));
+        assert_eq!(
+            PlatformVersion::parse_release("8.3.17 (typo)"),
+            None,
+            "a setting takes no suffix: the compatibility-mode spelling is the catalog's"
+        );
+
+        let min = PlatformVersion::parse_catalog("8.3.17.1549").unwrap();
+        assert!(PlatformVersion::parse_catalog("8.3.18").unwrap().release_newer_than(min));
+        assert!(!PlatformVersion::parse_catalog("8.3.17").unwrap().release_newer_than(min));
+        assert!(!PlatformVersion::parse_catalog("8.2").unwrap().release_newer_than(min));
     }
 
     #[test]

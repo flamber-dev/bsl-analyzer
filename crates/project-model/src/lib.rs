@@ -2183,6 +2183,13 @@ pub struct ProjectConfig {
     #[serde(default, alias = "target_platform_version")]
     pub target_platform_version: Option<String>,
 
+    /// Oldest 1C platform release the code must still compile on (production may
+    /// run an older platform than the one development happens on). Unset keeps
+    /// `PlatformMemberNewerThanMinVersion` silent; it never changes what
+    /// `target_platform_version` selects.
+    #[serde(default, alias = "min_platform_version")]
+    pub min_platform_version: Option<String>,
+
     #[serde(default)]
     pub language: Option<String>,
 
@@ -3119,6 +3126,8 @@ struct TomlConfig {
     #[serde(default)]
     target_platform_version: Option<String>,
     #[serde(default)]
+    min_platform_version: Option<String>,
+    #[serde(default)]
     search: TomlSearchConfig,
     #[serde(default)]
     features: FeaturesConfig,
@@ -3206,6 +3215,7 @@ impl From<TomlConfig> for ProjectConfig {
             configuration_dependency: toml.source.configuration,
             source_exclude: toml.source.exclude,
             target_platform_version: toml.target_platform_version,
+            min_platform_version: toml.min_platform_version,
             language: None,
             extensions: toml.source.extensions,
             externals: toml.source.externals,
@@ -3726,6 +3736,28 @@ mod tests {
         fs::write(&path, "target_platform_version = \"8.3.27.1644\"\n").unwrap();
         let config = ProjectConfig::load_from_file(&path).unwrap();
         assert_eq!(config.target_platform_version.as_deref(), Some("8.3.27.1644"));
+    }
+
+    #[test]
+    fn project_config_reads_min_platform_version_json() {
+        let config: ProjectConfig =
+            serde_json::from_str(r#"{"minPlatformVersion":"8.3.17"}"#).unwrap();
+        assert_eq!(config.min_platform_version.as_deref(), Some("8.3.17"));
+        assert!(config.target_platform_version.is_none());
+
+        let snake: ProjectConfig =
+            serde_json::from_str(r#"{"min_platform_version":"8.3.17.1549"}"#).unwrap();
+        assert_eq!(snake.min_platform_version.as_deref(), Some("8.3.17.1549"));
+    }
+
+    #[test]
+    fn project_config_reads_min_platform_version_toml() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bsl-analyzer.toml");
+        fs::write(&path, "min_platform_version = \"8.3.17\"\n").unwrap();
+        let config = ProjectConfig::load_from_file(&path).unwrap();
+        assert_eq!(config.min_platform_version.as_deref(), Some("8.3.17"));
+        assert!(config.target_platform_version.is_none());
     }
 
     #[test]

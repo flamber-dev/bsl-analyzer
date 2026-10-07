@@ -220,6 +220,7 @@ pub fn standards(code: DiagnosticCode) -> &'static [u16] {
         DiagnosticCode::ReadOnlyPropertyAssignment => &[],
         DiagnosticCode::GlobalPropertyNotWritable => &[],
         DiagnosticCode::UnavailableInEnvironment => &[],
+        DiagnosticCode::PlatformMemberNewerThanMinVersion => &[],
         DiagnosticCode::ModuleAccessibility => &[469],
         DiagnosticCode::AmbiguousFieldInQuery => &[],
         DiagnosticCode::AssignAliasFieldsInQuery => &[437],

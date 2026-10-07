@@ -41,6 +41,20 @@ pub fn apply_project_config_to_db(db: &mut RootDatabaseImpl, config: &ProjectCon
     }
     tracing::info!(target_platform_version = ?target, "updated platform target");
     db.set_target_platform_version(target);
+    let min = config.min_platform_version.as_deref().map(Arc::<str>::from);
+    if min
+        .as_deref()
+        .is_some_and(|value| bsl_platform::PlatformVersion::parse_release(value).is_none())
+    {
+        tracing::warn!(
+            min_platform_version = ?min,
+            "`min_platform_version` is not a numeric platform version; the min-platform check stays off"
+        );
+    }
+    if db.min_platform_version().as_deref() != min.as_deref() {
+        tracing::info!(min_platform_version = ?min, "updated minimum platform");
+        db.set_min_platform_version(min);
+    }
 }
 
 /// The availability diagnostics report only environments the project actually
@@ -162,6 +176,23 @@ type_narrowing = false
 
         apply_project_config_to_db(&mut db, &ProjectConfig::default());
         assert!(db.target_platform_version().is_none());
+    }
+
+    #[test]
+    fn min_platform_version_threads_to_database_apart_from_the_target() {
+        let mut db = RootDatabaseImpl::new();
+        assert!(db.min_platform_version().is_none());
+
+        let config = ProjectConfig {
+            min_platform_version: Some("8.3.17".to_string()),
+            ..ProjectConfig::default()
+        };
+        apply_project_config_to_db(&mut db, &config);
+        assert_eq!(db.min_platform_version().as_deref(), Some("8.3.17"));
+        assert!(db.target_platform_version().is_none(), "the floor must not set the target");
+
+        apply_project_config_to_db(&mut db, &ProjectConfig::default());
+        assert!(db.min_platform_version().is_none());
     }
 
     #[test]

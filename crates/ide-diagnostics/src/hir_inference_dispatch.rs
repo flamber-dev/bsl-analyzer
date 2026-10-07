@@ -20,6 +20,7 @@ pub(crate) const INFERENCE_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::RedundantAccessToObject,
     DiagnosticCode::MissedRequiredParameter,
     DiagnosticCode::UnavailableInEnvironment,
+    DiagnosticCode::PlatformMemberNewerThanMinVersion,
     DiagnosticCode::ModuleAccessibility,
     DiagnosticCode::ExternalAppStarting,
     DiagnosticCode::FileSystemAccess,
@@ -117,6 +118,7 @@ fn diagnostic_expr(diag: &InferenceDiagnostic) -> ExprId {
         InferenceDiagnostic::MissedRequiredParameterManagerModule { expr, .. } => *expr,
         InferenceDiagnostic::RedundantAccessToObjectThreeLevel { expr, .. } => *expr,
         InferenceDiagnostic::UnavailableInEnvironment { expr, .. } => *expr,
+        InferenceDiagnostic::PlatformMemberNewerThanMinVersion { expr, .. } => *expr,
         InferenceDiagnostic::ModuleAccessibility { expr, .. } => *expr,
         InferenceDiagnostic::GuardedCall { expr, .. } => *expr,
     }
@@ -232,6 +234,18 @@ fn dispatch_inference_diagnostic(
         InferenceDiagnostic::UnavailableInEnvironment { name, member_kind, missing, .. } => {
             handlers::unavailable_in_environment::from_hir(name, *member_kind, *missing, range, ctx)
         }
+        InferenceDiagnostic::PlatformMemberNewerThanMinVersion {
+            name,
+            introduced,
+            minimum,
+            ..
+        } => handlers::platform_member_newer_than_min_version::from_hir(
+            name,
+            *introduced,
+            *minimum,
+            range,
+            ctx,
+        ),
         InferenceDiagnostic::ModuleAccessibility { name, callee_kind, missing, .. } => {
             handlers::module_accessibility::from_hir(name, *callee_kind, *missing, range, ctx)
         }

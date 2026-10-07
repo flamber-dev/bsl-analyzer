@@ -9,4 +9,8 @@ pub struct FeaturesInput {
     /// `None` selects the attested bundled catalog release.
     #[returns(clone)]
     pub target_platform_version: Option<Arc<str>>,
+    /// Oldest platform release the code must compile on; `None` disables
+    /// `PlatformMemberNewerThanMinVersion`. Independent of the target above.
+    #[returns(clone)]
+    pub min_platform_version: Option<Arc<str>>,
 }

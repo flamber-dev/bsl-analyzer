@@ -283,6 +283,10 @@ const EXCLUSIONS_DOCUMENTED: &[(DiagnosticCode, &str)] = &[
         "message names the absent callee exactly as the source spells it, by design",
     ),
     (
+        DiagnosticCode::PlatformMemberNewerThanMinVersion,
+        "message names the member as the source spells it and the two versions, by design",
+    ),
+    (
         DiagnosticCode::MismatchedArgCount,
         "known bug: message embeds argument counts from resolved callee",
     ),
@@ -620,7 +624,7 @@ EndProcedure"#,
 #[test]
 fn bilingual_inventory_has_expected_size() {
     let all = all_codes();
-    assert_eq!(all.len(), 197, "update the Track 3 Phase E inventory when DiagnosticCode changes");
+    assert_eq!(all.len(), 198, "update the Track 3 Phase E inventory when DiagnosticCode changes");
 }
 
 #[test]

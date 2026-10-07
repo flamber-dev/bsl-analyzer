@@ -52,6 +52,7 @@ pub(crate) const BODY_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::UsingServiceTag,
     DiagnosticCode::DuplicateStringLiteral,
     DiagnosticCode::GlobalContextMethodConflict,
+    DiagnosticCode::PlatformMemberNewerThanMinVersion,
 ];
 
 pub fn body_diagnostics(ctx: &BodyContext) -> Vec<Diagnostic<LocalRange>> {
@@ -97,6 +98,7 @@ pub fn body_diagnostics(ctx: &BodyContext) -> Vec<Diagnostic<LocalRange>> {
         handlers::using_service_tag::check_body(ctx, &mut acc);
         handlers::duplicate_string_literal::check_body(ctx, &mut acc);
         handlers::global_context_method_conflict::check_body(ctx, &mut acc);
+        handlers::platform_member_newer_than_min_version::check_body(ctx, &mut acc);
     }
     acc
 }

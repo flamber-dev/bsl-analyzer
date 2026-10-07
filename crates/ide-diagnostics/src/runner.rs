@@ -474,6 +474,9 @@ mod tests {
             // (`analyzeFile=true`) остаётся файловым. Оба входа читают один
             // ключ конфига и взаимно исключают друг друга.
             DiagnosticCode::DuplicateStringLiteral,
+            // Members are resolved by inference; `Асинх` / `Ждать` are syntax no
+            // member lookup sees and are read off the body's tokens.
+            DiagnosticCode::PlatformMemberNewerThanMinVersion,
         ];
 
         let mut duplicates = Vec::new();

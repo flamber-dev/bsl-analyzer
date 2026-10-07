@@ -249,6 +249,10 @@ impl AnalysisProvider for SalsaProvider<'_> {
         hir::kernel_type_label(self.db, id, locale, false)
     }
 
+    fn min_platform_version(&self) -> Option<Arc<str>> {
+        HirDatabase::min_platform_version(self.db)
+    }
+
     fn module_implicit_field_names(&self, file_id: FileId) -> Vec<String> {
         hir::module_implicit_field_names(self.db, file_id)
     }

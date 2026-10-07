@@ -1196,6 +1196,31 @@ pub(crate) fn check_cfe_at_with_db(
     setup: impl FnOnce(&test_fixture::CfeFixture),
     run: impl FnOnce(&ide_db::RootDatabaseImpl, &crate::DiagnosticsContext<'_>) -> Vec<Diagnostic>,
 ) -> Vec<Diagnostic> {
+    check_cfe_at_with_db_setup(
+        caller_relative,
+        source,
+        fixture,
+        unreadable,
+        config,
+        setup,
+        |_| {},
+        run,
+    )
+}
+
+/// [`check_cfe_at_with_db`], with `db_setup` run on the fresh database before any
+/// file is loaded — for project-level inputs such as `min_platform_version`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_cfe_at_with_db_setup(
+    caller_relative: &str,
+    source: &str,
+    fixture: test_fixture::CfeFixture,
+    unreadable: &[&str],
+    config: crate::DiagnosticsConfig,
+    setup: impl FnOnce(&test_fixture::CfeFixture),
+    db_setup: impl FnOnce(&mut ide_db::RootDatabaseImpl),
+    run: impl FnOnce(&ide_db::RootDatabaseImpl, &crate::DiagnosticsContext<'_>) -> Vec<Diagnostic>,
+) -> Vec<Diagnostic> {
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::metadata::intern_configuration_path;
     use ide_db::RootDatabaseImpl;
@@ -1205,6 +1230,7 @@ pub(crate) fn check_cfe_at_with_db(
     setup(&fixture);
 
     let mut db = RootDatabaseImpl::new();
+    db_setup(&mut db);
     db.set_all_config_paths(fixture.config_paths());
 
     let mut file_set = FileSet::default();

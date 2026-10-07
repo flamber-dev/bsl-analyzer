@@ -242,6 +242,7 @@ impl RootDatabaseImpl {
             defaults.type_narrowing,
             hir::execution_env::EnvOptions::default(),
             None,
+            None,
         )
         .durability(Durability::MEDIUM)
         .new(&db);
@@ -2512,6 +2513,16 @@ impl RootDatabaseImpl {
         input.set_target_platform_version(self).to(version);
     }
 
+    pub fn min_platform_version(&self) -> Option<Arc<str>> {
+        self.features().min_platform_version(self)
+    }
+
+    pub fn set_min_platform_version(&mut self, version: Option<Arc<str>>) {
+        use salsa::Setter;
+        let input = self.features();
+        input.set_min_platform_version(self).to(version);
+    }
+
     pub(crate) fn get_file_path(&self, file_id: FileId) -> Option<PathBuf> {
         let source_root_input = self.file_source_root_input(file_id);
         let source_root_id = source_root_input.source_root_id(self);
@@ -3248,6 +3259,10 @@ impl hir::HirDatabase for RootDatabaseImpl {
 
     fn target_platform_version(&self) -> Option<Arc<str>> {
         RootDatabaseImpl::target_platform_version(self)
+    }
+
+    fn min_platform_version(&self) -> Option<Arc<str>> {
+        RootDatabaseImpl::min_platform_version(self)
     }
 
     fn workspace_load_complete(&self) -> bool {
