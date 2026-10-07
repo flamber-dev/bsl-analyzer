@@ -407,6 +407,10 @@ pub enum EnvCalleeKind {
 pub enum UnresolvedMethodKind {
     MethodNotFound,
     MethodNotExport,
+    /// `ЭтотОбъект.Метод()` / `ЭтаФорма.Метод()` in a form module reaches a
+    /// method of the module that is not exported: the platform exposes only
+    /// exported methods through the self reference.
+    SelfMethodNotExport,
     /// A body of the callee module exists but could not be read. Travels as a
     /// resolution outcome only: the call is left undiagnosed, because everything
     /// that could be said about it would be said about the wrong file.
@@ -3200,7 +3204,23 @@ impl<'db> InferenceContext<'db> {
                     // are the receiver's remaining surface — resolve and judge them
                     // exactly as the equivalent bare call, and report the miss:
                     // unlike a bare name, a self receiver has nowhere else to look.
+                    //
+                    // Only exported methods are members of the form value: a
+                    // non-exported one compiles, but 8.3.17 and 8.3.27 both fail the
+                    // call at run time with «Метод объекта не обнаружен (Имя)», on
+                    // the client and on the server alike. The call still resolves to
+                    // the declaration, so navigation and argument checks keep working.
                     if let Some(self_name) = self.form_self_receiver_name(base_id) {
+                        if self.find_local_method(&method_name).is_some_and(|m| !m.is_export) {
+                            self.push_inference_diagnostic(
+                                InferenceDiagnostic::UnresolvedMethodCall {
+                                    expr: callee,
+                                    receiver_name: self_name.clone(),
+                                    method_name: method_name.clone(),
+                                    kind: UnresolvedMethodKind::SelfMethodNotExport,
+                                },
+                            );
+                        }
                         let result = self
                             .infer_local_method_call(&method_name, args, callee)
                             .unwrap_or_else(|| {
@@ -3458,19 +3478,7 @@ impl<'db> InferenceContext<'db> {
         args: &[ExprId],
         callee: ExprId,
     ) -> Option<TypeId> {
-        // Weaving: a `&Вместо`/`&Перед`/`&После` interceptor calling a base
-        // sibling that the extension does not define falls back to the paired
-        // base module's declarations (the extension shadows the base).
-        let method = match &self.local_symbols {
-            Some(symbols) => symbols.find_method_shared(NormName::intern(name.as_str())).cloned(),
-            None => {
-                let module_id = hir_def::ModuleId::new(self.context_file_id);
-                self.db.interface_method_named(module_id, name)
-            }
-        }
-        .or_else(|| {
-            self.weaving_base.and_then(|base| self.db.interface_method_named(base, name))
-        })?;
+        let method = self.find_local_method(name)?;
 
         // Weaving-base fallbacks resolve into another file whose item tree does
         // not match `context_file_id` — the local directive check only makes
@@ -3497,6 +3505,24 @@ impl<'db> InferenceContext<'db> {
             return Some(self.db.unknown());
         };
         Some(self.record_candidate_call_arg_binding(callee, args, candidates))
+    }
+
+    /// The declaration a call to `name` from this module's own code reaches.
+    fn find_local_method(
+        &self,
+        name: &hir_def::Name,
+    ) -> Option<Arc<hir_def::module_interface::MethodDecl>> {
+        // Weaving: a `&Вместо`/`&Перед`/`&После` interceptor calling a base
+        // sibling that the extension does not define falls back to the paired
+        // base module's declarations (the extension shadows the base).
+        match &self.local_symbols {
+            Some(symbols) => symbols.find_method_shared(NormName::intern(name.as_str())).cloned(),
+            None => {
+                let module_id = hir_def::ModuleId::new(self.context_file_id);
+                self.db.interface_method_named(module_id, name)
+            }
+        }
+        .or_else(|| self.weaving_base.and_then(|base| self.db.interface_method_named(base, name)))
     }
 
     /// An ordinary symbol with a self name's spelling shadows the predefined
