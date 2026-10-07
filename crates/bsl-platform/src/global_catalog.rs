@@ -72,6 +72,24 @@ impl PlatformVersion {
     pub fn release_newer_than(self, other: Self) -> bool {
         (self.major, self.minor, self.patch) > (other.major, other.minor, other.patch)
     }
+
+    /// A configuration's compatibility mode, as `Configuration.xml` spells it
+    /// (`Version8_2_13`, `DontUse`) or as a person writes it in a project setting
+    /// (`8.2.13`, `Версия8_2_13`, `НеИспользовать`). `Some(None)` is "no mode": the
+    /// platform's own behavior, nothing hidden. `None` is a value that is not a mode.
+    pub fn parse_compatibility_mode(value: &str) -> Option<Option<Self>> {
+        let value = value.trim();
+        if matches!(value.to_lowercase().as_str(), "dontuse" | "неиспользовать" | "none")
+        {
+            return Some(None);
+        }
+        let digits = value
+            .strip_prefix("Version")
+            .or_else(|| value.strip_prefix("Версия"))
+            .map(|rest| rest.replace('_', "."));
+        let version = Self::parse_catalog(digits.as_deref().unwrap_or(value))?;
+        Some(Some(version))
+    }
 }
 
 impl FromStr for PlatformVersion {
@@ -394,6 +412,20 @@ mod tests {
         assert!(PlatformVersion::parse_catalog("8.3.18").unwrap().release_newer_than(min));
         assert!(!PlatformVersion::parse_catalog("8.3.17").unwrap().release_newer_than(min));
         assert!(!PlatformVersion::parse_catalog("8.2").unwrap().release_newer_than(min));
+    }
+
+    #[test]
+    fn compatibility_mode_parser_takes_xml_and_setting_spellings() {
+        let v =
+            |major, minor, patch| Some(Some(PlatformVersion { major, minor, patch, build: None }));
+        assert_eq!(PlatformVersion::parse_compatibility_mode("Version8_2_13"), v(8, 2, 13));
+        assert_eq!(PlatformVersion::parse_compatibility_mode("Version8_3_17"), v(8, 3, 17));
+        assert_eq!(PlatformVersion::parse_compatibility_mode("Версия8_3_6"), v(8, 3, 6));
+        assert_eq!(PlatformVersion::parse_compatibility_mode("8.3.10"), v(8, 3, 10));
+        assert_eq!(PlatformVersion::parse_compatibility_mode("DontUse"), Some(None));
+        assert_eq!(PlatformVersion::parse_compatibility_mode("НеИспользовать"), Some(None));
+        assert_eq!(PlatformVersion::parse_compatibility_mode("Version8_3_x"), None);
+        assert_eq!(PlatformVersion::parse_compatibility_mode(""), None);
     }
 
     #[test]

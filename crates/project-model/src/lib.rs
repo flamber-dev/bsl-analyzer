@@ -263,6 +263,15 @@ impl From<TopologyError> for ProjectError {
     }
 }
 
+/// Where [`Project::compatibility_mode`] found the mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompatibilityModeSource {
+    /// The `compatibility_mode` project setting.
+    Setting,
+    /// `<CompatibilityMode>` of the main configuration's `Configuration.xml`.
+    ConfigurationXml,
+}
+
 #[derive(Debug, Clone)]
 pub struct Project {
     pub root: PathBuf,
@@ -391,6 +400,21 @@ impl Project {
 
     pub fn configuration_path(&self) -> Option<&Path> {
         self.source_path.as_deref()
+    }
+
+    /// The compatibility mode the project's code compiles under, with where it came
+    /// from: the `compatibility_mode` setting first, then `<CompatibilityMode>` of
+    /// the main configuration. Extensions and external data processors have no mode
+    /// of their own — an external processor compiles under the mode of the base it
+    /// is opened in (checked live on 8.3.17 and 8.3.27) — so the configuration's
+    /// mode stands for every root. `None` when neither source states one.
+    pub fn compatibility_mode(&self) -> Option<(String, CompatibilityModeSource)> {
+        if let Some(value) = self.config.compatibility_mode.as_deref() {
+            return Some((value.to_owned(), CompatibilityModeSource::Setting));
+        }
+        let configuration = self.configuration_path()?;
+        configuration_compatibility_mode(configuration)
+            .map(|value| (value, CompatibilityModeSource::ConfigurationXml))
     }
 
     /// Advisory for a project that is a configuration extension analyzed without
@@ -1982,6 +2006,51 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+/// The `<CompatibilityMode>` of a MAIN configuration's `Configuration.xml`, as
+/// written there (`Version8_2_13`, `Version8_3_17`, `DontUse`).
+///
+/// `None` for an extension (its modules run under the mode of the configuration
+/// they extend), for a missing or unreadable file, and when `</Properties>` closes
+/// without the element. Comments are skipped, the read is bounded by
+/// [`CONFIGURATION_KIND_SCAN_CAP`] like [`configuration_kind`].
+pub fn configuration_compatibility_mode(root: &Path) -> Option<String> {
+    use std::io::Read as _;
+
+    let path = configuration_xml_in(root)?;
+    let file = std::fs::File::open(&path).ok()?;
+    let mut head = Vec::new();
+    file.take(CONFIGURATION_KIND_SCAN_CAP).read_to_end(&mut head).ok()?;
+    compatibility_mode_in(&head)
+}
+
+fn compatibility_mode_in(head: &[u8]) -> Option<String> {
+    const COMMENT_OPEN: &[u8] = b"<!--";
+    const COMMENT_CLOSE: &[u8] = b"-->";
+    const PROPERTIES_CLOSE: &[u8] = b"</Properties>";
+    const MODE_OPEN: &[u8] = b"<CompatibilityMode>";
+
+    let mut i = 0;
+    while i < head.len() {
+        let rest = &head[i..];
+        if rest.starts_with(COMMENT_OPEN) {
+            i += COMMENT_OPEN.len() + find(&rest[COMMENT_OPEN.len()..], COMMENT_CLOSE)?;
+            i += COMMENT_CLOSE.len();
+            continue;
+        }
+        if rest.starts_with(EXTENSION_MARKER) || rest.starts_with(PROPERTIES_CLOSE) {
+            return None;
+        }
+        if rest.starts_with(MODE_OPEN) {
+            let value = &rest[MODE_OPEN.len()..];
+            let end = find(value, b"<")?;
+            let value = std::str::from_utf8(&value[..end]).ok()?.trim();
+            return (!value.is_empty()).then(|| value.to_owned());
+        }
+        i += 1;
+    }
+    None
+}
+
 /// One entry of the `extensions` list: either a bare path string (legacy,
 /// independent extension) or a structured entry with a stable name and
 /// declared dependencies.
@@ -2189,6 +2258,13 @@ pub struct ProjectConfig {
     /// `target_platform_version` selects.
     #[serde(default, alias = "min_platform_version")]
     pub min_platform_version: Option<String>,
+
+    /// The compatibility mode the code runs under (`8.2.13`, `Version8_2_13`,
+    /// `DontUse`). Overrides the `<CompatibilityMode>` of the main configuration's
+    /// `Configuration.xml` — for sources exported from a copy whose mode differs
+    /// from the customer's. See [`Project::compatibility_mode`].
+    #[serde(default, alias = "compatibility_mode")]
+    pub compatibility_mode: Option<String>,
 
     #[serde(default)]
     pub language: Option<String>,
@@ -3128,6 +3204,8 @@ struct TomlConfig {
     #[serde(default)]
     min_platform_version: Option<String>,
     #[serde(default)]
+    compatibility_mode: Option<String>,
+    #[serde(default)]
     search: TomlSearchConfig,
     #[serde(default)]
     features: FeaturesConfig,
@@ -3216,6 +3294,7 @@ impl From<TomlConfig> for ProjectConfig {
             source_exclude: toml.source.exclude,
             target_platform_version: toml.target_platform_version,
             min_platform_version: toml.min_platform_version,
+            compatibility_mode: toml.compatibility_mode,
             language: None,
             extensions: toml.source.extensions,
             externals: toml.source.externals,
@@ -3686,7 +3765,9 @@ mod tests {
         SourceSet, SourceSetOverride, StructuredExtensionDecl, TopologyError,
         WorkspaceDiagnosticsScope,
     };
-    use super::{configuration_kind, ConfigurationKind};
+    use super::{
+        compatibility_mode_in, configuration_kind, CompatibilityModeSource, ConfigurationKind,
+    };
     use super::{dotenv_value, parse_dotenv_value};
     use super::{PROJECT_ENV_FILE_NAME, SHARED_CONFIGURATIONS_ROOT_ENV};
     use chrono::{Duration, TimeZone, Utc};
@@ -3758,6 +3839,67 @@ mod tests {
         let config = ProjectConfig::load_from_file(&path).unwrap();
         assert_eq!(config.min_platform_version.as_deref(), Some("8.3.17"));
         assert!(config.target_platform_version.is_none());
+    }
+
+    #[test]
+    fn project_config_reads_compatibility_mode_json_and_toml() {
+        let config: ProjectConfig =
+            serde_json::from_str(r#"{"compatibilityMode":"8.2.13"}"#).unwrap();
+        assert_eq!(config.compatibility_mode.as_deref(), Some("8.2.13"));
+        let snake: ProjectConfig =
+            serde_json::from_str(r#"{"compatibility_mode":"Version8_3_17"}"#).unwrap();
+        assert_eq!(snake.compatibility_mode.as_deref(), Some("Version8_3_17"));
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bsl-analyzer.toml");
+        fs::write(&path, "compatibility_mode = \"8.3.15\"\n").unwrap();
+        let config = ProjectConfig::load_from_file(&path).unwrap();
+        assert_eq!(config.compatibility_mode.as_deref(), Some("8.3.15"));
+    }
+
+    #[test]
+    fn compatibility_mode_is_read_from_a_main_configuration_only() {
+        let main = br#"<MetaDataObject><Configuration><Properties>
+<!-- <CompatibilityMode>Version8_1</CompatibilityMode> -->
+<ConfigurationExtensionCompatibilityMode>Version8_3_17</ConfigurationExtensionCompatibilityMode>
+<CompatibilityMode>Version8_2_13</CompatibilityMode>
+</Properties></Configuration></MetaDataObject>"#;
+        assert_eq!(compatibility_mode_in(main).as_deref(), Some("Version8_2_13"));
+
+        let extension = br#"<MetaDataObject><Configuration><Properties>
+<ConfigurationExtensionPurpose>Customization</ConfigurationExtensionPurpose>
+<CompatibilityMode>Version8_3_17</CompatibilityMode>
+</Properties></Configuration></MetaDataObject>"#;
+        assert_eq!(compatibility_mode_in(extension), None, "an extension runs under its base");
+
+        let after_properties =
+            br#"<Properties></Properties><CompatibilityMode>Version8_2_13</CompatibilityMode>"#;
+        assert_eq!(compatibility_mode_in(after_properties), None);
+    }
+
+    #[test]
+    fn project_compatibility_mode_prefers_the_setting() {
+        let dir = tempdir().unwrap();
+        let cf = dir.path().join("src").join("cf");
+        fs::create_dir_all(&cf).unwrap();
+        fs::write(
+            cf.join("Configuration.xml"),
+            "<MetaDataObject><Configuration><Properties><CompatibilityMode>Version8_2_13</CompatibilityMode></Properties></Configuration></MetaDataObject>",
+        )
+        .unwrap();
+        let project = Project::with_config(dir.path(), ProjectConfig::default()).unwrap();
+        assert_eq!(
+            project.compatibility_mode(),
+            Some(("Version8_2_13".to_string(), CompatibilityModeSource::ConfigurationXml))
+        );
+
+        let overridden =
+            ProjectConfig { compatibility_mode: Some("8.3.15".into()), ..ProjectConfig::default() };
+        let project = Project::with_config(dir.path(), overridden).unwrap();
+        assert_eq!(
+            project.compatibility_mode(),
+            Some(("8.3.15".to_string(), CompatibilityModeSource::Setting))
+        );
     }
 
     #[test]

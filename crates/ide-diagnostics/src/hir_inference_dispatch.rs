@@ -21,6 +21,7 @@ pub(crate) const INFERENCE_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::MissedRequiredParameter,
     DiagnosticCode::UnavailableInEnvironment,
     DiagnosticCode::PlatformMemberNewerThanMinVersion,
+    DiagnosticCode::PlatformMemberHiddenByCompatibilityMode,
     DiagnosticCode::ModuleAccessibility,
     DiagnosticCode::ExternalAppStarting,
     DiagnosticCode::FileSystemAccess,
@@ -119,6 +120,7 @@ fn diagnostic_expr(diag: &InferenceDiagnostic) -> ExprId {
         InferenceDiagnostic::RedundantAccessToObjectThreeLevel { expr, .. } => *expr,
         InferenceDiagnostic::UnavailableInEnvironment { expr, .. } => *expr,
         InferenceDiagnostic::PlatformMemberNewerThanMinVersion { expr, .. } => *expr,
+        InferenceDiagnostic::PlatformMemberHiddenByCompatibilityMode { expr, .. } => *expr,
         InferenceDiagnostic::ModuleAccessibility { expr, .. } => *expr,
         InferenceDiagnostic::GuardedCall { expr, .. } => *expr,
     }
@@ -243,6 +245,18 @@ fn dispatch_inference_diagnostic(
             name,
             *introduced,
             *minimum,
+            range,
+            ctx,
+        ),
+        InferenceDiagnostic::PlatformMemberHiddenByCompatibilityMode {
+            name,
+            mode,
+            visible_from,
+            ..
+        } => handlers::platform_member_hidden_by_compatibility_mode::from_hir(
+            name,
+            *mode,
+            *visible_from,
             range,
             ctx,
         ),

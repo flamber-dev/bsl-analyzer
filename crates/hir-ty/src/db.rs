@@ -43,6 +43,11 @@ pub trait HirDatabase: ConfigsDatabase + bsl_types::intern::TypeKernelDb {
     /// keeps the min-platform check silent. Never consulted for catalog selection.
     fn min_platform_version(&self) -> Option<Arc<str>>;
 
+    /// The configuration's compatibility mode as written (`Version8_2_13`,
+    /// `8.2.13`, `DontUse`); `None` when unknown. Below a per-name threshold the
+    /// platform hides some globals whatever its release.
+    fn compatibility_mode(&self) -> Option<Arc<str>>;
+
     /// Whether the host has finished the initial workspace/metadata load.
     fn workspace_load_complete(&self) -> bool;
 

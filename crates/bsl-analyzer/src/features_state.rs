@@ -8,7 +8,9 @@ impl GlobalState {
     pub fn update_features_config(&mut self) {
         let config =
             self.project.as_ref().map(|project| project.config.clone()).unwrap_or_default();
-        apply_project_config_to_db(self.analysis_host.raw_database_mut(), &config);
+        let db = self.analysis_host.raw_database_mut();
+        apply_project_config_to_db(db, &config);
+        apply_compatibility_mode_to_db(db, self.project.as_ref());
     }
 }
 
@@ -54,6 +56,31 @@ pub fn apply_project_config_to_db(db: &mut RootDatabaseImpl, config: &ProjectCon
     if db.min_platform_version().as_deref() != min.as_deref() {
         tracing::info!(min_platform_version = ?min, "updated minimum platform");
         db.set_min_platform_version(min);
+    }
+}
+
+/// The compatibility mode of `project` ([`project_model::Project::compatibility_mode`]:
+/// the setting, else the main configuration's `Configuration.xml`) into the
+/// database. Kept apart from [`apply_project_config_to_db`] because it needs the
+/// project's files, not just its settings.
+pub fn apply_compatibility_mode_to_db(
+    db: &mut RootDatabaseImpl,
+    project: Option<&project_model::Project>,
+) {
+    let resolved = project.and_then(|project| project.compatibility_mode());
+    if let Some((value, source)) = &resolved {
+        if bsl_platform::PlatformVersion::parse_compatibility_mode(value).is_none() {
+            tracing::warn!(
+                compatibility_mode = %value,
+                ?source,
+                "compatibility mode is not a recognized value; the compatibility-mode check stays off"
+            );
+        }
+    }
+    let mode = resolved.map(|(value, _)| Arc::<str>::from(value));
+    if db.compatibility_mode().as_deref() != mode.as_deref() {
+        tracing::info!(compatibility_mode = ?mode, "updated compatibility mode");
+        db.set_compatibility_mode(mode);
     }
 }
 

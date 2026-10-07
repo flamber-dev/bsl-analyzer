@@ -10,7 +10,10 @@ only at the customer: "Процедура или функция с указан�
 
 The configuration's 8.3.x compatibility mode does not help: checked live on
 8.3.17.1549 and 8.3.27.2214, 8.3.x modes do not hide newer platform members — what
-exists is decided by the platform release the code runs on.
+exists is decided by the platform release the code runs on. The exception is 30
+global names a mode below their threshold hides (`StrFind` before 8.3.6,
+`BitwiseAnd` before 8.3.11 and others); `PlatformMemberHiddenByCompatibilityMode`
+catches those.
 
 The rule is switched on by the project setting `min_platform_version` (see
 `docs/configuration/PROJECT_CONFIGURATION.md`). While the setting is unset, the rule

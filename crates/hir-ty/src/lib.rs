@@ -2,6 +2,7 @@ pub mod arg_diagnostics;
 pub mod builtin;
 mod call_binding;
 pub mod call_resolution;
+pub mod compat_mode;
 pub mod db;
 pub mod doc_see;
 pub mod field_enum;

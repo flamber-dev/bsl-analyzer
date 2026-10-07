@@ -432,6 +432,19 @@ pub enum InferenceDiagnostic {
         minimum: bsl_platform::PlatformVersion,
     },
 
+    /// A platform name the configuration's compatibility mode hides: below
+    /// `visible_from` the platform does not see it at all, whatever its release. A
+    /// global then breaks compilation of the module («Процедура или функция с
+    /// указанным именем не определена», «Переменная не определена»); the one hidden
+    /// type member (`Запрос.ТребуемаяАктуальностьДанных`) fails when executed. Raised
+    /// only when the mode is known (setting or `Configuration.xml`).
+    PlatformMemberHiddenByCompatibilityMode {
+        expr: ExprId,
+        name: Name,
+        mode: bsl_platform::PlatformVersion,
+        visible_from: bsl_platform::PlatformVersion,
+    },
+
     /// A resolved platform member is not available in some of the execution
     /// environments this body runs in (`missing` — the EDT-style
     /// "[Web client]" qualifier set).
@@ -641,6 +654,10 @@ pub struct InferenceContext<'db> {
     /// The project's `min_platform_version`, parsed once per body; `None` turns
     /// the min-platform check off entirely.
     min_platform: Option<bsl_platform::PlatformVersion>,
+
+    /// The configuration's compatibility mode, parsed once per body; `None` (no
+    /// mode known, or `DontUse`) turns the compatibility-mode check off.
+    compat_mode: Option<bsl_platform::PlatformVersion>,
 
     /// Lazily-built, usage-aware user global surface. Both maps are constructed
     /// together so global modules are enumerated at most once per inference run.
@@ -904,6 +921,7 @@ impl<'db> InferenceContext<'db> {
             min_platform: db
                 .min_platform_version()
                 .and_then(|value| bsl_platform::PlatformVersion::parse_catalog(&value)),
+            compat_mode: crate::compat_mode::effective_mode(db.compatibility_mode().as_deref()),
             global_exports: None,
             global_read_exports: None,
             global_surface_partly_unknown: false,
@@ -1229,6 +1247,7 @@ impl<'db> InferenceContext<'db> {
             InferenceDiagnostic::RedundantAccessToObjectThreeLevel { expr, .. } => *expr,
             InferenceDiagnostic::UnavailableInEnvironment { expr, .. } => *expr,
             InferenceDiagnostic::PlatformMemberNewerThanMinVersion { expr, .. } => *expr,
+            InferenceDiagnostic::PlatformMemberHiddenByCompatibilityMode { expr, .. } => *expr,
             InferenceDiagnostic::ModuleAccessibility { expr, .. } => *expr,
             InferenceDiagnostic::GuardedCall { expr, .. } => *expr,
         };
@@ -1292,8 +1311,9 @@ impl<'db> InferenceContext<'db> {
     }
 
     /// The release this module must still compile on: the project's
-    /// `min_platform_version`. The compatibility mode does not lower it — checked
-    /// live, 8.3.x modes do not hide members newer than the mode.
+    /// `min_platform_version`. The compatibility mode does not lower it — a mode
+    /// hides 30 named globals at measured thresholds, not everything newer than
+    /// the mode — and is judged by its own check, [`Self::check_compat_mode`].
     fn effective_min_platform(&self) -> Option<bsl_platform::PlatformVersion> {
         self.min_platform
     }
@@ -1325,6 +1345,56 @@ impl<'db> InferenceContext<'db> {
             name: name.clone(),
             introduced,
             minimum,
+        });
+    }
+
+    /// Report a platform name the compatibility mode hides: `visible_from` is the
+    /// first mode that sees it ([`crate::compat_mode`]). Silent without a known mode
+    /// and where nothing compiles the code, like [`Self::check_min_platform`].
+    fn check_compat_mode(
+        &mut self,
+        expr: ExprId,
+        name: &Name,
+        visible_from: impl FnOnce() -> Option<bsl_platform::PlatformVersion>,
+    ) {
+        let Some(mode) = self.compat_mode else {
+            return;
+        };
+        let Some(visible_from) = visible_from() else {
+            return;
+        };
+        if !visible_from.release_newer_than(mode) {
+            return;
+        }
+        if self.in_uncompiled_branch || self.module_compiles_nowhere() {
+            return;
+        }
+        self.push_inference_diagnostic(
+            InferenceDiagnostic::PlatformMemberHiddenByCompatibilityMode {
+                expr,
+                name: name.clone(),
+                mode,
+                visible_from,
+            },
+        );
+    }
+
+    /// [`Self::check_compat_mode`] for a property of a value typed as exactly one
+    /// platform type.
+    fn check_compat_mode_type_member(&mut self, expr: ExprId, receiver_ty: TypeId, member: &Name) {
+        if self.compat_mode.is_none() {
+            return;
+        }
+        // `Новый Запрос` is typed as the query kind, not as a plain platform object.
+        let owner = match self.db.lookup_type(receiver_ty) {
+            TypeKind::Query { .. } => Some(Name::new("Запрос")),
+            _ => self.exact_platform_owner(receiver_ty),
+        };
+        let Some(owner) = owner else {
+            return;
+        };
+        self.check_compat_mode(expr, member, || {
+            crate::compat_mode::hidden_type_member(owner.as_str(), member.as_str())
         });
     }
 
@@ -2257,6 +2327,7 @@ impl<'db> InferenceContext<'db> {
                                 self.check_min_platform_type_member(
                                     target_id, base_ty, field, true,
                                 );
+                                self.check_compat_mode_type_member(target_id, base_ty, field);
                             }
                             if info.is_readonly {
                                 self.push_inference_diagnostic(
@@ -2500,6 +2571,7 @@ impl<'db> InferenceContext<'db> {
                     if let crate::field_enum::FieldOrigin::PlatformProperty { env } = info.origin {
                         self.check_member_env(expr_id, field, env, EnvMemberKind::Property);
                         self.check_min_platform_type_member(expr_id, base_ty, field, true);
+                        self.check_compat_mode_type_member(expr_id, base_ty, field);
                     }
                     info.ty
                 } else if let Some(info) = crate::manager_lookup::lookup_manager_field(
@@ -2952,6 +3024,9 @@ impl<'db> InferenceContext<'db> {
                 self.check_min_platform(expr_id, name, || {
                     crate::min_platform::global_property(name.as_str())
                 });
+                self.check_compat_mode(expr_id, name, || {
+                    crate::compat_mode::hidden_global(name.as_str())
+                });
                 return found(id, BareNameOrigin::PlatformProperty, env);
             }
         }
@@ -2974,6 +3049,9 @@ impl<'db> InferenceContext<'db> {
                     );
                     self.check_min_platform(expr_id, name, || {
                         crate::min_platform::global_property(name.as_str())
+                    });
+                    self.check_compat_mode(expr_id, name, || {
+                        crate::compat_mode::hidden_global(name.as_str())
                     });
                     return found(
                         self.db.unknown(),
@@ -3545,9 +3623,14 @@ impl<'db> InferenceContext<'db> {
                 // This branch is entered even when the module declares a method of the
                 // same name; such a polyfill (a local `СтрЗаменитьПоРегулярномуВыражению`
                 // for an older platform) is the very code that must stay silent.
-                if self.min_platform.is_some() && !self.is_call_name_shadowed(&name) {
+                if (self.min_platform.is_some() || self.compat_mode.is_some())
+                    && !self.is_call_name_shadowed(&name)
+                {
                     self.check_min_platform(callee, &name, || {
                         crate::min_platform::global_function(name.as_str())
+                    });
+                    self.check_compat_mode(callee, &name, || {
+                        crate::compat_mode::hidden_global(name.as_str())
                     });
                 }
 
@@ -3625,6 +3708,11 @@ impl<'db> InferenceContext<'db> {
                         self.check_min_platform(callee, name, || {
                             crate::min_platform::global_function(name.as_str())
                         });
+                        if self.compat_mode.is_some() && !self.is_call_name_shadowed(name) {
+                            self.check_compat_mode(callee, name, || {
+                                crate::compat_mode::hidden_global(name.as_str())
+                            });
+                        }
                         for arg in args {
                             self.infer_expr(*arg);
                         }

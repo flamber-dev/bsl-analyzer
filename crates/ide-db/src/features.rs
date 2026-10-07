@@ -13,4 +13,9 @@ pub struct FeaturesInput {
     /// `PlatformMemberNewerThanMinVersion`. Independent of the target above.
     #[returns(clone)]
     pub min_platform_version: Option<Arc<str>>,
+    /// The compatibility mode the code compiles under, as written in the setting or
+    /// `Configuration.xml` (`Version8_2_13`, `8.2.13`, `DontUse`); `None` when no
+    /// source states one. Drives `PlatformMemberHiddenByCompatibilityMode`.
+    #[returns(clone)]
+    pub compatibility_mode: Option<Arc<str>>,
 }
