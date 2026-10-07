@@ -176,6 +176,56 @@ mod tests {
         );
     }
 
+    /// The effective body of a `&ИзменениеИКонтроль` method is inferred without a known
+    /// environment, so nothing proves a `#Если` branch in it compiled; the call outside
+    /// the branch is still reported.
+    #[test]
+    fn a_branch_of_a_change_and_validate_body_stays_silent() {
+        fn run(insert: &str) -> Vec<String> {
+            let mut builder = test_fixture::CfeFixtureBuilder::new("");
+            builder.add_base_module("Сервер", "Процедура Цель() Экспорт\nКонецПроцедуры\n");
+            let ext = format!(
+                "&ИзменениеИКонтроль(\"Цель\")\nПроцедура Расш_Цель()\n#Вставка\n{insert}#КонецВставки\nКонецПроцедуры\n"
+            );
+            builder.add_extension("Расш", "");
+            crate::test_utils::check_cfe_at_with_db(
+                "CommonModules/Сервер/Ext/Module.bsl",
+                &ext,
+                builder.build(),
+                &[],
+                DiagnosticsConfig::default(),
+                |_| {},
+                |db, ctx| crate::file_diagnostics(db, ctx.file_id, ctx.config),
+            )
+            .into_iter()
+            .filter(|diag| diag.code == DiagnosticCode::UnresolvedBareCall)
+            .map(|diag| diag.message)
+            .collect()
+        }
+        let outside = run("\tНетТакойПроцедуры();\n");
+        assert_eq!(outside.len(), 1, "the inserted call is compiled: {outside:?}");
+        let branch = run("#Если Клиент Тогда\n\tНетТакойПроцедуры();\n#КонецЕсли\n");
+        assert!(branch.is_empty(), "an unproven branch cannot fail the module: {branch:?}");
+    }
+
+    /// An export variable of the application module is a value, not a method: calling
+    /// it by name is still a call of nothing.
+    #[test]
+    fn a_name_only_a_global_export_variable_holds_is_still_absent() {
+        let fixture = test_fixture::CfeFixtureBuilder::new("").build();
+        let app_path = fixture.root().join("Ext/ManagedApplicationModule.bsl");
+        std::fs::create_dir_all(app_path.parent().unwrap()).unwrap();
+        std::fs::write(&app_path, "Перем ГлобальнаяПеременная Экспорт;\n").unwrap();
+        let source = r#"
+Процедура Тест()
+    ГлобальнаяПеременная();
+КонецПроцедуры
+"#;
+        let reported = bare_calls(source, fixture);
+        assert_eq!(reported.len(), 1, "a global export variable owns no call: {reported:?}");
+        assert!(reported[0].contains("ГлобальнаяПеременная"), "{reported:?}");
+    }
+
     /// One `BareNameGap` is enough to withhold the verdict: an application module
     /// that exists but could not be read may export this very name.
     #[test]

@@ -12,8 +12,8 @@ belongs to nothing the analyzer can see:
 - no export of a global common module or of an application module;
 - no global function of the platform.
 
-A variable does not own a call name: a parameter, a `Перем` or a local of the same
-name does not make `Name(...)` valid — a call looks among methods only.
+A variable does not own a call name: a parameter, a `Перем`, a local or an export
+variable of an application module of the same name does not make `Name(...)` valid — a call looks among methods only.
 
 In 1C:Enterprise this is not a cosmetic problem. A call to an undefined procedure
 breaks compilation of the WHOLE module at run time: the thin client dies in a modal
@@ -45,7 +45,8 @@ would judge by is incomplete:
   call, external connection, clients): the platform compiles such a module nowhere;
 - the call sits in an `#If` branch the platform compiles in none of the method's
   environments (say, `#If Client` inside a server-side form procedure): such a branch
-  cannot break the module.
+  cannot break the module. Any `#If` branch of a body whose environment is unknown —
+  say, `#Insert` code of a `&ChangeAndValidate` method — is silent too.
 
 A call with a receiver (`CommonModule.Method()`) belongs to `UnresolvedMethodCall`.
 A read of an undefined name outside a call belongs to `UnresolvedName`; while that

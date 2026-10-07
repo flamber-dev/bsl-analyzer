@@ -619,10 +619,10 @@ pub struct InferenceContext<'db> {
     /// out of default verdicts.
     checked_env: hir_def::execution_env::EnvFlags,
 
-    /// The statement walk is inside a `#Если` branch that leaves no environment
-    /// of a known body: the platform never compiles it there. Distinct from an
-    /// empty [`Self::body_env`], which also means "environment unknown" for the
-    /// whole body.
+    /// The statement walk is inside a `#Если` branch that nothing proves compiled:
+    /// either it leaves no environment of a known body, or the body's environment
+    /// is unknown (an empty [`Self::body_env`], as in effective and weaving bodies),
+    /// so the branch may be compiled nowhere.
     in_uncompiled_branch: bool,
 
     /// Lazily-built, usage-aware user global surface. Both maps are constructed
@@ -2223,8 +2223,7 @@ impl<'db> InferenceContext<'db> {
                 let parent_uncompiled = self.in_uncompiled_branch;
                 let mut remaining = parent;
                 self.body_env = preproc.condition.narrow_branch(&mut remaining);
-                self.in_uncompiled_branch =
-                    parent_uncompiled || (!parent.is_empty() && self.body_env.is_empty());
+                self.in_uncompiled_branch = parent_uncompiled || self.body_env.is_empty();
                 self.infer_stmts(&preproc.then_branch);
                 for (idx, (_, _, branch)) in preproc.elsif_branches.iter().enumerate() {
                     self.body_env = match preproc.elsif_conditions.get(idx) {
@@ -2237,14 +2236,12 @@ impl<'db> InferenceContext<'db> {
                             remaining
                         }
                     };
-                    self.in_uncompiled_branch =
-                        parent_uncompiled || (!parent.is_empty() && self.body_env.is_empty());
+                    self.in_uncompiled_branch = parent_uncompiled || self.body_env.is_empty();
                     self.infer_stmts(branch);
                 }
                 if let Some(else_branch) = &preproc.else_branch {
                     self.body_env = remaining;
-                    self.in_uncompiled_branch =
-                        parent_uncompiled || (!parent.is_empty() && self.body_env.is_empty());
+                    self.in_uncompiled_branch = parent_uncompiled || self.body_env.is_empty();
                     self.infer_stmts(else_branch);
                 }
                 self.body_env = parent;
@@ -3568,13 +3565,14 @@ impl<'db> InferenceContext<'db> {
         self.db.unknown()
     }
 
-    /// Whether a variable of this body or module answers `name` as a value: a
-    /// parameter or `Перем` of the body, an implicit local written in it, or a
-    /// module-level `Перем`.
-    fn variable_holds_name(&self, name: &hir_def::Name) -> bool {
+    /// Whether a variable answers `name` as a value: a parameter or `Перем` of the
+    /// body, an implicit local written in it, a module-level `Перем`, or an export
+    /// variable of an application module.
+    fn variable_holds_name(&mut self, name: &hir_def::Name) -> bool {
         self.body_declares_binding(name)
             || self.assigned_var_names.contains(&NormName::intern(name.as_str()))
             || self.get_resolver().resolve_module_variable(self.db, name).is_some()
+            || self.global_read_export(name).is_some()
     }
 
     /// The last stop of the bare-call cascade: `Имя(...)` that no method of this
