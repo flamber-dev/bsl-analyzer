@@ -277,7 +277,125 @@ pub fn module_metadata_query<'db>(
         metadata.integration_service = db.integration_service_for_file_id(file_id);
     }
 
+    if let Some(merged) = borrowed_form_with_base_attributes(
+        db,
+        file_id,
+        &file_path,
+        configuration.as_deref(),
+        &metadata,
+    ) {
+        metadata.form = Some(merged);
+    }
+
     Arc::new(metadata)
+}
+
+/// The form of an extension's borrowed form module with the attributes of the
+/// same-named base form beneath its own, or `None` when the module keeps its
+/// local form. The extension dumps a borrowed form with only the attributes it
+/// adds, yet the module still addresses every base attribute.
+///
+/// Only a form whose owner the extension itself marks `Adopted` inherits; the
+/// base is the single unlabelled designer root, so inheritance is one step deep.
+/// The base form comes from the base module's own metadata query, which makes
+/// this result follow the base configuration's revisions once a base file pairs.
+fn borrowed_form_with_base_attributes(
+    db: &dyn RootDatabase,
+    file_id: vfs::FileId,
+    file_path: &std::path::Path,
+    configuration: Option<&bsl_metadata::Configuration>,
+    metadata: &hir::ModuleMetadata,
+) -> Option<Arc<bsl_metadata::Form>> {
+    if metadata.module_type != bsl_metadata::ModuleType::FormModule {
+        return None;
+    }
+    let overlay = metadata.form.as_ref()?;
+
+    let roots = db.designer_config_paths();
+    let (_, Some(label)) = db.config_root_rank_and_label(file_id)? else { return None };
+    if db.external_root_of_path(file_path).is_some()
+        || !roots.iter().any(|(root_label, _)| root_label.as_deref() == Some(label.as_str()))
+    {
+        return None;
+    }
+
+    let key = hir::parse_form_module_path(&file_path.to_string_lossy())?;
+    let (owner_type, owner_name) = key.owner?;
+    let owner = configuration?.find_metadata_object(owner_type, &owner_name)?;
+    if owner.object_belonging() != bsl_metadata::ObjectBelonging::Adopted {
+        return None;
+    }
+
+    let base_path = hir::pair_base_module_path(&roots, file_path)?;
+    let source_root = db.file_source_root_input(file_id).source_root_id(db);
+    let base_file = resolve_pair_candidate(db, source_root, &roots, &base_path)
+        .or_else(|| resolve_borrowed_form_candidate(db, source_root, &roots, &base_path))?;
+    if !matches!(db.config_root_rank_and_label(base_file), Some((_, None))) {
+        return None;
+    }
+
+    // Queried before the dialog probes: a disk probe records no dependency, so
+    // only this read makes a base-root revision re-run the extension's form.
+    let base_metadata = module_metadata_query(db, FileIdInput::new(db, base_file));
+    let base_file_path = crate::vfs_helpers::get_file_path(db, base_file)?;
+    if !form_dialog_exists(file_path) || !form_dialog_exists(&base_file_path) {
+        return None;
+    }
+
+    let mut merged = bsl_metadata::Form::clone(base_metadata.form.as_deref()?);
+    merged.apply_extension_overlay(overlay);
+    Some(Arc::new(merged))
+}
+
+/// [`resolve_pair_candidate`] for a form module whose form name differs from
+/// the base spelling beyond ASCII case (`ФормаЁж` / `формаёж`): every component
+/// keeps the grammar's mode except the form name, which folds by Unicode case.
+/// The base root prefix and the owner name stay exact. Reading the source root
+/// records the file-set dependency.
+fn resolve_borrowed_form_candidate(
+    db: &dyn RootDatabase,
+    source_root: base_db::SourceRootId,
+    roots: &[(Option<String>, std::path::PathBuf)],
+    base_path: &std::path::Path,
+) -> Option<vfs::FileId> {
+    const FORM_NAME: usize = 3;
+    let base_root = roots.iter().find_map(|(label, p)| label.is_none().then_some(p))?;
+    let rel = base_path.strip_prefix(base_root).ok()?.to_string_lossy().into_owned();
+    hir::parse_form_module_path(&rel)?;
+    let modes = hir::module_path_segment_modes(&rel)?;
+
+    let candidate_str = base_path.to_string_lossy().replace('\\', "/");
+    let candidate: Vec<&str> = candidate_str.split('/').collect();
+    let head = candidate.len().checked_sub(modes.len())?;
+    let source_root = db.source_root_input(source_root).root(db);
+    let file_set = source_root.file_set();
+    file_set.iter().find(|file| {
+        let Some(path) = file_set.path_for_file(file) else { return false };
+        let real_str = path.as_path().to_string_lossy().replace('\\', "/");
+        let real: Vec<&str> = real_str.split('/').collect();
+        real.len() == candidate.len()
+            && real[..head] == candidate[..head]
+            && real[head..].iter().zip(&candidate[head..]).zip(&modes).enumerate().all(
+                |(i, ((r, c), mode))| {
+                    if i == FORM_NAME {
+                        stdx::case::eq_ignore_case(r, c)
+                    } else {
+                        mode.matches(r, c)
+                    }
+                },
+            )
+    })
+}
+
+/// Whether the form module's dialog is a readable `Ext/Form.xml`, under the
+/// service-name policy of `parse_form_from_bsl_path`. An ordinary form keeps
+/// its dialog in the binary `Ext/Form.bin`; its attributes are unknown, so it
+/// takes part in no attribute merge on either side.
+fn form_dialog_exists(module_path: &std::path::Path) -> bool {
+    module_path.parent().and_then(std::path::Path::parent).is_some_and(|ext| {
+        bsl_conventions::find_child_ci(ext, bsl_conventions::ConventionalName::FormXml.canonical())
+            .is_some()
+    })
 }
 
 #[salsa::tracked(lru = 512, returns(clone))]

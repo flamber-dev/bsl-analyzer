@@ -87,15 +87,17 @@ mod tests {
     use ide_db::RootDatabaseImpl;
     use std::rc::Rc;
     use vfs::{FileId, FileSet, VfsPath};
-    fn check_as_form_module(code: &str) -> Vec<Diagnostic> {
+
+    const FORM_MODULE: &str = "Catalogs/Теплицы/Forms/ФормаЭлемента/Ext/Form/Module.bsl";
+    const COMMAND_MODULE: &str = "CommonCommands/ЗапуститьПолив/Ext/CommandModule.bsl";
+    const REGULAR_MODULE: &str = "/ОбщийМодульПолива.bsl";
+
+    fn check_at(path: &str, code: &str) -> Vec<Diagnostic> {
         let mut db = RootDatabaseImpl::new();
         let file_id = FileId::from_raw(1);
 
         let mut file_set = FileSet::default();
-        file_set.insert(
-            file_id,
-            VfsPath::new("Catalogs/Справочник1/Forms/ФормаЭлемента/Ext/Form/Module.bsl"),
-        );
+        file_set.insert(file_id, VfsPath::new(path));
         let source_root = SourceRoot::new_local(file_set);
         db.set_source_root(SourceRootId(0), source_root);
         db.set_file_source_root(file_id, SourceRootId(0));
@@ -107,137 +109,117 @@ mod tests {
         let ctx = crate::DiagnosticsContext::new(&config, file_id, &provider);
 
         check(&ctx)
-    }
-
-    fn check_as_regular_module(code: &str) -> Vec<Diagnostic> {
-        let mut db = RootDatabaseImpl::new();
-        let file_id = FileId::from_raw(1);
-
-        let mut file_set = FileSet::default();
-        file_set.insert(file_id, VfsPath::new("/test.bsl"));
-        let source_root = SourceRoot::new_local(file_set);
-        db.set_source_root(SourceRootId(0), source_root);
-        db.set_file_source_root(file_id, SourceRootId(0));
-
-        db.set_file_text(file_id, code);
-
-        let config = Rc::new(DiagnosticsConfig::default());
-        let provider = ide_db::SalsaProvider::new(&db, None);
-        let ctx = crate::DiagnosticsContext::new(&config, file_id, &provider);
-
-        check(&ctx)
-    }
-
-    #[test]
-    fn test_comprehensive() {
-        let code = r#"
-&НаСервере
-Процедура ЗагрузитьДанные()
-Конецпроцедуры
-
-&НаКлиенте
-Функция ПолучитьЗаголовок()
-КонецФункции
-
-Функция НужнаДиректива()
-КонецФункции
-"#;
-        let diagnostics = check_as_form_module(code);
-
-        expect![[r#"
-            CompilationDirectiveLost @ 10:9..10:23
-              message: Пропущена директива компиляции для 'НужнаДиректива'. В модулях форм и команд требуется указывать &НаСервере, &НаКлиенте и т.д.
-              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_with_directive() {
-        let code = "&НаСервере\nПроцедура А()\nКонецПроцедуры";
-        let diagnostics = check_as_form_module(code);
+        let code = r#"&НаСервере
+Процедура ЗаписатьГрафик()
+КонецПроцедуры
+
+&НаКлиенте
+Функция ЗаголовокОкна()
+	Возврат "Полив";
+КонецФункции
+
+&НаСервереБезКонтекста
+Функция НормаНаДень(Культура)
+	Возврат 0;
+КонецФункции
+"#;
+        let diagnostics = check_at(FORM_MODULE, code);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_without_directive() {
-        let code = "Процедура БезДирективы()\nКонецПроцедуры";
-        let diagnostics = check_as_form_module(code);
-        expect![[r#"
-            CompilationDirectiveLost @ 1:11..1:23
-              message: Пропущена директива компиляции для 'БезДирективы'. В модулях форм и команд требуется указывать &НаСервере, &НаКлиенте и т.д.
-              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
-    }
-
-    #[test]
-    fn test_mixed() {
-        let code = r#"
-&НаСервере
-Процедура ОбновитьДанные()
+        let code = r#"&НаСервере
+Процедура ЗаписатьГрафик()
 КонецПроцедуры
 
-&НаКлиенте
-Функция ПолучитьПредставление()
-КонецФункции
-
-Функция БезДирективы()
+Функция ЗаголовокОкна()
+	Возврат "Полив";
 КонецФункции
 "#;
-        let diagnostics = check_as_form_module(code);
+        let diagnostics = check_at(FORM_MODULE, code);
         expect![[r#"
-            CompilationDirectiveLost @ 10:9..10:21
-              message: Пропущена директива компиляции для 'БезДирективы'. В модулях форм и команд требуется указывать &НаСервере, &НаКлиенте и т.д.
-              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
-    }
-
-    #[test]
-    fn test_english_keywords() {
-        let code = r#"
-&AtServer
-Procedure ServerMethod()
-EndProcedure
-
-Function MissingDirective()
-EndFunction
-"#;
-        let diagnostics = check_as_form_module(code);
-        expect![[r#"
-            CompilationDirectiveLost @ 6:10..6:26
-              message: Пропущена директива компиляции для 'MissingDirective'. В модулях форм и команд требуется указывать &НаСервере, &НаКлиенте и т.д.
+            CompilationDirectiveLost @ 5:9..5:22
+              message: Пропущена директива компиляции для 'ЗаголовокОкна'. В модулях форм и команд требуется указывать &НаСервере, &НаКлиенте и т.д.
               severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_multiple_missing() {
-        let code = r#"
-Процедура Первая()
-КонецПроцедуры
-
-Функция Вторая()
+        let code = r#"Функция ДатаСледующегоПолива()
+	Возврат ТекущаяДата();
 КонецФункции
 
 &НаКлиенте
-Процедура Третья()
+Процедура ОбновитьИндикатор()
 КонецПроцедуры
 
-Процедура Четвёртая()
+Процедура СброситьГрафик()
+КонецПроцедуры
+
+Процедура ПоказатьИсторию()
 КонецПроцедуры
 "#;
-        let diagnostics = check_as_form_module(code);
+        let diagnostics = check_at(FORM_MODULE, code);
         expect![[r#"
-            CompilationDirectiveLost @ 2:11..2:17
-              message: Пропущена директива компиляции для 'Первая'. В модулях форм и команд требуется указывать &НаСервере, &НаКлиенте и т.д.
+            CompilationDirectiveLost @ 1:9..1:29
+              message: Пропущена директива компиляции для 'ДатаСледующегоПолива'. В модулях форм и команд требуется указывать &НаСервере, &НаКлиенте и т.д.
               severity: Warning
-            CompilationDirectiveLost @ 5:9..5:15
-              message: Пропущена директива компиляции для 'Вторая'. В модулях форм и команд требуется указывать &НаСервере, &НаКлиенте и т.д.
+            CompilationDirectiveLost @ 9:11..9:25
+              message: Пропущена директива компиляции для 'СброситьГрафик'. В модулях форм и команд требуется указывать &НаСервере, &НаКлиенте и т.д.
               severity: Warning
-            CompilationDirectiveLost @ 12:11..12:20
-              message: Пропущена директива компиляции для 'Четвёртая'. В модулях форм и команд требуется указывать &НаСервере, &НаКлиенте и т.д.
+            CompilationDirectiveLost @ 12:11..12:26
+              message: Пропущена директива компиляции для 'ПоказатьИсторию'. В модулях форм и команд требуется указывать &НаСервере, &НаКлиенте и т.д.
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_english_keywords() {
+        let code = r#"&AtClient
+Procedure RefreshGauge()
+EndProcedure
+
+Procedure ResetSchedule()
+EndProcedure
+"#;
+        let diagnostics = check_at(FORM_MODULE, code);
+        expect![[r#"
+            CompilationDirectiveLost @ 5:11..5:24
+              message: Пропущена директива компиляции для 'ResetSchedule'. В модулях форм и команд требуется указывать &НаСервере, &НаКлиенте и т.д.
+              severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_command_module() {
+        let code = r#"&НаКлиенте
+Процедура ОбработкаКоманды(ПараметрКоманды, ПараметрыВыполненияКоманды)
+	ЗапуститьНаСервере();
+КонецПроцедуры
+
+Процедура ЗапуститьНаСервере()
+КонецПроцедуры
+"#;
+        let diagnostics = check_at(COMMAND_MODULE, code);
+        expect![[r#"
+            CompilationDirectiveLost @ 6:11..6:29
+              message: Пропущена директива компиляции для 'ЗапуститьНаСервере'. В модулях форм и команд требуется указывать &НаСервере, &НаКлиенте и т.д.
               severity: Warning"#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_regular_module_not_checked() {
-        let code = "Процедура БезДирективы()\nКонецПроцедуры";
-        let diagnostics = check_as_regular_module(code);
+        let code = r#"Процедура ЗаписатьГрафик()
+КонецПроцедуры
+
+Функция ЗаголовокОкна()
+	Возврат "Полив";
+КонецФункции
+"#;
+        let diagnostics = check_at(REGULAR_MODULE, code);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 }

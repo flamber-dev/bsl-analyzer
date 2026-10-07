@@ -165,212 +165,186 @@ mod tests {
     use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
     use expect_test::expect;
-    #[test]
-    fn test_code_inside_region_before_sub() {
-        let code = r#"Перем П;
 
-#Область КодДоМетодов
-Метод();
-Сообщить("4");
-#КонецОбласти
-
-Процедура Метод()
-// Метод
-КонецПроцедуры
-
-#Область Инициализация
-П = 12;
-#КонецОбласти"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::CodeBlockBeforeSub,
-            expect![[r#"
-                CodeBlockBeforeSub @ 4:1..5:14
-                  message: Обнаружен блок кода перед объявлением процедур и функций
-                  severity: Blocker"#]],
-        );
+    fn check(code: &str, expected: expect_test::Expect) {
+        check_diagnostics_snapshot_for(code, DiagnosticCode::CodeBlockBeforeSub, expected);
     }
 
     #[test]
     fn test_valid_order() {
-        let code = r#"Перем МояПеременная;
+        let code = r#"Перем КаталогКниг;
+Перем ЧислоВыдач;
 
-Процедура Инициализация()
-    МояПеременная = 10;
+Процедура ЗагрузитьКаталог()
+	КаталогКниг = Новый Массив;
 КонецПроцедуры
 
-Инициализация();
+ЧислоВыдач = 0;
+ЗагрузитьКаталог();
 "#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::CodeBlockBeforeSub, expect![[r#""#]]);
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_code_before_procedure() {
-        let code = r#"Перем МояПеременная;
+        let code = r#"Перем КаталогКниг;
+Перем ЧислоВыдач;
+ЧислоВыдач = 0;
 
-МояПеременная = 10;
-
-Процедура Тест()
+Процедура ЗагрузитьКаталог()
+	КаталогКниг = Новый Массив;
 КонецПроцедуры
+
+ЗагрузитьКаталог();
 "#;
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::CodeBlockBeforeSub,
             expect![[r#"
-                CodeBlockBeforeSub @ 3:1..3:19
-                  message: Обнаружен блок кода перед объявлением процедур и функций
-                  severity: Blocker"#]],
+            CodeBlockBeforeSub @ 3:1..3:15
+              message: Обнаружен блок кода перед объявлением процедур и функций
+              severity: Blocker"#]],
         );
-    }
-
-    #[test]
-    fn test_only_variables_before_procedure() {
-        let code = r#"Перем Переменная1;
-Перем Переменная2;
-
-Процедура Тест()
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::CodeBlockBeforeSub, expect![[r#""#]]);
-    }
-
-    #[test]
-    fn test_no_procedures() {
-        let code = r#"Перем МояПеременная;
-
-МояПеременная = 10;
-Сообщить(МояПеременная);
-"#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::CodeBlockBeforeSub, expect![[r#""#]]);
     }
 
     #[test]
     fn test_multiple_code_blocks() {
-        let code = r#"Перем Счетчик;
+        let code = r#"Перем Читатели;
 
-Счетчик = 0;
-Инициализация();
-Сообщить("Начало");
+Читатели = Новый Соответствие;
+ОбновитьАбонементы(Читатели);
+Читатели.Удалить("К-17");
 
-Процедура Инициализация()
-    Счетчик = 1;
-КонецПроцедуры
+Функция ОбновитьАбонементы(Список)
+	Возврат Список.Количество();
+КонецФункции
 "#;
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::CodeBlockBeforeSub,
             expect![[r#"
-                CodeBlockBeforeSub @ 3:1..5:19
-                  message: Обнаружен блок кода перед объявлением процедур и функций
-                  severity: Blocker"#]],
+            CodeBlockBeforeSub @ 3:1..5:25
+              message: Обнаружен блок кода перед объявлением процедур и функций
+              severity: Blocker"#]],
         );
     }
 
     #[test]
-    fn test_region_with_only_procedures_before_top_level_procedure() {
-        let code = r#"#Область ОбработчикиСобытий
+    fn test_no_procedures() {
+        let code = r#"Перем Полка;
 
-&НаКлиенте
-Процедура ПриОткрытии(Отказ)
-    Сообщить("Привет");
-КонецПроцедуры
-
-&НаСервере
-Функция ПолучитьДанные()
-    Возврат 42;
-КонецФункции
-
-#КонецОбласти
-
-&НаСервере
-Процедура ВнеОбласти()
-КонецПроцедуры
+Полка = Новый Массив;
+Полка.Добавить("Атлас");
 "#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::CodeBlockBeforeSub, expect![[r#""#]]);
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_english_keywords() {
-        let code = r#"Var MyVariable;
+        let code = r#"Var Shelf;
 
-MyVariable = 10;
+Shelf = New Array;
 
-Procedure Initialize()
-EndProcedure
+Function ShelfSize()
+	Return Shelf.Count();
+EndFunction
 "#;
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::CodeBlockBeforeSub,
             expect![[r#"
-                CodeBlockBeforeSub @ 3:1..3:16
-                  message: Обнаружен блок кода перед объявлением процедур и функций
-                  severity: Blocker"#]],
+            CodeBlockBeforeSub @ 3:1..3:18
+              message: Обнаружен блок кода перед объявлением процедур и функций
+              severity: Blocker"#]],
         );
     }
 
     #[test]
-    fn test_non_region_code_before_region_wrapped_method_snapshot() {
-        check_diagnostics_snapshot_for(
-            r#"Перем Состояние;
+    fn test_code_inside_region_before_sub() {
+        let code = r#"Перем ЖурналВыдачи;
 
-Состояние = Истина;
+#Область Подготовка
+ЖурналВыдачи = Новый Массив;
+ОтметитьОткрытие(ЖурналВыдачи);
+#КонецОбласти
+
+Процедура ОтметитьОткрытие(Журнал)
+	Журнал.Добавить(ТекущаяДата());
+КонецПроцедуры
+
+#Область ТелоМодуля
+ЖурналВыдачи.Очистить();
+#КонецОбласти
+"#;
+        check(
+            code,
+            expect![[r#"
+            CodeBlockBeforeSub @ 4:1..5:31
+              message: Обнаружен блок кода перед объявлением процедур и функций
+              severity: Blocker"#]],
+        );
+    }
+
+    #[test]
+    fn test_regions_holding_only_methods_are_silent() {
+        let code = r#"#Область ПрограммныйИнтерфейс
+
+&НаСервере
+Функция СвободныеЭкземпляры(Книга)
+	Возврат Книга.Экземпляры.Количество();
+КонецФункции
+
+&НаКлиенте
+Процедура ПоказатьКарточку(Книга)
+КонецПроцедуры
+
+#КонецОбласти
+
+&НаСервере
+Процедура СписатьВетхие()
+КонецПроцедуры
+"#;
+        check(code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_code_before_region_wrapped_method() {
+        let code = r#"ПроверитьФонд();
 
 #Область СлужебныеПроцедурыИФункции
-Процедура Подготовить()
+Процедура ПроверитьФонд()
 КонецПроцедуры
 #КонецОбласти
 
-Процедура Выполнить()
-КонецПроцедуры"#,
-            DiagnosticCode::CodeBlockBeforeSub,
+Процедура Инвентаризация()
+КонецПроцедуры
+"#;
+        check(
+            code,
             expect![[r#"
-                CodeBlockBeforeSub @ 3:1..3:19
-                  message: Обнаружен блок кода перед объявлением процедур и функций
-                  severity: Blocker"#]],
+            CodeBlockBeforeSub @ 1:1..1:16
+              message: Обнаружен блок кода перед объявлением процедур и функций
+              severity: Blocker"#]],
         );
     }
 
     #[test]
-    fn test_region_wrapped_method_after_non_region_code_snapshot() {
-        check_diagnostics_snapshot_for(
-            r#"Инициализировать();
+    fn test_code_in_outer_region_before_nested_method() {
+        let code = r#"#Область Фонд
+Стеллажи = Новый Соответствие;
 
-#Область ОбработчикиСобытий
-&НаКлиенте
-Процедура ПриОткрытии(Отказ)
-КонецПроцедуры
-#КонецОбласти
-
-Функция ПолучитьЗначение()
-    Возврат 1;
-КонецФункции"#,
-            DiagnosticCode::CodeBlockBeforeSub,
-            expect![[r#"
-                CodeBlockBeforeSub @ 1:1..1:19
-                  message: Обнаружен блок кода перед объявлением процедур и функций
-                  severity: Blocker"#]],
-        );
-    }
-
-    #[test]
-    fn test_nested_region_method_after_region_code_snapshot() {
-        check_diagnostics_snapshot_for(
-            r#"#Область Инициализация
-Настройки = Новый Структура;
-
-#Область ВнутренниеМетоды
-Процедура ЗаполнитьНастройки()
+#Область Перестановка
+Процедура ПереставитьСтеллаж()
 КонецПроцедуры
 #КонецОбласти
 #КонецОбласти
 
-Процедура Выполнить()
-КонецПроцедуры"#,
-            DiagnosticCode::CodeBlockBeforeSub,
+Процедура Инвентаризация()
+КонецПроцедуры
+"#;
+        check(
+            code,
             expect![[r#"
-                CodeBlockBeforeSub @ 2:1..2:28
-                  message: Обнаружен блок кода перед объявлением процедур и функций
-                  severity: Blocker"#]],
+            CodeBlockBeforeSub @ 2:1..2:30
+              message: Обнаружен блок кода перед объявлением процедур и функций
+              severity: Blocker"#]],
         );
     }
 }

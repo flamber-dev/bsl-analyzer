@@ -233,9 +233,11 @@ fn name_implies_unbounded_variadic(name: &str) -> bool {
     bsl_platform::ParameterSeries::parse(name).is_some_and(|series| series.last.is_none())
 }
 
-/// Keeps bounded variadic arity aligned with the platform's parameter-name series.
+/// Counts the arguments a bounded parameter-name series admits: `Value3-Value5` is three,
+/// not five, so the arity matches the names inlay hints give each argument.
 fn variadic_param_max(name: &str) -> Option<u32> {
-    bsl_platform::ParameterSeries::parse(name)?.last
+    let series = bsl_platform::ParameterSeries::parse(name)?;
+    Some(series.last? - series.first + 1)
 }
 
 fn register_fallbacks(sigs: &mut FxHashMap<String, Vec<BuiltinSignature>>) {
@@ -433,6 +435,19 @@ mod tests {
         assert_eq!(variadic_param_max("X-Y"), None);
         assert_eq!(variadic_param_max("Значение-Значение10"), None);
         assert_eq!(variadic_param_max("Содержимое1,...,СодержимоеN"), None);
+        assert_eq!(variadic_param_max("Value3-Value5"), Some(3));
+    }
+
+    #[test]
+    fn bounded_series_starting_above_one_caps_by_its_length() {
+        let params = vec![bsl_platform::MethodParam {
+            name: "Value3-Value5".into(),
+            param_type: Some("Произвольный".into()),
+            is_optional: false,
+            is_variadic: false,
+        }];
+        let sig = descriptor_from_params(&params, ReturnTypeSpec::Unknown);
+        assert_eq!(sig.max_args(), Some(3), "Value3, Value4 and Value5 are three arguments");
     }
 
     #[test]

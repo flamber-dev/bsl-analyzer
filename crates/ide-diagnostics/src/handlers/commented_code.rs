@@ -634,17 +634,24 @@ mod tests {
     use crate::DiagnosticCode;
     use expect_test::expect;
 
+    fn snapshot(code: &str, expected: expect_test::Expect) {
+        let diagnostics = check_ast_diagnostic(code, check);
+        expected.assert_eq(&format_diags(code, &diagnostics));
+    }
+
     #[test]
     fn test_fix_deletes_commented_code_manual() {
-        let code = "Функция Тест()\n    //А = 1;\n    Возврат Б;\nКонецФункции";
+        let code =
+            "Функция УровеньВоды(Бак)\n\t//Бак.Долить(5);\n\tВозврат Бак.Уровень;\nКонецФункции\n";
         check_fix_snapshot_for(
             code,
             DiagnosticCode::CommentedCode,
             expect![[r#"
-            CommentedCode @ 2:5..2:13 — Удалить закомментированный код [fix_all=false]
-            Функция Тест()
-                Возврат Б;
-            КонецФункции"#]],
+            CommentedCode @ 2:2..2:18 — Удалить закомментированный код [fix_all=false]
+            Функция УровеньВоды(Бак)
+            	Возврат Бак.Уровень;
+            КонецФункции
+        "#]],
         );
     }
 
@@ -652,19 +659,18 @@ mod tests {
     fn commented_code_inside_multiline_literal_is_not_reported() {
         // Строки многострочного литерала, начинающиеся с `//`, лексер отдаёт
         // токенами комментария — текстом запроса они от этого быть не перестают.
-        let inside_literal = "Процедура П()\n    Т = \"ВЫБРАТЬ *\n    // Сообщить(1);\n    // Возврат;\n    |ИЗ Т\";\nКонецПроцедуры";
+        let inside_literal = "Процедура ПодготовитьЗапрос()\n\tТекст = \"ВЫБРАТЬ Грядки.Номер\n\t// Полить(Грядка);\n\t// Прервать;\n\t|ИЗ Справочник.Грядки КАК Грядки\";\nКонецПроцедуры\n";
         assert!(check_ast_diagnostic(inside_literal, check).is_empty());
 
         // Оборванный литерал, дотянувшийся до конца тела, — тот же текст строки.
-        let unclosed_literal = "Процедура П()\n    Т = \"ВЫБРАТЬ *\n    // Сообщить(1);\n    // Возврат;\nКонецПроцедуры";
+        let unclosed_literal = "Процедура ПодготовитьЗапрос()\n\tТекст = \"ВЫБРАТЬ Грядки.Номер\n\t// Полить(Грядка);\n\t// Прервать;\nКонецПроцедуры\n";
         assert!(
             check_ast_diagnostic(unclosed_literal, check).is_empty(),
             "оборванный литерал до конца тела — текст строки, а не находка"
         );
 
         // Контроль: значимый токен до конца тела — строка оборвана, находка остаётся.
-        let interrupted_tail =
-            "Процедура П()\n    Т = \"открыта\n    // Сообщить(1);\n    Х = 1;\nКонецПроцедуры";
+        let interrupted_tail = "Процедура ПодготовитьЗапрос()\n\tТекст = \"не закрыта\n\t// Полить(Грядка);\n\tНомер = 2;\nКонецПроцедуры\n";
         assert_eq!(
             check_ast_diagnostic(interrupted_tail, check).len(),
             1,
@@ -673,59 +679,57 @@ mod tests {
 
         // Тот же текст вне литерала: без него пустой ответ выше означал бы и
         // «литерал распознан», и «диагностика перестала срабатывать вовсе».
-        let outside_literal = "Процедура П()\n    // Сообщить(1);\n    // Возврат;\nКонецПроцедуры";
-        let diagnostics = check_ast_diagnostic(outside_literal, check);
-        expect![[r#"
-            CommentedCode @ 2:5..3:16
+        let outside_literal =
+            "Процедура ПодготовитьЗапрос()\n\t// Полить(Грядка);\n\t// Прервать;\nКонецПроцедуры\n";
+        snapshot(
+            outside_literal,
+            expect![[r#"
+            CommentedCode @ 2:2..3:14
               message: Программные модули не должны иметь закомментированных фрагментов кода
-              severity: Information"#]]
-        .assert_eq(&format_diags(outside_literal, &diagnostics));
+              severity: Information"#]],
+        );
     }
 
     #[test]
     fn inline_code_comment_is_still_reported() {
         // Комментарий за кодом остаётся кандидатом в закомментированный код:
         // отсутствие быстрой правки не означает отсутствия находки.
-        let code = "Функция Тест()\n    Х = ВызовФункции();    // Возврат Старое;\n    Возврат Х;\nКонецФункции";
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#"
-            CommentedCode @ 2:28..2:46
+        let code = "Функция Влажность(Датчик)\n\tЗначение = Датчик.Прочитать(); // Значение = 40;\n\tВозврат Значение;\nКонецФункции\n";
+        snapshot(
+            code,
+            expect![[r#"
+            CommentedCode @ 2:33..2:50
               message: Программные модули не должны иметь закомментированных фрагментов кода
-              severity: Information"#]]
-        .assert_eq(&format_diags(code, &diagnostics));
+              severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_fix_not_offered_for_inline_code_comment() {
         // The comment body looks like code, but real code precedes it on the line, so
         // deleting the line would drop the assignment — no fix is offered.
-        let code = "Функция Тест()\n    Х = ВызовФункции();    // Возврат Старое;\n    Возврат Х;\nКонецФункции";
+        let code = "Функция Влажность(Датчик)\n\tЗначение = Датчик.Прочитать(); // Значение = 40;\n\tВозврат Значение;\nКонецФункции\n";
         check_fix_snapshot_for(code, DiagnosticCode::CommentedCode, expect![]);
     }
 
     #[test]
     fn test_no_diagnostic_for_regular_comments() {
-        let code = r#"Функция Тест()
-    // Это обычный комментарий
-    // Описание функции
-    А = 1;
-    Возврат А;
-КонецФункции"#;
-
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+        let code = r#"Функция НормаПолива(Культура)
+	// Норма зависит от культуры и сезона
+	// Значения взяты из агрономического справочника
+	Литров = Культура.Норма;
+	Возврат Литров;
+КонецФункции
+"#;
+        snapshot(code, expect![[r#""#]]);
     }
 
-    /// Код, закомментированный дважды, остаётся находкой.
-    ///
-    /// Это и есть вход, на котором `code_tokens` обязан оставаться при своём
-    /// наборе: тело комментария здесь само начинается с `//`, и общий предикат
-    /// тривии унёс бы его целиком вместе с находкой. Вход взят из реального
-    /// модуля — он единственный из 96 строк с двумя `//`, на котором вердикт
-    /// расходится.
+    /// Код, закомментированный дважды, остаётся находкой: тело комментария
+    /// само начинается с `//`, и предикат тривии не должен унести его вместе
+    /// с находкой.
     #[test]
     fn code_commented_twice_is_still_a_finding() {
-        let code = "Функция Тест()\n    // //Модуль.Метод(Данные, Идентификатор);\n    Возврат А;\nКонецФункции";
+        let code = "Функция НормаПолива(Культура)\n\t// //Полив.Запустить(Грядка, Объем);\n\tВозврат Культура.Норма;\nКонецФункции\n";
         let diagnostics = check_ast_diagnostic(code, check);
         assert_eq!(diagnostics.len(), 1, "дважды закомментированный код перестал быть находкой");
     }
@@ -733,8 +737,8 @@ mod tests {
     /// BOM в начале файла не меняет вердикт.
     #[test]
     fn a_byte_order_mark_does_not_change_the_verdict() {
-        let with_bom = "\u{feff}Функция Тест()\n    // Б = 2;\n    Возврат А;\nКонецФункции";
-        let without = "Функция Тест()\n    // Б = 2;\n    Возврат А;\nКонецФункции";
+        let with_bom = "\u{feff}Процедура Проветрить()\n\t// Форточка.Открыть();\nКонецПроцедуры\n";
+        let without = "Процедура Проветрить()\n\t// Форточка.Открыть();\nКонецПроцедуры\n";
         assert_eq!(
             check_ast_diagnostic(with_bom, check).len(),
             check_ast_diagnostic(without, check).len(),
@@ -745,374 +749,398 @@ mod tests {
 
     #[test]
     fn test_commented_assignment() {
-        let code = r#"Функция Тест()
-    А = 1;
-    // Б = 2;
-    Возврат А;
-КонецФункции"#;
-
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#"
-            CommentedCode @ 3:5..3:14
+        let code = r#"Функция Температура(Термометр)
+	Градусы = Термометр.Показание;
+	// Градусы = Градусы - 2;
+	Возврат Градусы;
+КонецФункции
+"#;
+        snapshot(
+            code,
+            expect![[r#"
+            CommentedCode @ 3:2..3:27
               message: Программные модули не должны иметь закомментированных фрагментов кода
-              severity: Information"#]]
-        .assert_eq(&format_diags(code, &diagnostics));
+              severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_multiline_commented_block() {
-        let code = r#"//НужноПересчитать = Ложь;
-//Если Документ.Проведен Тогда
-//    НужноПересчитать = Истина;
-//КонецЕсли;"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#"
-            CommentedCode @ 1:1..4:13
+        let code = r#"//ПоливВключен = Истина;
+//Пока Бак.Уровень < 10 Цикл
+//	Бак.Долить(1);
+//КонецЦикла;
+"#;
+        snapshot(
+            code,
+            expect![[r#"
+            CommentedCode @ 1:1..4:14
               message: Программные модули не должны иметь закомментированных фрагментов кода
-              severity: Information"#]]
-        .assert_eq(&format_diags(code, &diagnostics));
+              severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_commented_out_procedure() {
-        let code = r#"//// Процедура ВыполнитьСервис()
+        let code = r#"////Процедура ОбновитьГрафик()
 ////
-////    ПодготовитьДанные();
+////	СдвинутьПолив(1);
 ////
-////КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#"
+////КонецПроцедуры
+"#;
+        snapshot(
+            code,
+            expect![[r#"
             CommentedCode @ 1:1..5:19
               message: Программные модули не должны иметь закомментированных фрагментов кода
-              severity: Information"#]]
-        .assert_eq(&format_diags(code, &diagnostics));
+              severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_two_consecutive_commented_lines() {
-        let code = r#"//Параметры.Вставить("ДатаНачала", ТекущаяДата());
-//Параметры.Вставить("ДатаОкончания", ТекущаяДата());"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#"
-            CommentedCode @ 1:1..2:54
+        let code = r#"//Журнал.Добавить("Полив", ТекущаяДатаСеанса());
+//Журнал.Добавить("Проветривание", ТекущаяДатаСеанса());
+"#;
+        snapshot(
+            code,
+            expect![[r#"
+            CommentedCode @ 1:1..2:57
               message: Программные модули не должны иметь закомментированных фрагментов кода
-              severity: Information"#]]
-        .assert_eq(&format_diags(code, &diagnostics));
+              severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_range_covers_whole_group_with_header() {
-        let code = r#"Процедура Тест()
-    // ++ Проверяем одинаковые значения
-    //Таблица = Источник;
-    //Таблица.Свернуть("Код");
-    //Если Таблица.Количество() > 1 Тогда
-    //    Возврат Ложь;
-    //КонецЕсли;
-    //Возврат Истина;
-    // -- Конец проверки
-КонецПроцедуры"#;
-
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#"
-            CommentedCode @ 2:5..9:25
+        let code = r#"Процедура Сверить()
+	// ++ временно отключено
+	//Остаток = Склад.Остаток("Семена");
+	//Пока Остаток > 0 Цикл
+	//	Остаток = Остаток - 1;
+	//КонецЦикла;
+	// -- конец отключения
+КонецПроцедуры
+"#;
+        snapshot(
+            code,
+            expect![[r#"
+            CommentedCode @ 2:2..7:24
               message: Программные модули не должны иметь закомментированных фрагментов кода
-              severity: Information"#]]
-        .assert_eq(&format_diags(code, &diagnostics));
+              severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_method_documentation_not_flagged() {
-        let code = r#"// Получает данные из хранилища.
+        let code = r#"// Рассчитывает объём полива на сутки.
 //
 // Параметры:
-//  Ключ - Строка - ключ значения;
+//  Грядка - СправочникСсылка.Грядки - участок полива;
 //
 // Возвращаемое значение:
-//  Произвольный - сохранённое значение.
-Процедура Тест(Ключ)
-КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+//  Число - объём в литрах.
+Функция СуточныйОбъем(Грядка)
+	Возврат 0;
+КонецФункции
+"#;
+        snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_header_attached_to_method_is_flagged() {
         // A commented-out assignment directly above a method declaration is
         // genuine commented code and must be flagged regardless of proximity.
-        let code = r#"// Записать = Истина;
-&НаСервере
-Процедура Тест()
-КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#"
-            CommentedCode @ 1:1..1:22
+        let code = r#"// Автополив = Ложь;
+&НаКлиенте
+Процедура ПереключитьРежим()
+КонецПроцедуры
+"#;
+        snapshot(
+            code,
+            expect![[r#"
+            CommentedCode @ 1:1..1:21
               message: Программные модули не должны иметь закомментированных фрагментов кода
-              severity: Information"#]]
-        .assert_eq(&format_diags(code, &diagnostics));
+              severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_prose_not_flagged() {
-        let code = r#"Процедура Тест()
-    // Если количество напоминаний больше максимального, создаём одно общее напоминание.
-КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+        let code = r#"Процедура Проветрить()
+	// Если в теплице жарко, открываем обе форточки сразу, а не по одной.
+КонецПроцедуры
+"#;
+        snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_marker_comment_not_flagged() {
-        let code = r#"Процедура Тест()
-    // +CRM
-КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+        let code = r#"Процедура Проветрить()
+	// +Теплица2
+КонецПроцедуры
+"#;
+        snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_method_reference_not_flagged() {
-        let code = r#"Процедура Тест()
-    // ИнициализироватьЭлементУсловногоОформления()
-КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+        let code = r#"Процедура Проветрить()
+	// ПересчитатьГрафикПолива()
+КонецПроцедуры
+"#;
+        snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_floating_commented_procedure_flagged() {
-        let code = r#"Процедура Реальная()
-    //Процедура Старая()
-    //    ПодготовитьДанные();
-    //КонецПроцедуры
-КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#"
-            CommentedCode @ 2:5..4:21
+        let code = r#"Процедура Действующая()
+	//Процедура Прежняя()
+	//	СдвинутьПолив(2);
+	//КонецПроцедуры
+КонецПроцедуры
+"#;
+        snapshot(
+            code,
+            expect![[r#"
+            CommentedCode @ 2:2..4:18
               message: Программные модули не должны иметь закомментированных фрагментов кода
-              severity: Information"#]]
-        .assert_eq(&format_diags(code, &diagnostics));
+              severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_prose_with_leading_keyword_not_flagged() {
-        let code = r#"Процедура Тест()
-    // Попытка определить тип свойства приемника.
-    // Исключение выбора группы Все внешние пользователи в качестве родителя.
-КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+        let code = r#"Процедура Проветрить()
+	// Попытка открыть форточку повторяется трижды.
+	// Исключение делаем для зимнего режима теплицы.
+КонецПроцедуры
+"#;
+        snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_member_assignment_flagged() {
-        let code = r#"Процедура Тест()
-    // Действие.Ширина = 3;
-КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#"
-            CommentedCode @ 2:5..2:28
+        let code = r#"Процедура Проветрить()
+	// Форточка.Угол = 30;
+КонецПроцедуры
+"#;
+        snapshot(
+            code,
+            expect![[r#"
+            CommentedCode @ 2:2..2:24
               message: Программные модули не должны иметь закомментированных фрагментов кода
-              severity: Information"#]]
-        .assert_eq(&format_diags(code, &diagnostics));
+              severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_real_conditional_still_flagged() {
-        let code = r#"Процедура Тест()
-    // Если ПолучитьФункциональнуюОпцию("CRM_Опция") Тогда
-КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#"
-            CommentedCode @ 2:5..2:59
+        let code = r#"Процедура Проветрить()
+	// Если Датчик.Показание("Температура") > 28 Тогда
+КонецПроцедуры
+"#;
+        snapshot(
+            code,
+            expect![[r#"
+            CommentedCode @ 2:2..2:52
               message: Программные модули не должны иметь закомментированных фрагментов кода
-              severity: Information"#]]
-        .assert_eq(&format_diags(code, &diagnostics));
+              severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_json_data_not_flagged() {
-        let code = r#"Процедура Тест()
-    // { "login": "User" }
-    // "password": "secret",
-КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+        let code = r#"Процедура Проветрить()
+	// { "zone": "north" }
+	// "angle": 30,
+КонецПроцедуры
+"#;
+        snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_html_markup_not_flagged() {
-        let code = r#"Процедура Тест()
-    // <p style="color: red">Текст</p>
-    // <div id="main">
-КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+        let code = r#"Процедура Проветрить()
+	// <span class="warn">Жарко</span>
+	// <table border="1">
+КонецПроцедуры
+"#;
+        snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_comparison_operator_not_treated_as_markup() {
-        let code = r#"Процедура Тест()
-    // Если ТипЗнч(Х) <> Тип("Строка") Тогда
-КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#"
-            CommentedCode @ 2:5..2:45
+        let code = r#"Процедура Проветрить()
+	// Если Режим <> "Зима" Тогда
+КонецПроцедуры
+"#;
+        snapshot(
+            code,
+            expect![[r#"
+            CommentedCode @ 2:2..2:31
               message: Программные модули не должны иметь закомментированных фрагментов кода
-              severity: Information"#]]
-        .assert_eq(&format_diags(code, &diagnostics));
+              severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_lone_bar_comment_not_flagged() {
-        let code = r#"Процедура Тест()
-    // | это просто оформление в рамке
-    // | ещё одна строка примечания
-КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+        let code = r#"Процедура Проветрить()
+	// | раздел режимов проветривания
+	// | см. также график полива
+КонецПроцедуры
+"#;
+        snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_bar_query_block_flagged() {
-        let code = r#"Процедура Тест()
-    // |ВЫБРАТЬ
-    // |	Таблица.Ссылка КАК Ссылка
-    // |ИЗ
-КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#"
-            CommentedCode @ 2:5..4:11
+        let code = r#"Процедура Проветрить()
+	// |ВЫБРАТЬ
+	// |	Форточки.Угол КАК Угол
+	// |ИЗ
+КонецПроцедуры
+"#;
+        snapshot(
+            code,
+            expect![[r#"
+            CommentedCode @ 2:2..4:8
               message: Программные модули не должны иметь закомментированных фрагментов кода
-              severity: Information"#]]
-        .assert_eq(&format_diags(code, &diagnostics));
+              severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_trailing_plus_marker_not_flagged() {
-        let code = r#"Процедура Тест()
-    // + 1 неделя
-    // ++ PVS Внедрение CRM
-КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+        let code = r#"Процедура Проветрить()
+	// + 2 дня
+	// ++ Доработка зимнего режима
+КонецПроцедуры
+"#;
+        snapshot(code, expect![[r#""#]]);
     }
 
-    // ── FIX A: numeric literal cannot be an assignment target ──────────────
+    /// A numeric literal cannot be an assignment target.
     #[test]
     fn test_number_lhs_not_flagged() {
-        let code = r#"Процедура Тест()
-    // 7776000 = 60 * 60 * 24 * 90.
-    // 50*1024*1024 = 50 Мб
-    // 3%3=0, 4%3=1, 5%3=2
-КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+        let code = r#"Процедура Проветрить()
+	// 86400 = 24 * 60 * 60.
+	// 2*1000 = 2 л
+	// 7%2=1, 8%2=0
+КонецПроцедуры
+"#;
+        snapshot(code, expect![[r#""#]]);
     }
 
-    // ── FIX B: Попытка/Исключение with following words is prose ────────────
+    /// Попытка/Исключение followed by more words is prose.
     #[test]
     fn test_try_except_prose_not_flagged() {
-        let code = r#"Процедура Тест()
-    // Попытка №1.
-    // Исключение для пользователя.
-КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+        let code = r#"Процедура Проветрить()
+	// Попытка вторая.
+	// Исключение для северной стены.
+КонецПроцедуры
+"#;
+        snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_bare_try_still_flagged() {
-        let code = r#"Процедура Тест()
-    // Попытка
-КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#"
-            CommentedCode @ 2:5..2:15
+        let code = r#"Процедура Проветрить()
+	// Попытка
+КонецПроцедуры
+"#;
+        snapshot(
+            code,
+            expect![[r#"
+            CommentedCode @ 2:2..2:12
               message: Программные модули не должны иметь закомментированных фрагментов кода
-              severity: Information"#]]
-        .assert_eq(&format_diags(code, &diagnostics));
+              severity: Information"#]],
+        );
     }
 
-    // ── FIX C: XML/SOAP/BNF blocks are commented data, not code ───────────
+    /// XML, SOAP and BNF blocks are commented data, not code.
     #[test]
     fn test_xml_block_not_flagged() {
-        let code = r#"Процедура Тест()
-    // <?xml version="1.0" encoding="utf-8"?>
-    // <soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-    //   <soap:Body>
-    //   </soap:Body>
-    // </soap:Envelope>
-КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+        let code = r#"Процедура Проветрить()
+	// <?xml version="1.0" encoding="UTF-8"?>
+	// <climate xmlns="urn:greenhouse:climate">
+	//   <zone name="north"/>
+	// </climate>
+КонецПроцедуры
+"#;
+        snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_cyrillic_tag_not_flagged() {
-        let code = r#"Процедура Тест()
-    // <Формула> ::= "(" <Формула> ")" <Остаток>
-    // <Терм> ::= число
-КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+        let code = r#"Процедура Проветрить()
+	// <Режим> ::= <Сезон> "/" <Зона>
+	// <Зона> ::= север | юг
+КонецПроцедуры
+"#;
+        snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_code_before_html_still_flagged() {
         // Group opens with a real assignment — must not be suppressed by the
         // data-majority guard even though continuation lines are HTML.
-        let code = r#"Процедура Тест()
-    //ИсторияВыполнения = ИсторияВыполнения + ?(ИсторияВыполнения = "","","
-    // |<P>
-    // |<HR>
-    //|<P></P>");
-КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#"
-            CommentedCode @ 2:5..5:18
+        let code = r#"Процедура Проветрить()
+	//Отчет = Отчет + "
+	// |<B>Север</B>
+	// |<BR>
+	//|<I>закрыто</I>";
+КонецПроцедуры
+"#;
+        snapshot(
+            code,
+            expect![[r#"
+            CommentedCode @ 2:2..5:21
               message: Программные модули не должны иметь закомментированных фрагментов кода
-              severity: Information"#]]
-        .assert_eq(&format_diags(code, &diagnostics));
+              severity: Information"#]],
+        );
     }
 
-    // ── FIX D: trailing sentence dot is not member-access ─────────────────
+    /// A trailing sentence dot is not member access.
     #[test]
     fn test_trailing_dot_legend_not_flagged() {
-        let code = r#"Процедура Тест()
-    // М = Менеджер.
-КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+        let code = r#"Процедура Проветрить()
+	// Т = Температура.
+КонецПроцедуры
+"#;
+        snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_real_member_assign_still_flagged() {
-        // The dot here is NOT final — it separates Объект and Реквизит — so the
-        // trailing-dot strip must not remove it.
-        let code = r#"Процедура Тест()
-    // Сумма = Объект.Реквизит;
-КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        expect![[r#"
-            CommentedCode @ 2:5..2:32
+        // The dot here is NOT final — it separates the object and its attribute — so
+        // the trailing-dot strip must not remove it.
+        let code = r#"Процедура Проветрить()
+	// Угол = Форточка.Угол;
+КонецПроцедуры
+"#;
+        snapshot(
+            code,
+            expect![[r#"
+            CommentedCode @ 2:2..2:26
               message: Программные модули не должны иметь закомментированных фрагментов кода
-              severity: Information"#]]
-        .assert_eq(&format_diags(code, &diagnostics));
+              severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_exclusion_prefix() {
-        let code = r#"Процедура ШаблонМетода(Параметр)
-    //<code>Если Истина Тогда
-    //<code>Возврат;
-    //<code>КонецЕсли;
-КонецПроцедуры"#;
+        let code = r#"Процедура ПримерВызова()
+	//!! Пока Бак.Пуст Цикл
+	//!! 	Бак.Долить(1);
+	//!! КонецЦикла;
+КонецПроцедуры
+"#;
         let mut config = crate::DiagnosticsConfig::all_enabled();
-        config.parameters.insert(
-            DiagnosticCode::CommentedCode,
-            serde_json::json!({"exclusionPrefixes": "<code>"}),
-        );
+        config
+            .parameters
+            .insert(DiagnosticCode::CommentedCode, serde_json::json!({"exclusionPrefixes": "!!"}));
         let diagnostics = crate::test_utils::check_ast_diagnostic_with_config(code, config, check);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
@@ -1120,36 +1148,36 @@ mod tests {
     #[test]
     fn test_dot_only_comment_not_flagged() {
         // A comment body of just `.` or `..` must not panic and must not be flagged.
-        let code = "Процедура Тест()\n    // .\n    // ..\nКонецПроцедуры";
-        let diagnostics = crate::test_utils::check_ast_diagnostic(code, check);
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+        snapshot("Процедура Пауза()\n\t// ..\n\t// .\nКонецПроцедуры\n", expect![[r#""#]]);
     }
 
     /// `!=` в теле комментария — сравнение, а не присваивание.
     ///
     /// Пара входов обязательна: на одном лишь `!=` проверка зелена при любой
     /// реализации `assignment_index`, включая ту, что не находит присваиваний
-    /// вовсе. `а = 1;` рядом показывает, что мерка вообще способна их видеть.
+    /// вовсе. Присваивания рядом показывают, что мерка вообще способна их видеть.
     #[test]
     fn bang_equals_is_not_an_assignment() {
         let index = |text: &str| super::assignment_index(&super::code_tokens(text));
 
-        assert_eq!(index("а != 1"), None);
-        assert_eq!(index("Массив[0] != 1"), None);
-        assert_eq!(index("Функция() != 1"), None);
+        assert_eq!(index("угол != 30"), None);
+        assert_eq!(index("Зоны[2] != 30"), None);
+        assert_eq!(index("Угол() != 30"), None);
 
-        assert!(index("а = 1;").is_some(), "мерка не видит присваивания и потому ничего не пиннит");
-        assert!(index("Массив[0] = 1;").is_some());
-        assert!(index("Функция() = 1;").is_some());
+        assert!(
+            index("угол = 30;").is_some(),
+            "мерка не видит присваивания и потому ничего не пиннит"
+        );
+        assert!(index("Зоны[2] = 30;").is_some());
+        assert!(index("Угол() = 30;").is_some());
     }
 
     #[test]
     fn test_data_group_with_statement_still_flagged() {
         // A group that looks like data (XML tags) but contains a genuine BSL
         // statement ending in `;` must not be suppressed by group_is_commented_data.
-        let code = "Процедура Тест()\n    // <Root>\n    // Сообщить(\"Привет\");\n    // </Root>\nКонецПроцедуры";
+        let code = "Процедура Проветрить()\n\t// <zone>\n\t// Форточка.Закрыть();\n\t// </zone>\nКонецПроцедуры\n";
         let diagnostics = crate::test_utils::check_ast_diagnostic(code, check);
-        // The group contains a `;`-terminated statement so it must be flagged.
         assert!(
             !diagnostics.is_empty(),
             "expected CommentedCode to fire when a group contains a BSL statement"

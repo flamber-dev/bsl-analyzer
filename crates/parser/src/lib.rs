@@ -278,7 +278,7 @@ mod tests {
         use crate::event::Event;
 
         let bsl = include_str!("../tests/fixtures/Module.bsl");
-        let sdbl = include_str!("../tests/fixtures/user_query_with_highlighting_issue.sdbl");
+        let sdbl = include_str!("../tests/fixtures/sdbl_independent_package.sdbl");
 
         let tokens = tokenize(bsl);
         let mut p = Parser::new(&tokens);

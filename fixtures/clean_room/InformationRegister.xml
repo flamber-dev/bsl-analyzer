@@ -1,0 +1,11 @@
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.4">
+  <InformationRegister uuid="15300000-0000-4000-8000-000000000005">
+    <Properties>
+      <Name>Измерения</Name>
+      <InformationRegisterPeriodicity>Day</InformationRegisterPeriodicity>
+      <WriteMode>RecorderSubordinate</WriteMode>
+      <EnableTotalsSliceFirst>true</EnableTotalsSliceFirst>
+      <EnableTotalsSliceLast>false</EnableTotalsSliceLast>
+    </Properties>
+  </InformationRegister>
+</MetaDataObject>

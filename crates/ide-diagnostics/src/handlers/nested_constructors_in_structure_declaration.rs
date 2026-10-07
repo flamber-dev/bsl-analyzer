@@ -91,186 +91,115 @@ mod tests {
     use crate::DiagnosticCode;
     use expect_test::expect;
 
-    #[test]
-    fn test_no_diagnostic_for_empty_structure() {
-        let code = r#"
-Результат = Новый Структура;
-"#;
+    fn check(code: &str, expected: expect_test::Expect) {
         check_diagnostics_snapshot_for(
             code,
             DiagnosticCode::NestedConstructorsInStructureDeclaration,
-            expect![[r#""#]],
+            expected,
         );
     }
 
     #[test]
-    fn test_no_diagnostic_for_single_param() {
-        let code = r#"
-А = Новый Структура(Новый ФиксированнаяСтруктура(Мок_ПараметрыПроцедуры));
+    fn test_prepared_values_are_silent() {
+        let code = r#"Процедура СобратьПосылку(Адрес)
+	Габариты = Новый Структура("Длина, Ширина", 40, 30);
+	Получатель = Новый Структура;
+	Посылка = Новый Структура("Габариты, Получатель, Вложения, Курьер",
+		Габариты,
+		Получатель,
+		Новый Массив,
+		Новый Структура);
+	Копия = Новый ФиксированнаяСтруктура(Новый Структура("Индекс", Адрес.Индекс));
+	Обертка = Новый Структура("Данные, Пометка", ОбернутьДанные(Новый Структура("Ключ", 1)), Ложь);
+КонецПроцедуры
 "#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::NestedConstructorsInStructureDeclaration,
-            expect![[r#""#]],
-        );
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
-    fn test_no_diagnostic_for_nested_without_params() {
-        let code = r#"
-Результат = Новый Структура("МВТ, ТекстЗапроса, Параметры",
-                             Новый МенеджерВременныхТаблиц,
-                             ТекстЗапроса,
-                             Новый Структура);
+    fn test_nested_constructor_with_params() {
+        let code = r#"Посылка = Новый Структура("Габариты, Курьер",
+	Новый Структура("Длина, Ширина", 40, 30),
+	"Пешком");
 "#;
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::NestedConstructorsInStructureDeclaration,
-            expect![[r#""#]],
-        );
-    }
-
-    #[test]
-    fn test_diagnostic_for_nested_with_params() {
-        let code = r#"
-Результат = Новый Структура("ДанныеНоменклатуры, Количество",
-                             Новый Структура("Код, Наименование"),
-                             10);
-"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::NestedConstructorsInStructureDeclaration,
             expect![[r#"
-                NestedConstructorsInStructureDeclaration @ 2:13..4:33
-                  message: Не используйте конструкторы с параметрами при объявлении структуры
-                  severity: Information"#]],
+            NestedConstructorsInStructureDeclaration @ 1:11..3:11
+              message: Не используйте конструкторы с параметрами при объявлении структуры
+              severity: Information"#]],
         );
     }
 
     #[test]
-    fn test_diagnostic_for_english_keywords() {
-        let code = r#"
-Result = New Structure("GoodsData, Count",
-                        New Structure("Code, Name"),
-                        10);
+    fn test_fixed_structure_outer() {
+        let code = r#"Тариф = Новый ФиксированнаяСтруктура("Зона, Ставки", "Север", Новый Соответствие(Ставки));
 "#;
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::NestedConstructorsInStructureDeclaration,
             expect![[r#"
-                NestedConstructorsInStructureDeclaration @ 2:10..4:28
-                  message: Не используйте конструкторы с параметрами при объявлении структуры
-                  severity: Information"#]],
+            NestedConstructorsInStructureDeclaration @ 1:9..1:90
+              message: Не используйте конструкторы с параметрами при объявлении структуры
+              severity: Information"#]],
         );
     }
 
     #[test]
-    fn test_no_diagnostic_for_non_structure() {
-        let code = r#"
-Result = New Structure("field1, field2, field3", New Array(), New Array(), New Array());
+    fn test_english_keywords() {
+        let code = r#"Parcel = New Structure("Size, Courier",
+	New Structure("Length, Width", 40, 30),
+	"OnFoot");
+Lists = New Structure("Items, Marks", New Array(), New Array());
 "#;
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::NestedConstructorsInStructureDeclaration,
-            expect![[r#""#]],
+            expect![[r#"
+            NestedConstructorsInStructureDeclaration @ 1:10..3:11
+              message: Не используйте конструкторы с параметрами при объявлении структуры
+              severity: Information"#]],
         );
     }
 
     #[test]
-    fn test_comprehensive() {
-        let code = r#"
-    // RU
-
-    // Pass
-    Результат = Новый Структура("МВТ, ТекстЗапроса, Параметры",
-                                 Новый МенеджерВременныхТаблиц,
-                                 ТекстЗапроса,
-                                 Новый Структура);
-
-    // Warn
-    Результат = Новый Структура("ДанныеНоменклатуры, Количество",
-                                 Новый Структура("Код, Наименование"),
-                                 10);
-
-    Результат = Новый Структура("ЗаполнитьПризнакХарактеристикиИспользуются,                    // Warn
-                                |ЗаполнитьПризнакТипНоменклатуры,
-                                |ПустаяСтруктура,
-                                |ЗаполнитьПризнакВариантОформленияПродажи,
-                                |МВТ",
-                                Новый Структура("Номенклатура", "ХарактеристикиИспользуются"),  // Warn
-                                Новый Структура("Номенклатура", "ТипНоменклатуры"),             // Warn
-                                Новый Структура,                                                // Pass
-                                Новый Структура("Номенклатура", "ВариантОформленияПродажи"),    // Warn
-                                Новый МенеджерВременныхТаблиц);                                 // Pass
-
-    Результат = Новый Структура("Параметры",                                                        // Warn
-                                Новый Структура("ФиксированнаяСтруктура",                           // Warn
-                                                Новый ФиксированнаяСтруктура(Новый Струкутура)));   // Pass
-
-    // EN
-
-    // Pass
-    Result = New Structure("TTM, Query, Params",
-                            New TempTablesManager,
-                            Query,
-                            New Structure);
-
-    // Warn
-    Result = New Structure("GoodsData, Count",
-                            New Structure("Code, Name"),
-                            10);
-
-    Result = New Structure("FillCharacter,                          // Warn
-                            |FillType,
-                            |EmptyStructure,
-                            |FillDealType,
-                            |TTM",
-                            New Structure("Goods", "Character"),    // Warn
-                            New Structure("Goods", "Type"),         // Warn
-                            New Structure,                          // Pass
-                            New Structure("Goods", "DealType"),     // Warn
-                            New TempTablesManager);                 // Pass
-
-    Result = New Structure("Params",                                                // Warn
-                            New Structure("FixedStructure",                         // Warn
-                                            New FixedStructure(New Structure)));    // Pass
-
-    Result = New Structure("Params",                                              // Pass
-                            FillStructure(New FixedStructure(New Structure)));    // Pass
-
-    Result = New Structure("field1, field2, field3", New Array(), New Array(), New Array()); // Pass
-
-    // FP
-    А = Новый Структура(Новый ФиксированнаяСтруктура(Мок_ПараметрыПроцедуры));
-    А = Новый ФиксированнаяСтруктура(Новый Структура("Источник, Данные"));"#;
-        check_diagnostics_snapshot_for(
+    fn test_each_outer_constructor_reported_once() {
+        let code = r#"Маршрут = Новый Структура("Откуда, Куда, Пересадки",
+	Новый Структура("Город", "Тверь"),
+	Новый Структура("Город", "Псков"),
+	Новый Структура);
+Схема = Новый Структура("Узел",
+	Новый Структура("Связи",
+		Новый ФиксированнаяСтруктура(Новый Структура)));
+"#;
+        check(
             code,
-            DiagnosticCode::NestedConstructorsInStructureDeclaration,
             expect![[r#"
-                NestedConstructorsInStructureDeclaration @ 11:17..13:37
-                  message: Не используйте конструкторы с параметрами при объявлении структуры
-                  severity: Information
-                NestedConstructorsInStructureDeclaration @ 15:17..24:63
-                  message: Не используйте конструкторы с параметрами при объявлении структуры
-                  severity: Information
-                NestedConstructorsInStructureDeclaration @ 26:17..28:97
-                  message: Не используйте конструкторы с параметрами при объявлении структуры
-                  severity: Information
-                NestedConstructorsInStructureDeclaration @ 27:33..28:96
-                  message: Не используйте конструкторы с параметрами при объявлении структуры
-                  severity: Information
-                NestedConstructorsInStructureDeclaration @ 39:14..41:32
-                  message: Не используйте конструкторы с параметрами при объявлении структуры
-                  severity: Information
-                NestedConstructorsInStructureDeclaration @ 43:14..52:51
-                  message: Не используйте конструкторы с параметрами при объявлении структуры
-                  severity: Information
-                NestedConstructorsInStructureDeclaration @ 54:14..56:80
-                  message: Не используйте конструкторы с параметрами при объявлении структуры
-                  severity: Information
-                NestedConstructorsInStructureDeclaration @ 55:29..56:79
-                  message: Не используйте конструкторы с параметрами при объявлении структуры
-                  severity: Information"#]],
+            NestedConstructorsInStructureDeclaration @ 1:11..4:18
+              message: Не используйте конструкторы с параметрами при объявлении структуры
+              severity: Information
+            NestedConstructorsInStructureDeclaration @ 5:9..7:50
+              message: Не используйте конструкторы с параметрами при объявлении структуры
+              severity: Information
+            NestedConstructorsInStructureDeclaration @ 6:2..7:49
+              message: Не используйте конструкторы с параметрами при объявлении структуры
+              severity: Information"#]],
+        );
+    }
+
+    #[test]
+    fn test_multiline_key_list() {
+        let code = r#"Признаки = Новый Структура("Вес,
+	|Объем,
+	|Хрупкость",
+	Новый Структура("Единица", "кг"),
+	Новый Структура("Единица", "л"),
+	Ложь);
+"#;
+        check(
+            code,
+            expect![[r#"
+            NestedConstructorsInStructureDeclaration @ 1:12..6:7
+              message: Не используйте конструкторы с параметрами при объявлении структуры
+              severity: Information"#]],
         );
     }
 }

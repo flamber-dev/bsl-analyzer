@@ -34,43 +34,61 @@ mod tests {
     use crate::test_utils::check_diagnostics_snapshot_for;
     use expect_test::expect;
 
+    fn check(code: &str, expected: expect_test::Expect) {
+        check_diagnostics_snapshot_for(code, DiagnosticCode::CreateQueryInCycle, expected);
+    }
+
     #[test]
-    fn test_query_in_for_loop() {
-        let code = r#"
-Процедура Тест()
-Запрос = Новый Запрос();
-Для Каждого ИД Из МассивИД Цикл
-    Запрос.Выполнить();
-КонецЦикла;
-КонецПроцедуры
+    fn test_query_executed_outside_loop() {
+        let code = r#"Функция ЦеныТарифов(Тарифы)
+	Запрос = Новый Запрос("ВЫБРАТЬ Т.Цена ИЗ Справочник.Тарифы КАК Т ГДЕ Т.Ссылка В (&Тарифы)");
+	Запрос.УстановитьПараметр("Тарифы", Тарифы);
+	Выборка = Запрос.Выполнить().Выбрать();
+	Цены = Новый Массив;
+	Пока Выборка.Следующий() Цикл
+		Цены.Добавить(Выборка.Цена);
+	КонецЦикла;
+	Возврат Цены;
+КонецФункции
 "#;
-        check_diagnostics_snapshot_for(
+        check(code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_query_created_outside_loop_but_executed_inside_loop() {
+        let code = r#"Функция ЦеныТарифов(Тарифы)
+	Запрос = Новый Запрос("ВЫБРАТЬ Т.Цена ИЗ Справочник.Тарифы КАК Т ГДЕ Т.Ссылка = &Тариф");
+	Цены = Новый Массив;
+	Для Каждого Тариф Из Тарифы Цикл
+		Запрос.УстановитьПараметр("Тариф", Тариф);
+		Цены.Добавить(Запрос.Выполнить().Выгрузить());
+	КонецЦикла;
+	Возврат Цены;
+КонецФункции
+"#;
+        check(
             code,
-            DiagnosticCode::CreateQueryInCycle,
             expect![[r#"
-            CreateQueryInCycle @ 5:5..5:23
+            CreateQueryInCycle @ 6:17..6:35
               message: Выполнение запроса в цикле приводит к деградации производительности. Создайте запрос один раз до цикла и изменяйте только параметры внутри цикла
               severity: Critical"#]],
         );
     }
 
     #[test]
-    fn test_query_created_outside_loop_but_executed_inside_loop() {
-        let code = r#"
-Процедура Тест(МассивИД)
-    Запрос = Новый Запрос;
-
-    Для Каждого ИД Из МассивИД Цикл
-        Запрос.УстановитьПараметр("Код", ИД);
-        Результат = Запрос.Выполнить();
-    КонецЦикла;
+    fn test_query_created_and_executed_in_while_loop() {
+        let code = r#"Процедура ОбойтиСтраницы(Курсор)
+	Пока Курсор.ЕстьЕще() Цикл
+		Страница = Новый Запрос;
+		Страница.Текст = Курсор.ТекстСтраницы();
+		Страница.Выполнить();
+	КонецЦикла;
 КонецПроцедуры
 "#;
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::CreateQueryInCycle,
             expect![[r#"
-            CreateQueryInCycle @ 7:21..7:39
+            CreateQueryInCycle @ 5:3..5:23
               message: Выполнение запроса в цикле приводит к деградации производительности. Создайте запрос один раз до цикла и изменяйте только параметры внутри цикла
               severity: Critical"#]],
         );
@@ -78,19 +96,17 @@ mod tests {
 
     #[test]
     fn test_english_keywords() {
-        let code = r#"
-Procedure Test()
-    For Each Item In Collection Do
-        Query = New Query;
-        Query.Execute();
-    EndDo;
+        let code = r#"Procedure WalkPages(Pages)
+	For Each Page In Pages Do
+		Request = New Query(Page.Text);
+		Request.Execute();
+	EndDo;
 EndProcedure
 "#;
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::CreateQueryInCycle,
             expect![[r#"
-            CreateQueryInCycle @ 5:9..5:24
+            CreateQueryInCycle @ 4:3..4:20
               message: Выполнение запроса в цикле приводит к деградации производительности. Создайте запрос один раз до цикла и изменяйте только параметры внутри цикла
               severity: Critical"#]],
         );
@@ -98,19 +114,17 @@ EndProcedure
 
     #[test]
     fn test_case_insensitive() {
-        let code = r#"
-Процедура Тест()
-    Для инт = 1 По 10 Цикл
-        Запрос = Новый ЗАПРОС;
-        Запрос.ВЫПОЛНИТЬ();
-    КонецЦикла;
+        let code = r#"Процедура ОбойтиСтраницы(ЧислоСтраниц)
+	Для Номер = 1 По ЧислоСтраниц Цикл
+		Страница = Новый запрос;
+		Страница.выполнить();
+	КонецЦикла;
 КонецПроцедуры
 "#;
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::CreateQueryInCycle,
             expect![[r#"
-            CreateQueryInCycle @ 5:9..5:27
+            CreateQueryInCycle @ 4:3..4:23
               message: Выполнение запроса в цикле приводит к деградации производительности. Создайте запрос один раз до цикла и изменяйте только параметры внутри цикла
               severity: Critical"#]],
         );
@@ -118,19 +132,17 @@ EndProcedure
 
     #[test]
     fn test_query_builder() {
-        let code = r#"
-Процедура Тест()
-ПЗ = Новый ПостроительЗапроса;
-Для инт = 1 По 10 Цикл
-    ПЗ.Выполнить();
-КонецЦикла;
+        let code = r#"Процедура ПостроитьОтчеты(Периоды)
+	Построитель = Новый ПостроительЗапроса;
+	Для Каждого Период Из Периоды Цикл
+		Построитель.Выполнить();
+	КонецЦикла;
 КонецПроцедуры
 "#;
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::CreateQueryInCycle,
             expect![[r#"
-            CreateQueryInCycle @ 5:5..5:19
+            CreateQueryInCycle @ 4:3..4:26
               message: Выполнение запроса в цикле приводит к деградации производительности. Создайте запрос один раз до цикла и изменяйте только параметры внутри цикла
               severity: Critical"#]],
         );

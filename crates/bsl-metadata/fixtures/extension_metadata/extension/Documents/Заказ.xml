@@ -37,6 +37,11 @@
           </Attribute>
         </ChildObjects>
       </TabularSection>
+      <Form>ФормаДокумента</Form>
+      <Form>ФормаСBaseForm</Form>
+      <Form>формаёж</Form>
+      <Form>ОбычнаяФорма</Form>
+      <Form>БезПары</Form>
     </ChildObjects>
   </Document>
 </MetaDataObject>

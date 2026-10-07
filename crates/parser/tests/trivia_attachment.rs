@@ -86,7 +86,7 @@ const NAMED_INPUTS: &[(&str, Lang, &str)] = &[
     ("sdbl-unclosed-extension", Lang::Sdbl, SDBL_UNCLOSED_EXTENSION),
     ("sdbl-empty-nested", Lang::Sdbl, SDBL_EMPTY_NESTED),
     ("module", Lang::Bsl, include_str!("fixtures/Module.bsl")),
-    ("user-query", Lang::Sdbl, include_str!("fixtures/user_query_with_highlighting_issue.sdbl")),
+    ("independent-query", Lang::Sdbl, include_str!("fixtures/sdbl_independent_package.sdbl")),
 ];
 
 fn gate_inputs() -> Vec<GateInput> {
@@ -273,6 +273,9 @@ fn head(breaches: &[String]) -> String {
 /// Фикстуры `Module.bsl` здесь нет: её 74 674 узла дали бы эталон на два
 /// мегабайта. Сужение на ней проверено разово при самой правке, а постоянно
 /// её держат И1–И3.
+///
+/// Для `independent-query` эталон фиксирует форму самостоятельного входа,
+/// а не историческое сужение диапазонов другого текста.
 #[test]
 fn ranges_only_narrow_against_the_recorded_baseline() {
     let baseline = parse_baseline(include_str!("fixtures/trivia_ranges_before.txt"));

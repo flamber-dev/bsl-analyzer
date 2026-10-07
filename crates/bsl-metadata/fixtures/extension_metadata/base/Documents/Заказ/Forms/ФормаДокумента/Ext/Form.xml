@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xs="http://www.w3.org/2001/XMLSchema" version="2.20">
+  <Events>
+    <Event name="OnOpen">БазовыйПриОткрытии</Event>
+  </Events>
+  <ChildItems>
+    <InputField name="БазовоеПоле" id="1">
+      <DataPath>БазовыйРеквизитФормы</DataPath>
+    </InputField>
+  </ChildItems>
+  <Attributes>
+    <Attribute name="Объект" id="1"><Type><v8:Type>cfg:DocumentObject.Заказ</v8:Type></Type><MainAttribute>true</MainAttribute></Attribute>
+    <Attribute name="БазовыйРеквизитФормы" id="2"><Type><v8:Type>xs:string</v8:Type></Type></Attribute>
+  </Attributes>
+  <Commands>
+    <Command name="БазоваяКоманда" id="1">
+      <Action>БазоваяКомандаОбработка</Action>
+    </Command>
+  </Commands>
+</Form>

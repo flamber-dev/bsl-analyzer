@@ -256,54 +256,79 @@ mod tests {
     use crate::{DiagnosticCode, DiagnosticsConfig};
     use expect_test::expect;
 
+    fn check(code: &str, expected: expect_test::Expect) {
+        check_diagnostics_snapshot_for(code, DiagnosticCode::MissingCodeTryCatchEx, expected);
+    }
+
     #[test]
     fn raises_only_does_not_emit() {
-        let code = r#"Процедура Тест()
-    Попытка
-        Действие();
-    Исключение
-        ВызватьИсключение;
-    КонецПопытки;
-КонецПроцедуры"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::MissingCodeTryCatchEx,
-            expect![[r#""#]],
-        );
+        let code = r#"Процедура ОтправитьВыгрузку(Файл)
+	Попытка
+		Транспорт.Передать(Файл);
+	Исключение
+		ВызватьИсключение;
+	КонецПопытки;
+КонецПроцедуры
+"#;
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn logs_only_does_not_emit() {
-        let code = r#"Процедура Тест()
-    Попытка
-        Действие();
-    Исключение
-        Сообщить("error");
-    КонецПопытки;
-КонецПроцедуры"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::MissingCodeTryCatchEx,
-            expect![[r#""#]],
-        );
+        let code = r#"Процедура ОтправитьВыгрузку(Файл)
+	Попытка
+		Транспорт.Передать(Файл);
+	Исключение
+		Сообщить(ОписаниеОшибки());
+	КонецПопытки;
+КонецПроцедуры
+"#;
+        check(code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_logs_only_write_log_event_snapshot() {
+        let code = r#"Процедура ОтправитьВыгрузку(Файл)
+	Попытка
+		Транспорт.Передать(Файл);
+	Исключение
+		ЗаписьЖурналаРегистрации("Выгрузка", УровеньЖурналаРегистрации.Ошибка, , , ОписаниеОшибки());
+	КонецПопытки;
+КонецПроцедуры
+"#;
+        check(code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn mixed_does_not_emit() {
+        let code = r#"Процедура ОтправитьВыгрузку(Файл)
+	Попытка
+		Транспорт.Передать(Файл);
+	Исключение
+		Сообщить(ОписаниеОшибки());
+		ВызватьИсключение;
+	КонецПопытки;
+КонецПроцедуры
+"#;
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn silent_swallow_emits() {
-        let code = r#"Процедура Тест()
-    Попытка
-        Действие();
-    Исключение
-        ОбработатьОшибку();
-    КонецПопытки;
-КонецПроцедуры"#;
-        check_diagnostics_snapshot_for(
+        let code = r#"Процедура ОтправитьВыгрузку(Файл)
+	Попытка
+		Транспорт.Передать(Файл);
+	Исключение
+		Файл.Пометить(Ложь);
+	КонецПопытки;
+КонецПроцедуры
+"#;
+        check(
             code,
-            DiagnosticCode::MissingCodeTryCatchEx,
             expect![[r#"
-                MissingCodeTryCatchEx @ 4:5..4:15
-                  message: Блок исключения молча подавляет ошибку: добавьте `ВызватьИсключение` или вызов журналирования
-                  severity: Major"#]],
+            MissingCodeTryCatchEx @ 4:2..4:12
+              message: Блок исключения молча подавляет ошибку: добавьте `ВызватьИсключение` или вызов журналирования
+              severity: Major"#]],
         );
 
         let diagnostics = check_body_diagnostic(code, check_body);
@@ -316,20 +341,22 @@ mod tests {
 
     #[test]
     fn rollback_only_emits_with_rollback_message() {
-        let code = r#"Процедура Тест()
-    Попытка
-        Действие();
-    Исключение
-        ОтменитьТранзакцию();
-    КонецПопытки;
-КонецПроцедуры"#;
-        check_diagnostics_snapshot_for(
+        let code = r#"Процедура ЗаписатьОстатки(Набор)
+	НачатьТранзакцию();
+	Попытка
+		Набор.Записать();
+		ЗафиксироватьТранзакцию();
+	Исключение
+		ОтменитьТранзакцию();
+	КонецПопытки;
+КонецПроцедуры
+"#;
+        check(
             code,
-            DiagnosticCode::MissingCodeTryCatchEx,
             expect![[r#"
-                MissingCodeTryCatchEx @ 4:5..4:15
-                  message: Блок исключения только откатывает транзакцию, но не фиксирует ошибку: добавьте логирование или `ВызватьИсключение`
-                  severity: Major"#]],
+            MissingCodeTryCatchEx @ 6:2..6:12
+              message: Блок исключения только откатывает транзакцию, но не фиксирует ошибку: добавьте логирование или `ВызватьИсключение`
+              severity: Major"#]],
         );
 
         let diagnostics = check_body_diagnostic(code, check_body);
@@ -342,320 +369,168 @@ mod tests {
 
     #[test]
     fn rollback_plus_log_does_not_emit() {
-        let code = r#"Процедура Тест()
-    Попытка
-        Действие();
-    Исключение
-        ОтменитьТранзакцию();
-        Сообщить("error");
-    КонецПопытки;
-КонецПроцедуры"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::MissingCodeTryCatchEx,
-            expect![[r#""#]],
-        );
+        let code = r#"Процедура ЗаписатьОстатки(Набор)
+	НачатьТранзакцию();
+	Попытка
+		Набор.Записать();
+		ЗафиксироватьТранзакцию();
+	Исключение
+		ОтменитьТранзакцию();
+		Сообщить(ОписаниеОшибки());
+	КонецПопытки;
+КонецПроцедуры
+"#;
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
-    fn mixed_does_not_emit() {
-        let code = r#"Процедура Тест()
-    Попытка
-        Действие();
-    Исключение
-        Сообщить("error");
-        ВызватьИсключение;
-    КонецПопытки;
-КонецПроцедуры"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::MissingCodeTryCatchEx,
-            expect![[r#""#]],
-        );
-    }
+    fn empty_and_comment_only_blocks_emit() {
+        let code = r#"Процедура ПрочитатьКурсы()
+	Попытка
+		Курсы = Сервис.Курсы();
+	Исключение
 
-    #[test]
-    fn test_missing_code_try_catch_ex() {
-        let code = r#"Процедура Проц1()
-    Попытка
-        Действие();
-    Исключение
-        ВызватьИсключение;
-    КонецПопытки;
+	КонецПопытки;
 КонецПроцедуры
 
-Процедура Проц11()
-    Попытка
-        Действие();
-    Исключение
-
-        // просто коментарий
-
-        ВызватьИсключение;
-    КонецПопытки;
-КонецПроцедуры
-
-Процедура Проц2()
-    // в исключении пустой блок, это ошибка
-    Попытка
-        Действие();
-    Исключение
-
-    КонецПопытки;
-КонецПроцедуры
-
-Функция Функ1()
-
-    Попытка
-        Действие();
-    Исключение
-
-        // в исключении просто комментарий, это ошибка
-        // но иногда нет
-
-    КонецПопытки;
-
-    Возврат 1;
+Функция КурсДоллара()
+	Попытка
+		Возврат Сервис.Курс("USD");
+	Исключение
+		// сервис бывает недоступен по ночам
+	КонецПопытки;
+	Возврат 0;
 КонецФункции
 
-Процедура Проц3()
-    // Nested try without re-raise keeps the outer handler Silent:
-    // a Raise inside the nested try body would be caught by the
-    // nested handler and never escape, and the nested handler here
-    // is empty, so nothing in the outer except logs or rethrows the
-    // original exception.
-    Попытка
-        Действие();
-    Исключение
-        // в исключении пустой блок, это ошибка
-        Попытка
-            Действие2();
-        Исключение
+Процедура ОбновитьКурсы()
+	Попытка
+		Сервис.Обновить();
+	Исключение
+		// сначала пишем причину, затем пробрасываем
 
-        КонецПопытки;
-    КонецПопытки;
-КонецПроцедуры"#;
-
-        check_diagnostics_snapshot_for(
+		ВызватьИсключение;
+	КонецПопытки;
+КонецПроцедуры
+"#;
+        check(
             code,
-            DiagnosticCode::MissingCodeTryCatchEx,
             expect![[r#"
-                MissingCodeTryCatchEx @ 24:5..24:15
-                  message: Отсутствует код в блоке исключения
-                  severity: Major
-                MissingCodeTryCatchEx @ 33:5..33:15
-                  message: Отсутствует код в блоке исключения
-                  severity: Major
-                MissingCodeTryCatchEx @ 51:5..51:15
-                  message: Блок исключения молча подавляет ошибку: добавьте `ВызватьИсключение` или вызов журналирования
-                  severity: Major
-                MissingCodeTryCatchEx @ 55:9..55:19
-                  message: Отсутствует код в блоке исключения
-                  severity: Major"#]],
+            MissingCodeTryCatchEx @ 4:2..4:12
+              message: Отсутствует код в блоке исключения
+              severity: Major
+            MissingCodeTryCatchEx @ 12:2..12:12
+              message: Отсутствует код в блоке исключения
+              severity: Major"#]],
         );
     }
 
     #[test]
     fn test_comment_as_code() {
-        let code = r#"Процедура Проц1()
-    Попытка
-        Действие();
-    Исключение
-        ВызватьИсключение;
-    КонецПопытки;
+        let code = r#"Процедура ПрочитатьКурсы()
+	Попытка
+		Курсы = Сервис.Курсы();
+	Исключение
+
+	КонецПопытки;
 КонецПроцедуры
 
-Процедура Проц11()
-    Попытка
-        Действие();
-    Исключение
-
-        // просто коментарий
-
-        ВызватьИсключение;
-    КонецПопытки;
-КонецПроцедуры
-
-Процедура Проц2()
-    // в исключении пустой блок, это ошибка
-    Попытка
-        Действие();
-    Исключение
-
-    КонецПопытки;
-КонецПроцедуры
-
-Функция Функ1()
-
-    Попытка
-        Действие();
-    Исключение
-
-        // в исключении просто комментарий, это ошибка
-        // но иногда нет
-
-    КонецПопытки;
-
-    Возврат 1;
+Функция КурсДоллара()
+	Попытка
+		Возврат Сервис.Курс("USD");
+	Исключение
+		// сервис бывает недоступен по ночам
+	КонецПопытки;
+	Возврат 0;
 КонецФункции
-
-Процедура Проц3()
-    // Nested try without re-raise keeps the outer handler Silent:
-    // a Raise inside the nested try body would be caught by the
-    // nested handler and never escape, and the nested handler here
-    // is empty, so nothing in the outer except logs or rethrows the
-    // original exception.
-    Попытка
-        Действие();
-    Исключение
-        // в исключении пустой блок, это ошибка
-        Попытка
-            Действие2();
-        Исключение
-
-        КонецПопытки;
-    КонецПопытки;
-КонецПроцедуры"#;
-
+"#;
         let mut config = DiagnosticsConfig::default();
-        let mut params = serde_json::Map::new();
-        params.insert("commentAsCode".to_string(), serde_json::Value::Bool(true));
-        config
-            .parameters
-            .insert(DiagnosticCode::MissingCodeTryCatchEx, serde_json::Value::Object(params));
+        config.parameters.insert(
+            DiagnosticCode::MissingCodeTryCatchEx,
+            serde_json::json!({"commentAsCode": true}),
+        );
 
         let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         expect![[r#"
-            MissingCodeTryCatchEx @ 24:5..24:15
+            MissingCodeTryCatchEx @ 4:2..4:12
               message: Отсутствует код в блоке исключения
-              severity: Major
-            MissingCodeTryCatchEx @ 51:5..51:15
+              severity: Major"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn nested_try_without_reraise_keeps_outer_silent() {
+        // A raise inside the nested try would be caught by the nested handler, and that
+        // handler is empty: nothing in the outer handler logs or rethrows.
+        let code = r#"Процедура ПрочитатьКурсы()
+	Попытка
+		Курсы = Сервис.Курсы();
+	Исключение
+		Попытка
+			Курсы = Кэш.Курсы();
+		Исключение
+
+		КонецПопытки;
+	КонецПопытки;
+КонецПроцедуры
+"#;
+        check(
+            code,
+            expect![[r#"
+            MissingCodeTryCatchEx @ 4:2..4:12
               message: Блок исключения молча подавляет ошибку: добавьте `ВызватьИсключение` или вызов журналирования
               severity: Major
-            MissingCodeTryCatchEx @ 55:9..55:19
+            MissingCodeTryCatchEx @ 7:3..7:13
               message: Отсутствует код в блоке исключения
-              severity: Major"#]].assert_eq(&format_diags(code, &diagnostics));
+              severity: Major"#]],
+        );
     }
 
     #[test]
     fn conditional_reraise_does_not_emit() {
         // Suppressing one known error and rethrowing everything else is a
         // legitimate handler; the Raise lives on a nested path.
-        let code = r#"Процедура Тест()
-    Попытка
-        Действие();
-    Исключение
-        Если ИнформацияОбОшибке().Описание <> ТекстИсключенияДублирование Тогда
-            ВызватьИсключение;
-        КонецЕсли;
-    КонецПопытки;
-КонецПроцедуры"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::MissingCodeTryCatchEx,
-            expect![[r#""#]],
-        );
+        let code = r#"Процедура ПрочитатьКурсы()
+	Попытка
+		Курсы = Сервис.Курсы();
+	Исключение
+		Если Не СтрНайти(ОписаниеОшибки(), "таймаут") > 0 Тогда
+			ВызватьИсключение;
+		КонецЕсли;
+	КонецПопытки;
+КонецПроцедуры
+"#;
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn conditional_swallow_still_emits() {
-        let code = r#"Процедура Тест()
-    Попытка
-        Действие();
-    Исключение
-        Если Условие Тогда
-            Х = 1;
-        КонецЕсли;
-    КонецПопытки;
-КонецПроцедуры"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::MissingCodeTryCatchEx,
-            expect![[r#"
-                MissingCodeTryCatchEx @ 4:5..4:15
-                  message: Блок исключения молча подавляет ошибку: добавьте `ВызватьИсключение` или вызов журналирования
-                  severity: Major"#]],
-        );
-    }
-
-    #[test]
-    fn test_valid_exception_handlers() {
-        let code = r#"
-Процедура Проц1()
-    Попытка
-        Действие();
-    Исключение
-        ВызватьИсключение;
-    КонецПопытки;
+        let code = r#"Процедура ПрочитатьКурсы()
+	Попытка
+		Курсы = Сервис.Курсы();
+	Исключение
+		Если Курсы = Неопределено Тогда
+			Курсы = Новый Соответствие;
+		КонецЕсли;
+	КонецПопытки;
 КонецПроцедуры
 "#;
-
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::MissingCodeTryCatchEx,
-            expect![[r#""#]],
+            expect![[r#"
+            MissingCodeTryCatchEx @ 4:2..4:12
+              message: Блок исключения молча подавляет ошибку: добавьте `ВызватьИсключение` или вызов журналирования
+              severity: Major"#]],
         );
     }
 
     #[test]
     fn test_module_level_raises_only_snapshot() {
-        check_diagnostics_snapshot_for(
-            r#"Попытка
-    Действие();
+        let code = r#"Попытка
+	ИнициализироватьКурсы();
 Исключение
-    ВызватьИсключение;
-КонецПопытки;"#,
-            DiagnosticCode::MissingCodeTryCatchEx,
-            expect![[r#""#]],
-        );
-    }
-
-    #[test]
-    fn test_logs_only_write_log_event_snapshot() {
-        check_diagnostics_snapshot_for(
-            r#"Процедура Тест()
-    Попытка
-        Действие();
-    Исключение
-        ЗаписьЖурналаРегистрации("Ошибки", УровеньЖурналаРегистрации.Ошибка);
-    КонецПопытки;
-КонецПроцедуры"#,
-            DiagnosticCode::MissingCodeTryCatchEx,
-            expect![[r#""#]],
-        );
-    }
-
-    #[test]
-    fn test_mixed_message_and_raise_snapshot() {
-        check_diagnostics_snapshot_for(
-            r#"Процедура Тест()
-    Попытка
-        Действие();
-    Исключение
-        Сообщить("error");
-        ВызватьИсключение;
-    КонецПопытки;
-КонецПроцедуры"#,
-            DiagnosticCode::MissingCodeTryCatchEx,
-            expect![[r#""#]],
-        );
-    }
-
-    #[test]
-    fn test_rollback_only_snapshot() {
-        check_diagnostics_snapshot_for(
-            r#"Процедура Тест()
-    Попытка
-        Действие();
-    Исключение
-        ОтменитьТранзакцию();
-    КонецПопытки;
-КонецПроцедуры"#,
-            DiagnosticCode::MissingCodeTryCatchEx,
-            expect![[r#"
-                MissingCodeTryCatchEx @ 4:5..4:15
-                  message: Блок исключения только откатывает транзакцию, но не фиксирует ошибку: добавьте логирование или `ВызватьИсключение`
-                  severity: Major"#]],
-        );
+	ВызватьИсключение;
+КонецПопытки;
+"#;
+        check(code, expect![[r#""#]]);
     }
 }

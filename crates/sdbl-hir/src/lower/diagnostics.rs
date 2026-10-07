@@ -1,628 +1,149 @@
 use super::context::LoweringContext;
-use crate::diagnostics::SdblDiagnostic;
-use crate::hir::{ExprHir, JoinHir, SdblHir, TableRef};
+use crate::diagnostics::{SdblDiagnostic, UnprotectedFieldRef};
+use crate::hir::{
+    BinaryOp, ExprHir, FunctionKind, InValues, JoinType, Name, SdblHir, TableRef, UnaryOp,
+};
 use stdx::case::CaseExt;
 
 impl LoweringContext<'_> {
+    /// Reports fields of the optional side of an outer join that are used without NULL
+    /// handling.
+    ///
+    /// Rows of the preserved side that found no pair get NULL in every field of the
+    /// optional side. NULL is neither zero nor an empty string: arithmetic and comparisons
+    /// with it yield NULL, so a field used as a value has to be replaced through `ЕСТЬNULL`
+    /// or reached only after an `ЕСТЬ NULL` test. One diagnostic per join lists every
+    /// unprotected use, so the fix can be made in one place.
     pub(super) fn check_joins_for_unprotected_fields(&mut self, hir: &SdblHir) {
-        let protected_tables = self.find_tables_protected_by_where(hir);
-
-        for join in hir.joins.iter().filter(|j| j.join_type.is_outer()) {
-            match join.join_type {
-                crate::hir::JoinType::Left
-                    if !protected_tables.contains(join.table.effective_name()) =>
-                {
-                    self.check_table_in_join(join, &join.table, hir);
-                }
-                crate::hir::JoinType::Right => {
-                    for from_table in &hir.from {
-                        if !protected_tables.contains(from_table.effective_name()) {
-                            self.check_table_in_join(join, from_table, hir);
-                        }
-                    }
-                }
-                crate::hir::JoinType::Full => {
-                    let mut all_unprotected = Vec::new();
-
-                    if !protected_tables.contains(join.table.effective_name()) {
-                        self.collect_unprotected_refs(&join.table, hir, &mut all_unprotected);
-                    }
-
-                    for from_table in &hir.from {
-                        if !protected_tables.contains(from_table.effective_name()) {
-                            self.collect_unprotected_refs(from_table, hir, &mut all_unprotected);
-                        }
-                    }
-
-                    if !all_unprotected.is_empty() {
-                        self.diagnostics.push(SdblDiagnostic::FieldsFromJoinWithoutNullCheck {
-                            join_type: join.join_type,
-                            range: join.range,
-                            unprotected_fields: all_unprotected,
-                        });
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        for union in &hir.unions {
-            self.check_joins_for_unprotected_fields(&union.query);
-        }
-    }
-
-    fn find_tables_protected_by_where(&self, hir: &SdblHir) -> std::collections::HashSet<String> {
-        let mut protected = std::collections::HashSet::new();
-
-        if let Some(ref where_expr) = hir.where_clause {
-            self.collect_protected_tables(where_expr, &mut protected);
-        }
-
-        protected
-    }
-
-    fn collect_protected_tables(
-        &self,
-        expr: &ExprHir,
-        protected: &mut std::collections::HashSet<String>,
-    ) {
-        match expr {
-            ExprHir::IsNull { expr: inner, negated, .. } => {
-                if *negated {
-                    if let Some(alias) = self.extract_table_alias(inner) {
-                        protected.insert(alias);
-                    }
-                }
-                self.collect_protected_tables(inner, protected);
-            }
-            ExprHir::UnaryOp { op: crate::hir::UnaryOp::Not, expr: inner, .. } => {
-                if let Some(alias) = self.find_is_null_in_not(inner) {
-                    protected.insert(alias);
-                }
-                self.collect_protected_tables(inner, protected);
-            }
-            ExprHir::BinaryOp { lhs, rhs, .. } => {
-                self.collect_protected_tables(lhs, protected);
-                self.collect_protected_tables(rhs, protected);
-            }
-            ExprHir::UnaryOp { expr, .. } => {
-                self.collect_protected_tables(expr, protected);
-            }
-            ExprHir::FunctionCall { args, .. } => {
-                for arg in args {
-                    self.collect_protected_tables(arg, protected);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    #[allow(clippy::only_used_in_recursion)]
-    fn extract_table_alias(&self, expr: &ExprHir) -> Option<String> {
-        match expr {
-            ExprHir::ColumnRef { parts, .. } if parts.len() >= 2 => Some(parts[0].to_string()),
-            ExprHir::BinaryOp { lhs, rhs, .. } => {
-                self.extract_table_alias(lhs).or_else(|| self.extract_table_alias(rhs))
-            }
-            ExprHir::UnaryOp { expr: inner, .. } => self.extract_table_alias(inner),
-            ExprHir::FunctionCall { args, .. } => {
-                for arg in args {
-                    if let Some(alias) = self.extract_table_alias(arg) {
-                        return Some(alias);
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
-    fn find_is_null_in_not(&self, expr: &ExprHir) -> Option<String> {
-        match expr {
-            ExprHir::IsNull { expr: field_expr, negated: false, .. } => {
-                self.extract_table_alias(field_expr)
-            }
-            ExprHir::BinaryOp { lhs, rhs, .. } => {
-                self.find_is_null_in_not(lhs).or_else(|| self.find_is_null_in_not(rhs))
-            }
-            ExprHir::UnaryOp { expr: inner, .. } => self.find_is_null_in_not(inner),
-            _ => None,
-        }
-    }
-
-    fn collect_unprotected_refs(
-        &mut self,
-        table: &TableRef,
-        hir: &SdblHir,
-        all_unprotected: &mut Vec<crate::diagnostics::UnprotectedFieldRef>,
-    ) {
-        let table_alias = table.effective_name();
-        let mut unprotected_refs = Vec::new();
-
-        for field in &hir.select.fields {
-            self.find_unprotected_refs(&field.expr, table_alias, &mut unprotected_refs);
-        }
-
-        if let Some(ref where_expr) = hir.where_clause {
-            self.find_unprotected_refs(where_expr, table_alias, &mut unprotected_refs);
-        }
-
-        all_unprotected.extend(unprotected_refs);
-    }
-
-    fn check_table_in_join(&mut self, join: &JoinHir, table: &TableRef, hir: &SdblHir) {
-        let table_alias = table.effective_name();
-        let mut unprotected_refs = Vec::new();
-
-        for field in &hir.select.fields {
-            self.find_unprotected_refs(&field.expr, table_alias, &mut unprotected_refs);
-        }
-
-        if let Some(ref where_expr) = hir.where_clause {
-            self.find_unprotected_refs(where_expr, table_alias, &mut unprotected_refs);
-        }
-
-        if !unprotected_refs.is_empty() {
-            self.diagnostics.push(SdblDiagnostic::FieldsFromJoinWithoutNullCheck {
-                join_type: join.join_type,
-                range: join.range,
-                unprotected_fields: unprotected_refs,
-            });
-        }
-    }
-
-    fn find_unprotected_refs(
-        &self,
-        expr: &ExprHir,
-        protected_table: &str,
-        unprotected_refs: &mut Vec<crate::diagnostics::UnprotectedFieldRef>,
-    ) {
-        if self.is_protected_context(expr, protected_table) {
-            return;
-        }
-
-        match expr {
-            ExprHir::ColumnRef { parts, range, .. } => {
-                if parts.len() >= 2 {
-                    let alias = &parts[0];
-                    if alias.eq_ignore_ascii_case(protected_table) {
-                        unprotected_refs.push(crate::diagnostics::UnprotectedFieldRef {
-                            table_alias: alias.to_string(),
-                            field_name: parts[1].to_string(),
-                            range: *range,
-                        });
-                    }
-                }
-            }
-
-            ExprHir::BinaryOp { op: crate::hir::BinaryOp::Or, lhs, rhs, .. } => {
-                // `Т.Поле ЕСТЬ NULL ИЛИ <выражение>`: the NULL case is handled
-                // by the sibling disjunct, so the table's fields inside the
-                // other operand are deliberate.
-                if !self.condition_handles_table_null(rhs, protected_table) {
-                    self.find_unprotected_refs(lhs, protected_table, unprotected_refs);
-                }
-                if !self.condition_handles_table_null(lhs, protected_table) {
-                    self.find_unprotected_refs(rhs, protected_table, unprotected_refs);
-                }
-            }
-
-            ExprHir::BinaryOp { lhs, rhs, .. } => {
-                self.find_unprotected_refs(lhs, protected_table, unprotected_refs);
-                self.find_unprotected_refs(rhs, protected_table, unprotected_refs);
-            }
-
-            ExprHir::UnaryOp { expr: inner, .. } => {
-                self.find_unprotected_refs(inner, protected_table, unprotected_refs);
-            }
-
-            ExprHir::FunctionCall { function, args, .. } => {
-                if !matches!(function, crate::hir::FunctionKind::Isnull) {
-                    for arg in args {
-                        self.find_unprotected_refs(arg, protected_table, unprotected_refs);
-                    }
-                }
-            }
-
-            ExprHir::Case { operand, when_clauses, else_expr, .. } => {
-                if let Some(op) = operand {
-                    self.find_unprotected_refs(op, protected_table, unprotected_refs);
-                }
-                // Branch conditions guard the table: ВЫБОР runs its КОГДА
-                // clauses in order, so once a condition of the form
-                // `Т ЕСТЬ NULL` has been passed, every later branch (and
-                // ИНАЧЕ) executes only when the table's row is present.
-                // The operand form compares values and carries no NULL
-                // semantics, so it gets no guard tracking.
-                let mut known_not_null = false;
-                for when in when_clauses {
-                    if !known_not_null {
-                        self.find_unprotected_refs(
-                            &when.condition,
-                            protected_table,
-                            unprotected_refs,
-                        );
-                    }
-                    let then_guarded = known_not_null
-                        || (operand.is_none()
-                            && self
-                                .condition_implies_table_present(&when.condition, protected_table));
-                    if !then_guarded {
-                        self.find_unprotected_refs(&when.result, protected_table, unprotected_refs);
-                    }
-                    known_not_null = known_not_null
-                        || (operand.is_none()
-                            && self.condition_handles_table_null(&when.condition, protected_table));
-                }
-                if !known_not_null {
-                    if let Some(else_e) = else_expr {
-                        self.find_unprotected_refs(else_e, protected_table, unprotected_refs);
-                    }
-                }
-            }
-
-            ExprHir::IsNull { expr: inner, .. } => {
-                self.find_unprotected_refs(inner, protected_table, unprotected_refs);
-            }
-
-            ExprHir::In { expr, values, .. } => {
-                self.find_unprotected_refs(expr, protected_table, unprotected_refs);
-                match values {
-                    crate::hir::InValues::List(exprs) => {
-                        for e in exprs {
-                            self.find_unprotected_refs(e, protected_table, unprotected_refs);
-                        }
-                    }
-                    crate::hir::InValues::Subquery(subq) => {
-                        for field in &subq.select.fields {
-                            self.find_unprotected_refs(
-                                &field.expr,
-                                protected_table,
-                                unprotected_refs,
-                            );
-                        }
-                    }
-                }
-            }
-
-            ExprHir::Between { expr, low, high, .. } => {
-                self.find_unprotected_refs(expr, protected_table, unprotected_refs);
-                self.find_unprotected_refs(low, protected_table, unprotected_refs);
-                self.find_unprotected_refs(high, protected_table, unprotected_refs);
-            }
-
-            ExprHir::Like { expr, pattern, escape, .. } => {
-                self.find_unprotected_refs(expr, protected_table, unprotected_refs);
-                self.find_unprotected_refs(pattern, protected_table, unprotected_refs);
-                if let Some(esc) = escape {
-                    self.find_unprotected_refs(esc, protected_table, unprotected_refs);
-                }
-            }
-
-            ExprHir::Subquery { query, .. } => {
-                for field in &query.select.fields {
-                    self.find_unprotected_refs(&field.expr, protected_table, unprotected_refs);
-                }
-            }
-
-            ExprHir::Tuple { elements, .. } => {
-                for elem in elements {
-                    self.find_unprotected_refs(elem, protected_table, unprotected_refs);
-                }
-            }
-
-            ExprHir::Literal { .. } | ExprHir::Parameter { .. } | ExprHir::Missing { .. } => {}
-        }
-    }
-
-    fn is_protected_context(&self, expr: &ExprHir, protected_table: &str) -> bool {
-        match expr {
-            ExprHir::FunctionCall { function, args, .. } => {
-                if matches!(function, crate::hir::FunctionKind::Isnull) {
-                    if let Some(first_arg) = args.first() {
-                        return self.expr_references_table(first_arg, protected_table);
-                    }
-                }
-                false
-            }
-
-            ExprHir::IsNull { expr: inner, .. } => {
-                self.expr_references_table(inner, protected_table)
-            }
-
-            ExprHir::UnaryOp { op: crate::hir::UnaryOp::Not, expr: inner, .. } => {
-                if let ExprHir::IsNull { expr: field_expr, .. } = &**inner {
-                    return self.expr_references_table(field_expr, protected_table);
-                }
-                false
-            }
-
-            _ => false,
-        }
-    }
-
-    /// Does this condition handle the NULL case of `table` positively, i.e.
-    /// does `Т.Поле ЕСТЬ NULL` dominate it through ИЛИ-combinations? Then the
-    /// condition being FALSE guarantees the table's row is present, and a
-    /// sibling disjunct sees the NULL case explicitly handled. И-combinations
-    /// give no such guarantee: `Т ЕСТЬ NULL И X` can be false with a NULL row.
-    /// Only a direct column reference observes NULL — wrappers like
-    /// ЕСТЬNULL(…) never yield NULL, so an IS-NULL test over them is
-    /// constant-false and proves nothing.
-    fn condition_handles_table_null(&self, expr: &ExprHir, table: &str) -> bool {
-        match expr {
-            ExprHir::IsNull { expr: inner, negated: false, .. } => {
-                self.is_direct_column_of_table(inner, table)
-            }
-            ExprHir::BinaryOp { op: crate::hir::BinaryOp::Or, lhs, rhs, .. } => {
-                self.condition_handles_table_null(lhs, table)
-                    || self.condition_handles_table_null(rhs, table)
-            }
-            _ => false,
-        }
-    }
-
-    /// Does this condition being TRUE guarantee the table's row is present
-    /// (not NULL)? Covers `Т.Поле ЕСТЬ НЕ NULL`, `НЕ (Т.Поле ЕСТЬ NULL)`, and
-    /// the sentinel test `ЕСТЬNULL(Т.Поле, З) <> З`: an absent row turns the
-    /// call into the fallback `З`, the inequality fails, and the branch is
-    /// skipped. A conjunct guarantee suffices for И; for ИЛИ both operands
-    /// must guarantee.
-    fn condition_implies_table_present(&self, expr: &ExprHir, table: &str) -> bool {
-        match expr {
-            ExprHir::IsNull { expr: inner, negated: true, .. } => {
-                self.is_direct_column_of_table(inner, table)
-            }
-            ExprHir::UnaryOp { op: crate::hir::UnaryOp::Not, expr: inner, .. } => {
-                self.condition_handles_table_null(inner, table)
-            }
-            ExprHir::BinaryOp { op: crate::hir::BinaryOp::And, lhs, rhs, .. } => {
-                self.condition_implies_table_present(lhs, table)
-                    || self.condition_implies_table_present(rhs, table)
-            }
-            ExprHir::BinaryOp { op: crate::hir::BinaryOp::Or, lhs, rhs, .. } => {
-                self.condition_implies_table_present(lhs, table)
-                    && self.condition_implies_table_present(rhs, table)
-            }
-            ExprHir::BinaryOp { op: crate::hir::BinaryOp::Ne, lhs, rhs, .. } => {
-                self.is_isnull_sentinel_test(lhs, rhs, table)
-                    || self.is_isnull_sentinel_test(rhs, lhs, table)
-            }
-            _ => false,
-        }
-    }
-
-    /// `ЕСТЬNULL(Т.Поле, <литерал>)` compared via `<>` against the SAME
-    /// literal: with the row absent the call yields exactly that fallback, the
-    /// inequality is guaranteed false, and the branch cannot execute. Any
-    /// other comparison shape (equality, a different literal, a non-literal
-    /// fallback) can still select the branch on an absent row and must not
-    /// count as a guard.
-    fn is_isnull_sentinel_test(
-        &self,
-        isnull_side: &ExprHir,
-        sentinel_side: &ExprHir,
-        table: &str,
-    ) -> bool {
-        let ExprHir::FunctionCall { function: crate::hir::FunctionKind::Isnull, args, .. } =
-            isnull_side
-        else {
-            return false;
-        };
-        let (Some(column), Some(fallback)) = (args.first(), args.get(1)) else {
-            return false;
-        };
-        if !self.is_direct_column_of_table(column, table) {
-            return false;
-        }
-        match (fallback, sentinel_side) {
-            (
-                ExprHir::Literal { value: fallback_value, .. },
-                ExprHir::Literal { value: sentinel_value, .. },
-            ) => fallback_value == sentinel_value,
-            _ => false,
-        }
-    }
-
-    fn is_direct_column_of_table(&self, expr: &ExprHir, table: &str) -> bool {
-        matches!(
-            expr,
-            ExprHir::ColumnRef { parts, .. }
-                if parts.len() >= 2 && parts[0].eq_ignore_ascii_case(table)
-        )
-    }
-
-    #[allow(clippy::only_used_in_recursion)]
-    fn expr_references_table(&self, expr: &ExprHir, table_name: &str) -> bool {
-        match expr {
-            ExprHir::ColumnRef { parts, .. } if parts.len() >= 2 => {
-                parts[0].eq_ignore_ascii_case(table_name)
-            }
-            ExprHir::BinaryOp { lhs, rhs, .. } => {
-                self.expr_references_table(lhs, table_name)
-                    || self.expr_references_table(rhs, table_name)
-            }
-            ExprHir::UnaryOp { expr, .. } => self.expr_references_table(expr, table_name),
-            ExprHir::FunctionCall { args, .. } => {
-                args.iter().any(|arg| self.expr_references_table(arg, table_name))
-            }
-            _ => false,
-        }
-    }
-
-    pub(super) fn check_nested_fields_by_dot(&mut self, hir: &SdblHir) {
-        self.collect_nested_field_diagnostics(hir);
-
-        for union in &hir.unions {
-            self.check_nested_fields_by_dot(&union.query);
-        }
-    }
-
-    fn collect_nested_field_diagnostics(&mut self, hir: &SdblHir) {
-        for field in &hir.select.fields {
-            self.check_expr_for_nested_fields(&field.expr, false);
-        }
-
-        for table in &hir.from {
-            self.check_table_ref_for_nested_fields(table);
-        }
+        // The preserved side of ПРАВОЕ and the other side of ПОЛНОЕ are the query's own
+        // sources; a source without an alias is referred to by its table name.
+        let sources = hir.from.iter().map(TableRef::effective_name);
 
         for join in &hir.joins {
-            self.check_table_ref_for_nested_fields(&join.table);
-            if let Some(ref cond) = join.condition {
-                self.check_expr_for_nested_fields(cond, false);
-            }
-        }
-
-        if let Some(ref where_expr) = hir.where_clause {
-            self.check_expr_for_nested_fields(where_expr, false);
-        }
-
-        if let Some(ref group_by) = hir.group_by {
-            for expr in &group_by.exprs {
-                self.check_expr_for_nested_fields(expr, false);
-            }
-        }
-
-        if let Some(ref having) = hir.having {
-            self.check_expr_for_nested_fields(having, false);
-        }
-
-        if let Some(ref order_by) = hir.order_by {
-            for item in &order_by.items {
-                self.check_expr_for_nested_fields(&item.expr, false);
-            }
-        }
-    }
-
-    fn check_table_ref_for_nested_fields(&mut self, table: &TableRef) {
-        if table.is_virtual_table {
-            for param in &table.virtual_table_params {
-                self.check_expr_for_nested_fields(param, true);
-            }
-        }
-
-        for subquery in &table.subquery {
-            self.collect_nested_field_diagnostics(subquery);
-        }
-    }
-
-    fn check_expr_for_nested_fields(&mut self, expr: &ExprHir, in_virtual_table_params: bool) {
-        match expr {
-            ExprHir::ColumnRef { parts, range, .. } => {
-                if parts.len() >= 2 && !crate::is_mdo_type(parts[0].as_str()) {
-                    let parts_count =
-                        if in_virtual_table_params { None } else { Some(parts.len() as u32) };
-                    self.diagnostics.push(SdblDiagnostic::QueryNestedFieldsByDot {
-                        range: *range,
-                        parts_count,
-                    });
-                }
-            }
-
-            ExprHir::FunctionCall { function, args, member_access, range, .. } => {
-                for arg in args {
-                    self.check_expr_for_nested_fields(arg, in_virtual_table_params);
-                }
-
-                if matches!(function, crate::hir::FunctionKind::Cast) && member_access.len() > 1 {
-                    self.diagnostics.push(SdblDiagnostic::QueryNestedFieldsByDot {
-                        range: *range,
-                        parts_count: None,
-                    });
-                }
-            }
-
-            ExprHir::BinaryOp { lhs, rhs, .. } => {
-                self.check_expr_for_nested_fields(lhs, in_virtual_table_params);
-                self.check_expr_for_nested_fields(rhs, in_virtual_table_params);
-            }
-
-            ExprHir::UnaryOp { expr: inner, .. } => {
-                self.check_expr_for_nested_fields(inner, in_virtual_table_params);
-            }
-
-            ExprHir::Case { operand, when_clauses, else_expr, .. } => {
-                if let Some(op) = operand {
-                    self.check_expr_for_nested_fields(op, in_virtual_table_params);
-                }
-                for clause in when_clauses {
-                    self.check_expr_for_nested_fields(&clause.condition, in_virtual_table_params);
-                    self.check_expr_for_nested_fields(&clause.result, in_virtual_table_params);
-                }
-                if let Some(else_e) = else_expr {
-                    self.check_expr_for_nested_fields(else_e, in_virtual_table_params);
-                }
-            }
-
-            ExprHir::Subquery { query, .. } => {
-                self.collect_nested_field_diagnostics(query);
-            }
-
-            ExprHir::In { expr: inner, values, .. } => {
-                self.check_expr_for_nested_fields(inner, in_virtual_table_params);
-                match values {
-                    crate::hir::InValues::List(items) => {
-                        for item in items {
-                            self.check_expr_for_nested_fields(item, in_virtual_table_params);
-                        }
-                    }
-                    crate::hir::InValues::Subquery(sq) => {
-                        self.collect_nested_field_diagnostics(sq);
-                    }
-                }
-            }
-
-            ExprHir::Between { expr: inner, low, high, .. } => {
-                self.check_expr_for_nested_fields(inner, in_virtual_table_params);
-                self.check_expr_for_nested_fields(low, in_virtual_table_params);
-                self.check_expr_for_nested_fields(high, in_virtual_table_params);
-            }
-
-            ExprHir::Like { expr: inner, pattern, escape, .. } => {
-                self.check_expr_for_nested_fields(inner, in_virtual_table_params);
-                self.check_expr_for_nested_fields(pattern, in_virtual_table_params);
-                if let Some(esc) = escape {
-                    self.check_expr_for_nested_fields(esc, in_virtual_table_params);
-                }
-            }
-
-            ExprHir::IsNull { expr: inner, .. } => {
-                self.check_expr_for_nested_fields(inner, in_virtual_table_params);
-            }
-
-            ExprHir::Tuple { elements, .. } => {
-                for elem in elements {
-                    self.check_expr_for_nested_fields(elem, in_virtual_table_params);
-                }
-            }
-
-            ExprHir::Literal { .. } | ExprHir::Parameter { .. } | ExprHir::Missing { .. } => {}
-        }
-    }
-
-    pub(super) fn check_alias_without_as_keyword(&mut self, hir: &SdblHir) {
-        for field in &hir.select.fields {
-            if field.is_asterisk {
-                continue;
-            }
-
-            if field.has_parse_error {
-                continue;
-            }
-
-            let needs_diagnostic = match &field.alias {
-                Some(_) => !field.has_as_keyword,
-                None => true,
+            let joined = join.table.effective_name();
+            let optional_sides: Vec<&str> = match join.join_type {
+                JoinType::Inner | JoinType::Cross => continue,
+                JoinType::Left => vec![joined],
+                JoinType::Right => sources.clone().collect(),
+                JoinType::Full => std::iter::once(joined).chain(sources.clone()).collect(),
             };
 
-            if needs_diagnostic {
-                self.diagnostics.push(SdblDiagnostic::AliasWithoutAsKeyword {
-                    field_name: field.alias.as_ref().map(|n| n.to_string()),
-                    raw_name: field.raw_name.as_ref().map(|n| n.to_string()),
-                    range: field.diagnostic_range,
+            let mut unprotected_fields = Vec::new();
+            for side in optional_sides {
+                NullableUses::new(side).collect(hir, &mut unprotected_fields);
+            }
+
+            if !unprotected_fields.is_empty() {
+                self.diagnostics.push(SdblDiagnostic::FieldsFromJoinWithoutNullCheck {
+                    join_type: join.join_type,
+                    range: join.range,
+                    unprotected_fields,
                 });
             }
+        }
+    }
+
+    /// Reports every dotted path that starts from a query source, with its length.
+    ///
+    /// Each step after a reference field is an implicit join with the referenced table, and
+    /// for a field of a composite type with every table it may point to. The length lets
+    /// the IDE layer apply the user's threshold. Inside the condition of a virtual table
+    /// the path starts from the virtual table's own field rather than from a source alias,
+    /// so any dot there already dereferences; such paths carry no length.
+    pub(super) fn check_nested_fields_by_dot(&mut self, hir: &SdblHir) {
+        for field in &hir.select.fields {
+            self.report_dotted_paths(&field.expr, PathStart::SourceAlias);
+        }
+        for table in &hir.from {
+            self.report_dotted_paths_in_source(table);
+        }
+        for join in &hir.joins {
+            self.report_dotted_paths_in_source(&join.table);
+            if let Some(condition) = &join.condition {
+                self.report_dotted_paths(condition, PathStart::SourceAlias);
+            }
+        }
+        if let Some(where_expr) = &hir.where_clause {
+            self.report_dotted_paths(where_expr, PathStart::SourceAlias);
+        }
+        if let Some(group_by) = &hir.group_by {
+            for expr in &group_by.exprs {
+                self.report_dotted_paths(expr, PathStart::SourceAlias);
+            }
+        }
+        if let Some(having) = &hir.having {
+            self.report_dotted_paths(having, PathStart::SourceAlias);
+        }
+        if let Some(order_by) = &hir.order_by {
+            for item in &order_by.items {
+                self.report_dotted_paths(&item.expr, PathStart::SourceAlias);
+            }
+        }
+    }
+
+    fn report_dotted_paths_in_source(&mut self, table: &TableRef) {
+        for nested in &table.subquery {
+            self.check_nested_fields_by_dot(nested);
+        }
+        for param in &table.virtual_table_params {
+            self.report_dotted_paths(param, PathStart::VirtualTableField);
+        }
+    }
+
+    fn report_dotted_paths(&mut self, expr: &ExprHir, start: PathStart) {
+        if let ExprHir::ColumnRef { parts, range, .. } = expr {
+            if parts.len() >= 2 && !crate::is_mdo_type(parts[0].as_str()) {
+                let parts_count = match start {
+                    PathStart::SourceAlias => Some(parts.len() as u32),
+                    PathStart::VirtualTableField => None,
+                };
+                self.diagnostics
+                    .push(SdblDiagnostic::QueryNestedFieldsByDot { range: *range, parts_count });
+            }
+            return;
+        }
+        for child in direct_operands(expr) {
+            self.report_dotted_paths(child, start);
+        }
+        if let ExprHir::In { values: InValues::Subquery(nested), .. } = expr {
+            self.check_nested_fields_by_dot(nested);
+        }
+        // `ВЫРАЗИТЬ(... КАК Справочник.Х).Поле` is the remedy the standard recommends: it
+        // reads one field of the one table named in the cast. Every further step
+        // dereferences that field, and there is no source alias to count the depth from.
+        if let ExprHir::FunctionCall {
+            function: FunctionKind::Cast, member_access, range, ..
+        } = expr
+        {
+            if member_access.len() >= 2 {
+                self.diagnostics.push(SdblDiagnostic::QueryNestedFieldsByDot {
+                    range: *range,
+                    parts_count: None,
+                });
+            }
+        }
+    }
+
+    /// Reports selected fields whose result-column name is not given with `КАК`.
+    ///
+    /// The name of a result column is what the code reading the result relies on. Without
+    /// an explicit alias the platform derives it from the expression, so renaming an
+    /// attribute silently renames the column; an alias written without `КАК` is legal but
+    /// easy to misread as part of the expression.
+    pub(super) fn check_alias_without_as_keyword(&mut self, hir: &SdblHir) {
+        for field in &hir.select.fields {
+            // A field the parser could not finish is reported by the parser itself.
+            if field.is_asterisk || field.has_parse_error {
+                continue;
+            }
+            if field.alias.is_some() && field.has_as_keyword {
+                continue;
+            }
+            self.diagnostics.push(SdblDiagnostic::AliasWithoutAsKeyword {
+                field_name: field.alias.as_ref().map(|alias| alias.to_string()),
+                raw_name: field.raw_name.as_ref().map(|name| name.to_string()),
+                range: field.diagnostic_range,
+            });
         }
     }
 
@@ -966,5 +487,223 @@ impl LoweringContext<'_> {
             context,
             range: expr.range(),
         });
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PathStart {
+    SourceAlias,
+    VirtualTableField,
+}
+
+/// The operands an expression evaluates directly. A nested query in `В (...)` is not an
+/// operand: it is a query of its own and every check decides separately how to treat it.
+fn direct_operands(expr: &ExprHir) -> Vec<&ExprHir> {
+    match expr {
+        ExprHir::BinaryOp { lhs, rhs, .. } => vec![lhs, rhs],
+        ExprHir::UnaryOp { expr, .. } | ExprHir::IsNull { expr, .. } => vec![expr],
+        ExprHir::FunctionCall { args, .. } => args.iter().collect(),
+        ExprHir::Case { operand, when_clauses, else_expr, .. } => {
+            let mut operands: Vec<&ExprHir> = operand.iter().map(|op| &**op).collect();
+            for clause in when_clauses {
+                operands.push(&clause.condition);
+                operands.push(&clause.result);
+            }
+            operands.extend(else_expr.iter().map(|e| &**e));
+            operands
+        }
+        ExprHir::In { expr, values, .. } => {
+            let mut operands = vec![&**expr];
+            if let InValues::List(items) = values {
+                operands.extend(items);
+            }
+            operands
+        }
+        ExprHir::Between { expr, low, high, .. } => vec![expr, low, high],
+        ExprHir::Like { expr, pattern, escape, .. } => {
+            let mut operands = vec![&**expr, &**pattern];
+            operands.extend(escape.iter().map(|e| &**e));
+            operands
+        }
+        ExprHir::Tuple { elements, .. } => elements.iter().collect(),
+        ExprHir::ColumnRef { .. }
+        | ExprHir::Literal { .. }
+        | ExprHir::Subquery { .. }
+        | ExprHir::Parameter { .. }
+        | ExprHir::Missing { .. } => Vec::new(),
+    }
+}
+
+/// Uses of one optional join side that may observe its NULL.
+///
+/// A use is safe when NULL cannot reach it: inside `ЕСТЬNULL`, in a `ВЫБОР` branch that is
+/// taken only after a test has shown the side is present, next to an `ЕСТЬ NULL` test in a
+/// disjunction, or anywhere in a query whose selection condition already tests the side
+/// for presence. The null test itself is not a use.
+struct NullableUses<'a> {
+    side: &'a str,
+}
+
+impl<'a> NullableUses<'a> {
+    fn new(side: &'a str) -> Self {
+        Self { side }
+    }
+
+    fn collect(&self, hir: &SdblHir, out: &mut Vec<UnprotectedFieldRef>) {
+        let filtered_by_presence = hir
+            .where_clause
+            .as_ref()
+            .is_some_and(|condition| self.tests_presence_anywhere(condition));
+
+        for field in &hir.select.fields {
+            self.walk(&field.expr, filtered_by_presence, out);
+        }
+        if let Some(condition) = &hir.where_clause {
+            self.walk(condition, filtered_by_presence, out);
+        }
+    }
+
+    fn walk(&self, expr: &ExprHir, protected: bool, out: &mut Vec<UnprotectedFieldRef>) {
+        match expr {
+            ExprHir::ColumnRef { parts, range, .. } => {
+                if !protected && self.is_side_field(parts) {
+                    out.push(UnprotectedFieldRef {
+                        table_alias: parts[0].to_string(),
+                        field_name: parts[1].to_string(),
+                        range: *range,
+                    });
+                }
+            }
+            ExprHir::IsNull { .. } => {}
+            ExprHir::FunctionCall { function: FunctionKind::Isnull, .. } => {}
+            ExprHir::Case { operand, when_clauses, else_expr, .. } => {
+                if let Some(operand) = operand {
+                    self.walk(operand, protected, out);
+                }
+                let mut present = protected;
+                for clause in when_clauses {
+                    self.walk(&clause.condition, present, out);
+                    let branch_present =
+                        present || self.proves_presence_when_true(&clause.condition);
+                    self.walk(&clause.result, branch_present, out);
+                    present = present || self.proves_presence_when_false(&clause.condition);
+                }
+                if let Some(else_expr) = else_expr {
+                    self.walk(else_expr, present, out);
+                }
+            }
+            ExprHir::BinaryOp { lhs, op: BinaryOp::Or, rhs, .. } => {
+                let guarded = protected || self.has_null_test(lhs) || self.has_null_test(rhs);
+                self.walk(lhs, guarded, out);
+                self.walk(rhs, guarded, out);
+            }
+            ExprHir::In { values: InValues::Subquery(nested), .. } => {
+                for operand in direct_operands(expr) {
+                    self.walk(operand, protected, out);
+                }
+                for field in &nested.select.fields {
+                    self.walk(&field.expr, protected, out);
+                }
+            }
+            _ => {
+                for operand in direct_operands(expr) {
+                    self.walk(operand, protected, out);
+                }
+            }
+        }
+    }
+
+    fn is_side_field(&self, parts: &[Name]) -> bool {
+        // ASCII-only folding keeps the long-standing behaviour for Latin aliases; Cyrillic
+        // aliases are matched as spelled.
+        parts.len() >= 2 && parts[0].as_str().eq_ignore_ascii_case(self.side)
+    }
+
+    fn is_null_test(&self, expr: &ExprHir, negated_test: bool) -> bool {
+        matches!(
+            expr,
+            ExprHir::IsNull { expr: tested, negated, .. }
+                if *negated == negated_test
+                    && matches!(&**tested, ExprHir::ColumnRef { parts, .. } if self.is_side_field(parts))
+        )
+    }
+
+    /// `ЕСТЬ НЕ NULL`, `НЕ ... ЕСТЬ NULL`, or a conjunction containing one of them.
+    fn proves_presence_when_true(&self, condition: &ExprHir) -> bool {
+        match condition {
+            ExprHir::BinaryOp { lhs, op: BinaryOp::And, rhs, .. } => {
+                self.proves_presence_when_true(lhs) || self.proves_presence_when_true(rhs)
+            }
+            ExprHir::UnaryOp { op: UnaryOp::Not, expr, .. } => self.is_null_test(expr, false),
+            ExprHir::BinaryOp { lhs, op: BinaryOp::Ne, rhs, .. } => {
+                self.differs_from_its_replacement(lhs, rhs)
+                    || self.differs_from_its_replacement(rhs, lhs)
+            }
+            _ => self.is_null_test(condition, true),
+        }
+    }
+
+    /// `ЕСТЬNULL(Поле, З) <> З`: the function returns the replacement exactly when the
+    /// field is NULL, so the inequality holds only for a present field.
+    fn differs_from_its_replacement(&self, replaced: &ExprHir, compared: &ExprHir) -> bool {
+        let ExprHir::FunctionCall { function: FunctionKind::Isnull, args, .. } = replaced else {
+            return false;
+        };
+        let [ExprHir::ColumnRef { parts, .. }, ExprHir::Literal { value: replacement, .. }] =
+            args.as_slice()
+        else {
+            return false;
+        };
+        matches!(compared, ExprHir::Literal { value, .. } if value == replacement)
+            && self.is_side_field(parts)
+    }
+
+    /// `ЕСТЬ NULL`, or a disjunction containing it: when it is false, the side is present.
+    fn proves_presence_when_false(&self, condition: &ExprHir) -> bool {
+        match condition {
+            ExprHir::BinaryOp { lhs, op: BinaryOp::Or, rhs, .. } => {
+                self.proves_presence_when_false(lhs) || self.proves_presence_when_false(rhs)
+            }
+            _ => self.is_null_test(condition, false),
+        }
+    }
+
+    /// Only a test that holds for the missing side guards its disjunction: the other
+    /// operand is evaluated when the test is false, that is, when the side is present.
+    /// After `ЕСТЬ НЕ NULL` the other operand is evaluated exactly for the missing side,
+    /// and inside a conjunction the test no longer decides the disjunct.
+    fn has_null_test(&self, expr: &ExprHir) -> bool {
+        match expr {
+            ExprHir::BinaryOp { lhs, op: BinaryOp::Or, rhs, .. } => {
+                self.has_null_test(lhs) || self.has_null_test(rhs)
+            }
+            ExprHir::UnaryOp { op: UnaryOp::Not, expr, .. } => self.is_null_test(expr, true),
+            _ => self.is_null_test(expr, false),
+        }
+    }
+
+    /// The selection condition's presence test matches the alias exactly as spelled,
+    /// unlike the uses it protects.
+    fn is_exact_null_test(&self, expr: &ExprHir, negated_test: bool) -> bool {
+        matches!(
+            expr,
+            ExprHir::IsNull { expr: tested, negated, .. }
+                if *negated == negated_test
+                    && matches!(&**tested, ExprHir::ColumnRef { parts, .. }
+                        if parts.len() >= 2 && parts[0].as_str() == self.side)
+        )
+    }
+
+    fn tests_presence_anywhere(&self, expr: &ExprHir) -> bool {
+        let negated_positive_test = matches!(
+            expr,
+            ExprHir::UnaryOp { op: UnaryOp::Not, expr: inner, .. }
+                if self.is_exact_null_test(inner, false)
+        );
+        negated_positive_test
+            || self.is_exact_null_test(expr, true)
+            || direct_operands(expr)
+                .into_iter()
+                .any(|operand| self.tests_presence_anywhere(operand))
     }
 }

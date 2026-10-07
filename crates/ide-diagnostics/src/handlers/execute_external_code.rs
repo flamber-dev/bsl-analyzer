@@ -38,193 +38,121 @@ mod tests {
     use crate::test_utils::check_diagnostics_snapshot_for;
     use crate::DiagnosticCode;
     use expect_test::expect;
+
+    fn check(code: &str, expected: expect_test::Expect) {
+        check_diagnostics_snapshot_for(code, DiagnosticCode::ExecuteExternalCode, expected);
+    }
+
     #[test]
-    fn test_execute_on_server() {
-        let code = r#"
-&НаСервере
-Процедура ВыполнитьПроизвольныйКодНаСервере(Строка)
-    Выполнить(Строка);
+    fn test_client_only_exemption() {
+        let code = r#"&НаКлиенте
+Процедура ПрименитьФормулуСкидки(ТекстФормулы)
+	Выполнить(ТекстФормулы);
+КонецПроцедуры
+
+&НаКлиенте
+Функция ЗначениеФормулы(ТекстФормулы)
+	Возврат Вычислить(ТекстФормулы);
+КонецФункции
+"#;
+        check(code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_server_annotation() {
+        let code = r#"&НаСервере
+Процедура ПрименитьФормулуСкидки(ТекстФормулы)
+	Выполнить(ТекстФормулы);
 КонецПроцедуры
 "#;
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::ExecuteExternalCode,
             expect![[r#"
-                ExecuteExternalCode @ 4:5..4:23
-                  message: Запрещено выполнять внешний код на сервере
-                  severity: Critical"#]],
+            ExecuteExternalCode @ 3:2..3:26
+              message: Запрещено выполнять внешний код на сервере
+              severity: Critical"#]],
         );
     }
 
     #[test]
     fn test_execute_on_server_without_context() {
-        let code = r#"
-&НаСервереБезКонтекста
-Процедура ВыполнитьПроизвольныйКодНаСервереБезКонтекста(Строка)
-    Выполнить(Строка);
+        let code = r#"&НаСервереБезКонтекста
+Процедура ПересчитатьПоФормуле(ТекстФормулы)
+	Выполнить(ТекстФормулы);
 КонецПроцедуры
 "#;
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::ExecuteExternalCode,
             expect![[r#"
-                ExecuteExternalCode @ 4:5..4:23
-                  message: Запрещено выполнять внешний код на сервере
-                  severity: Critical"#]],
+            ExecuteExternalCode @ 3:2..3:26
+              message: Запрещено выполнять внешний код на сервере
+              severity: Critical"#]],
         );
     }
 
     #[test]
     fn test_eval_on_client_server_without_context() {
-        let code = r#"
-&НаКлиентеНаСервереБезКонтекста
-Функция РассчитатьЧтоТоИзСтрокиБезКонтекст(Строка)
-    Возврат Вычислить(Строка);
+        let code = r#"&НаКлиентеНаСервереБезКонтекста
+Функция ЗначениеФормулы(ТекстФормулы)
+	Возврат Вычислить(ТекстФормулы);
 КонецФункции
 "#;
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::ExecuteExternalCode,
             expect![[r#"
-                ExecuteExternalCode @ 4:13..4:30
-                  message: Запрещено выполнять внешний код на сервере
-                  severity: Critical"#]],
+            ExecuteExternalCode @ 3:10..3:33
+              message: Запрещено выполнять внешний код на сервере
+              severity: Critical"#]],
         );
-    }
-
-    #[test]
-    fn test_eval_on_method_without_directive() {
-        let code = r#"
-Функция МетодБезДеректив(Строка)
-    Возврат Вычислить(Строка);
-КонецФункции
-"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::ExecuteExternalCode,
-            expect![[r#"
-                ExecuteExternalCode @ 3:13..3:30
-                  message: Запрещено выполнять внешний код на сервере
-                  severity: Critical"#]],
-        );
-    }
-
-    #[test]
-    fn test_client_only_not_detected() {
-        let code = r#"
-&НаКлиенте
-Функция ВычислениеНаКлиенте(Строка)
-    Возврат Вычислить(Строка);
-КонецФункции
-"#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::ExecuteExternalCode, expect![[r#""#]]);
-    }
-
-    #[test]
-    fn test_client_only_exemption() {
-        let code = r#"
-&НаКлиенте
-Процедура ВыполнитьНаКлиенте(Строка)
-    Выполнить(Строка);
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::ExecuteExternalCode, expect![[r#""#]]);
-    }
-
-    #[test]
-    fn test_server_annotation() {
-        let code = r#"
-&НаСервере
-Процедура ВыполнитьНаСервере(Строка)
-    Выполнить(Строка);
-КонецПроцедуры
-"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::ExecuteExternalCode,
-            expect![[r#"
-                ExecuteExternalCode @ 4:5..4:23
-                  message: Запрещено выполнять внешний код на сервере
-                  severity: Critical"#]],
-        );
-    }
-
-    #[test]
-    fn test_eval_call() {
-        let code = r#"
-Функция ВычислитьЗначение(Строка)
-    Возврат Вычислить(Строка);
-КонецФункции
-"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::ExecuteExternalCode,
-            expect![[r#"
-                ExecuteExternalCode @ 3:13..3:30
-                  message: Запрещено выполнять внешний код на сервере
-                  severity: Critical"#]],
-        );
-    }
-
-    #[test]
-    fn test_qualified_eval_ignored() {
-        let code = r#"
-Функция ВычислитьЗначение(Объект)
-    Возврат Объект.Вычислить();
-КонецФункции
-"#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::ExecuteExternalCode, expect![[r#""#]]);
-    }
-
-    #[test]
-    fn test_similar_method_name_ignored() {
-        let code = r#"
-Функция БезОшибок(Строка)
-    Возврат ВычислитьЧтоТо(Строка);
-КонецФункции
-"#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::ExecuteExternalCode, expect![[r#""#]]);
     }
 
     #[test]
     fn test_client_at_server_annotation() {
-        let code = r#"
-&НаКлиентеНаСервере
-Функция ВычислитьЗначение(Строка)
-    Возврат Вычислить(Строка);
+        let code = r#"&НаКлиентеНаСервере
+Функция ЗначениеФормулы(ТекстФормулы)
+	Возврат Вычислить(ТекстФормулы);
 КонецФункции
 "#;
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::ExecuteExternalCode,
             expect![[r#"
-                ExecuteExternalCode @ 4:13..4:30
-                  message: Запрещено выполнять внешний код на сервере
-                  severity: Critical"#]],
+            ExecuteExternalCode @ 3:10..3:33
+              message: Запрещено выполнять внешний код на сервере
+              severity: Critical"#]],
         );
     }
 
     #[test]
-    fn test_common_module_without_annotations() {
-        let code = r#"
-Процедура ВыполнитьПроизвольныйКод(Строка)
-    Выполнить(Строка);
+    fn test_methods_without_annotations() {
+        let code = r#"Процедура ПрименитьФормулуСкидки(ТекстФормулы)
+	Выполнить(ТекстФормулы);
 КонецПроцедуры
 
-Функция РассчитатьЧтоТоИзСтроки(Строка)
-    Возврат Вычислить(Строка);
+Функция ЗначениеФормулы(ТекстФормулы)
+	Возврат Вычислить(ТекстФормулы);
 КонецФункции
 "#;
-        check_diagnostics_snapshot_for(
+        check(
             code,
-            DiagnosticCode::ExecuteExternalCode,
             expect![[r#"
-                ExecuteExternalCode @ 3:5..3:23
-                  message: Запрещено выполнять внешний код на сервере
-                  severity: Critical
-                ExecuteExternalCode @ 7:13..7:30
-                  message: Запрещено выполнять внешний код на сервере
-                  severity: Critical"#]],
+            ExecuteExternalCode @ 2:2..2:26
+              message: Запрещено выполнять внешний код на сервере
+              severity: Critical
+            ExecuteExternalCode @ 6:10..6:33
+              message: Запрещено выполнять внешний код на сервере
+              severity: Critical"#]],
         );
+    }
+
+    #[test]
+    fn test_qualified_and_similar_names_ignored() {
+        let code = r#"&НаСервере
+Функция ЗначениеФормулы(Калькулятор, ТекстФормулы)
+	Промежуточное = Калькулятор.Вычислить(ТекстФормулы);
+	Калькулятор.Выполнить();
+	Возврат ВычислитьОкругленно(Промежуточное);
+КонецФункции
+"#;
+        check(code, expect![[r#""#]]);
     }
 }

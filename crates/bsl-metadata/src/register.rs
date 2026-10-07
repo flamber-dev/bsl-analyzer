@@ -1,5 +1,5 @@
 use crate::dimension::Dimension;
-use crate::enums::{ObjectBelonging, SupportVariant};
+use crate::enums::ObjectBelonging;
 use crate::metadata_object::MdoType;
 use crate::traits::MdObject;
 use serde::{Deserialize, Serialize};
@@ -345,10 +345,6 @@ impl MdObject for Register {
 
     fn object_belonging(&self) -> ObjectBelonging {
         ObjectBelonging::Own
-    }
-
-    fn support_variant(&self) -> SupportVariant {
-        SupportVariant::Unknown
     }
 
     fn as_any(&self) -> &dyn Any {

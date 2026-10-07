@@ -75,19 +75,6 @@ pub enum ObjectBelonging {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-pub enum SupportVariant {
-    #[serde(rename = "NotEditable")]
-    NotEditable,
-    #[serde(rename = "Editable")]
-    Editable,
-    #[serde(rename = "NotSupported")]
-    NotSupported,
-    #[serde(other)]
-    #[default]
-    Unknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum FormType {
     #[serde(rename = "Managed")]
     #[default]
@@ -153,7 +140,6 @@ mod tests {
         assert_eq!(ReturnValueReuse::default(), ReturnValueReuse::Unknown);
         assert_eq!(ModuleType::default(), ModuleType::Unknown);
         assert_eq!(ObjectBelonging::default(), ObjectBelonging::Own);
-        assert_eq!(SupportVariant::default(), SupportVariant::Unknown);
         assert_eq!(FormType::default(), FormType::Managed);
     }
 

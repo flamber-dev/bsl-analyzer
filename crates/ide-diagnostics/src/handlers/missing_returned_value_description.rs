@@ -594,4 +594,24 @@ mod tests {
             expect![[r#""#]],
         );
     }
+
+    #[test]
+    fn test_blank_line_before_result_parameter_keeps_it_a_parameter_bsp_markup() {
+        let code = "// Записывает оценку.\n//\n// Параметры:\n//  ИмяЗадачи - Строка - имя задачи.\n//  \n//  Результат - Структура - результат поиска.\n//  Оценка - Структура - оценка.\nПроцедура Записать(ИмяЗадачи, Результат, Оценка) Экспорт\nКонецПроцедуры";
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn test_blank_line_before_result_parameter_keeps_it_a_parameter_bare_slashes() {
+        let code = "// Записывает оценку.\n//\n// Параметры:\n//  ИмяЗадачи - Строка - имя задачи.\n//\n//  Результат - Структура - результат поиска.\n//  Оценка - Структура - оценка.\nПроцедура Записать(ИмяЗадачи, Результат, Оценка) Экспорт\nКонецПроцедуры";
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::MissingReturnedValueDescription,
+            expect![[r#""#]],
+        );
+    }
 }

@@ -29,41 +29,45 @@ impl LoweringContext<'_> {
     }
 
     fn lower_data_source_in_from(&mut self, ds: &syntax::ast::SdblDataSource) -> TableRef {
-        if let Some(subquery) = ds.subquery() {
-            if ds.join_clauses().next().is_some() {
+        // The first source takes part in every join that follows it, so a nested query
+        // or a virtual table here is as costly as one on the right-hand side.
+        let has_joins = ds.join_clauses().next().is_some();
+
+        if has_joins {
+            if let Some(subquery) = ds.subquery() {
                 self.diagnostics.push(SdblDiagnostic::JoinWithSubQuery {
                     range: subquery.syntax().text_range(),
                 });
             }
-        }
 
-        if let Some(table_ref) = ds.table_ref() {
-            if ds.join_clauses().next().is_some() {
-                let parts: Vec<String> = table_ref
-                    .syntax()
-                    .children_with_tokens()
-                    .filter_map(|child| match child {
-                        syntax::NodeOrToken::Token(token) if token.kind().is_name_token() => {
-                            Some(token.text().to_string())
-                        }
-                        _ => None,
-                    })
-                    .collect();
-
-                if let Some(last_part) = parts.last() {
-                    if let Some(vt_type) = virtual_table_type(last_part) {
-                        let full_name = parts.join(".");
-                        self.diagnostics.push(SdblDiagnostic::JoinWithVirtualTable {
-                            table_name: full_name,
-                            virtual_table_type: vt_type.to_string(),
-                            range: table_ref.syntax().text_range(),
-                        });
-                    }
+            if let Some(table_ref) = ds.table_ref() {
+                let parts = self.parse_table_name(&table_ref);
+                if parts.last().is_some_and(|name| is_virtual_table_name(name)) {
+                    self.report_virtual_table_join(&parts, table_ref.syntax().text_range());
                 }
             }
         }
 
         self.lower_data_source(ds)
+    }
+
+    /// Reports a virtual table that takes part in a join. The virtual table is computed by
+    /// a nested query of its own, so the DBMS cannot estimate its size when choosing how to
+    /// join it; the standard recommends materialising it into a temporary table first.
+    pub(super) fn report_virtual_table_join(
+        &mut self,
+        parts: &[impl AsRef<str>],
+        range: TextRange,
+    ) {
+        let Some(kind) = parts.last().and_then(|name| virtual_table_type(name.as_ref())) else {
+            return;
+        };
+        let table_name = parts.iter().map(AsRef::as_ref).collect::<Vec<_>>().join(".");
+        self.diagnostics.push(SdblDiagnostic::JoinWithVirtualTable {
+            table_name,
+            virtual_table_type: kind.as_str().to_string(),
+            range,
+        });
     }
 
     pub(super) fn lower_data_source(&mut self, ds: &syntax::ast::SdblDataSource) -> TableRef {

@@ -289,243 +289,209 @@ mod tests {
     use crate::{DiagnosticCode, DiagnosticsConfig};
     use expect_test::expect;
 
-    const FIXTURE: &str = r#"А = 0;
+    /// `head`, then `fill` repeated, then `tail`, exactly `chars` characters long.
+    fn sized(head: &str, fill: char, tail: &str, chars: usize) -> String {
+        let used = head.chars().count() + tail.chars().count();
+        assert!(chars >= used, "длина {chars} меньше обрамления");
+        format!("{head}{}{tail}", fill.to_string().repeat(chars - used))
+    }
 
-А = "фффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффф";
-А = "ффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффф";
-А = "фффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффф";
-А = "ффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффф";
+    fn with(parameters: serde_json::Value) -> DiagnosticsConfig {
+        let mut config = DiagnosticsConfig::default();
+        config.parameters.insert(DiagnosticCode::LineLength, parameters);
+        config
+    }
 
-// Просто коммент
-// Длинный ОченьДлинный ОченьОченьДлинный Коооооооооооооооооооооомммммммммеееееееееееееееееееенннннтт Просто такооооййй Коммент
+    fn snapshot(code: &str, config: DiagnosticsConfig, expected: expect_test::Expect) {
+        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        expected.assert_eq(&format_diags(code, &diagnostics));
+    }
 
-    А = Код + Код + Код; // Просто коммент
-    А = Код + Код + Коооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооод; // Длииииииииинныййййй коммент
-    А = Код + Код + Кооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооодддддддддддддддддддод; // коммент
-
-Запрос.Текст =
-    "ВЫБРАТЬ
-    | Данные.Поле1,
-    | Данные.ОоооооооооооооооооооооооооооооооочеееееееееннннннннннннннннннннььььььььДлинннннннннннннннннннннннннннноооооееееПоле2,
-    | Данные.Поле3
-    |ИЗ
-    | Источник КАК Данные
-    |ГДЕ
-    | Данные.ПолеУсловия = &ООООООООООООООООООООООООООООООЧЧЧЧЧЧЧЧЧЧЧЧЧЧЧЧЕЕЕЕЕЕЕЕЕЕЕЕЕЕЕЕЕЕНННННННННННЬЬЬЬЬЬЬЬЬДДДДДДДДЛЛЛЛЛЛЛ"
-    ;
-
-    Запрос.Текст =
-        "ВЫБРАТЬ
-        | Данные.Поле1,
-        | Данные.ОоооооооооооооооооооооооооооооооочеееееееееннннннннннннннннннннььььььььДлинннннннннннннннннннннннннннноооооееееПоле2,
-        | Данные.Поле3
-        |ИЗ
-        | Источник КАК Данные
-        |ГДЕ
-        | Данные.ПолеУсловия = &ООООООООООООООООООООООООООООООЧЧЧЧЧЧЧЧЧЧЧЧЧЧЧЧЕЕЕЕЕЕЕЕЕЕЕЕЕЕЕЕЕЕНННННННННННЬЬЬЬЬЬЬЬЬДДДДДДДДЛЛЛЛЛЛЛ";
-
-
-// Длинный ОченьДлинный ОченьОченьДлинный Коооооооооооооооооооооомммммммммеееееееееееееееееееенннннтт Просто такооооййй Коммент
-А = 0;
-
-ТекстСообщения = СтроковыеФункцииКлиентСервер.ПодставитьПараметрыВСтроку(
-НСтр("ru = 'Процедуре ЗаполнитьРеквизитСпособОтображенияПодсказки не удалось обработать некоторые вопросы шаблона анкеты (пропущены): %1'"),
-ПроблемныхОбъектов);
-
-ТекстСообщения = СтроковыеФункцииКлиентСервер.ПодставитьПараметрыВСтроку(
-    Длинныыыыыыыыыыййййй.Метттттттттттттттооооооооооооооодддддддддддд(СПааааааааааааааааррррррррааааааам, Мееееетттттттррррррррраааааамммииии),
-	ПроблемныхОбъектов);
-
-Длинныыыыыыыыыыййййй.Метттттттттттттттооооооооооооооодддддддддддд(СПааааааааааааааааррррррррааааааам, Мееееетттттттррррррррраааааамммииии);
-
-Длинныыыыыыыыыыййййй.Метттттттттттттттооооооооооооооодддддддддддд(СПааааааааааааааааррррррррааааааам, Мееееетттттттррррррррраааааамммииии)
-;
-
-ТекстСообщения = НСтр("ru = 'Процедуре ЗаполнитьРеквизитСпособОтображенияПодсказки не удалось обработать некоторые вопросы шаблона анкеты (пропущены): %1'", ПроблемныхОбъектов);
-
-// Описание
-// Парамеры:
-//  Параметр1 - ТипПараметра - Описание ооооооооооооооооооооооооооооооооооооооооооооооооооооооооооооочччччччччччччччччччччччччччччччччччччччень длиннннннннннннное
-Процедура Тест(Параметр1)
-КонецПроцедуры
-
-// Описание                      длинное                                  очень                                           очень            вввввв
-// Парамеры:
-//  Параметр1 - ТипПараметра - Описание
-Процедура Тест2(Параметр1)
-КонецПроцедуры
-"#;
+    #[test]
+    fn test_line_at_threshold_is_silent() {
+        let code = sized("Маршрут = \"", 'z', "\";", 120);
+        snapshot(&code, DiagnosticsConfig::default(), expect![[r#""#]]);
+    }
 
     #[test]
     fn test_simple_long_line() {
-        let code = r#"А = "фффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффффф";"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        expect![[r#"
+        let code = sized("Маршрут = \"", 'z', "\";", 121);
+        snapshot(
+            &code,
+            DiagnosticsConfig::default(),
+            expect![[r#"
             LineLength @ 1:1..1:122
               message: Длина строки 121 превышает максимальную 120
-              severity: Information"#]]
-        .assert_eq(&format_diags(code, &diagnostics));
+              severity: Information"#]],
+        );
+    }
+
+    #[test]
+    fn test_cyrillic_length_is_counted_in_characters() {
+        // 120 two-byte letters are 240 bytes but still a line at the threshold.
+        let at = sized("Путь = \"", 'ш', "\";", 120);
+        assert!(at.len() > 120, "вход обязан быть длиннее порога в байтах");
+        let over = sized("Путь = \"", 'ш', "\";", 121);
+        let code = format!("{at}\n{over}\n");
+        snapshot(
+            &code,
+            DiagnosticsConfig::default(),
+            expect![[r#"
+            LineLength @ 2:1..2:122
+              message: Длина строки 121 превышает максимальную 120
+              severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_utf8_characters() {
-        let code = "А = \"фф\";  // Short line";
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
-    }
-
-    #[test]
-    fn test_comprehensive() {
-        let code = FIXTURE;
-        let diagnostics = check_ast_diagnostic(code, check);
-
-        expect![[r#"
-            LineLength @ 5:1..5:122
-              message: Длина строки 121 превышает максимальную 120
-              severity: Information
-            LineLength @ 6:1..6:123
-              message: Длина строки 122 превышает максимальную 120
-              severity: Information
-            LineLength @ 9:1..9:128
-              message: Длина строки 127 превышает максимальную 120
-              severity: Information
-            LineLength @ 12:1..12:137
-              message: Длина строки 136 превышает максимальную 120
-              severity: Information
-            LineLength @ 13:1..13:136
-              message: Длина строки 135 превышает максимальную 120
-              severity: Information
-            LineLength @ 37:1..37:128
-              message: Длина строки 127 превышает максимальную 120
-              severity: Information
-            LineLength @ 41:1..41:141
-              message: Длина строки 140 превышает максимальную 120
-              severity: Information
-            LineLength @ 45:1..45:144
-              message: Длина строки 143 превышает максимальную 120
-              severity: Information
-            LineLength @ 48:1..48:140
-              message: Длина строки 139 превышает максимальную 120
-              severity: Information
-            LineLength @ 50:1..50:139
-              message: Длина строки 138 превышает максимальную 120
-              severity: Information
-            LineLength @ 53:1..53:178
-              message: Длина строки 177 превышает максимальную 120
-              severity: Information
-            LineLength @ 57:1..57:163
-              message: Длина строки 162 превышает максимальную 120
-              severity: Information
-            LineLength @ 61:1..61:146
-              message: Длина строки 145 превышает максимальную 120
-              severity: Information"#]]
-        .assert_eq(&format_diags(code, &diagnostics));
+        snapshot("Ось = \"юг\"; // коротко\n", DiagnosticsConfig::default(), expect![[r#""#]]);
     }
 
     #[test]
     fn test_configured_max_length() {
-        let code = FIXTURE;
-        let mut config = DiagnosticsConfig::default();
-        config
-            .parameters
-            .insert(DiagnosticCode::LineLength, serde_json::json!({"maxLineLength": 119}));
-
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-
-        expect![[r#"
-            LineLength @ 4:1..4:121
+        let code = format!(
+            "{}\n{}\n",
+            sized("Маршрут = \"", 'z', "\";", 119),
+            sized("Маршрут = \"", 'z', "\";", 120)
+        );
+        snapshot(
+            &code,
+            with(serde_json::json!({"maxLineLength": 119})),
+            expect![[r#"
+            LineLength @ 2:1..2:121
               message: Длина строки 120 превышает максимальную 119
+              severity: Information"#]],
+        );
+    }
+
+    #[test]
+    fn test_standalone_long_comment() {
+        let code = format!(
+            "// короткая заметка\n{}\nОстановка = 0;\n",
+            sized("// Маршрут проходит через ", 'ы', " конец", 125)
+        );
+        snapshot(
+            &code,
+            DiagnosticsConfig::default(),
+            expect![[r#"
+            LineLength @ 2:1..2:126
+              message: Длина строки 125 превышает максимальную 120
+              severity: Information"#]],
+        );
+    }
+
+    fn trailing_comment_module() -> String {
+        format!(
+            "\tОстановка = Путь + 1; // коротко\n{}\n{} // и ещё комментарий\n",
+            sized("\tОстановка = Путь + 1; // ", 'э', ".", 130),
+            sized("\tОстановка = Путь + Пересадка", 'Ф', ";", 125)
+        )
+    }
+
+    #[test]
+    fn test_trailing_comments_counted_by_default() {
+        snapshot(
+            &trailing_comment_module(),
+            DiagnosticsConfig::default(),
+            expect![[r#"
+                LineLength @ 2:1..2:131
+                  message: Длина строки 130 превышает максимальную 120
+                  severity: Information
+                LineLength @ 3:1..3:147
+                  message: Длина строки 146 превышает максимальную 120
+                  severity: Information"#]],
+        );
+    }
+
+    #[test]
+    fn test_exclude_trailing_comments() {
+        snapshot(
+            &trailing_comment_module(),
+            with(serde_json::json!({"excludeTrailingComments": true})),
+            expect![[r#"
+                LineLength @ 3:1..3:126
+                  message: Длина строки 125 превышает максимальную 120
+                  severity: Information"#]],
+        );
+    }
+
+    #[test]
+    fn test_multiline_string_lines_are_exempt() {
+        let code = format!(
+            "Запрос.Текст =\n\t\"ВЫБРАТЬ\n{}\n\t|ИЗ\n{}\"\n\t;\n",
+            sized("\t|\tОстановки.", 'Ж', " КАК Поле,", 140),
+            sized("\t|\tРегистрСведений.", 'Щ', " КАК Остановки", 150)
+        );
+        snapshot(&code, DiagnosticsConfig::default(), expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_long_single_line_string_counts() {
+        let code = format!("{}\n", sized("Текст = НСтр(\"ru = 'Остановка ", 'щ', "'\");", 150));
+        snapshot(
+            &code,
+            DiagnosticsConfig::default(),
+            expect![[r#"
+            LineLength @ 1:1..1:151
+              message: Длина строки 150 превышает максимальную 120
+              severity: Information"#]],
+        );
+    }
+
+    #[test]
+    fn test_long_argument_line_of_multiline_call() {
+        let code = format!(
+            "Итог = ПостроитьМаршрут(\n{},\n\tПересадки);\n",
+            sized("\tТочки.", 'д', "()", 133)
+        );
+        snapshot(
+            &code,
+            DiagnosticsConfig::default(),
+            expect![[r#"
+            LineLength @ 2:1..2:135
+              message: Длина строки 134 превышает максимальную 120
+              severity: Information"#]],
+        );
+    }
+
+    fn described_methods() -> String {
+        format!(
+            "{}\n\n// Строит маршрут.\n{}\n// Параметры:\n//  Точки - Массив - остановки.\nПроцедура ПостроитьМаршрут(Точки)\nКонецПроцедуры\n\n// Сдвигает маршрут.\n//\n{}\nФункция Сдвиг(Шаг)\n\tВозврат Шаг;\nКонецФункции\n",
+            sized("// Свободная заметка о маршрутах ", 'ё', ".", 128),
+            sized("// Учитывает пересадки ", 'н', ".", 141),
+            sized("//  Шаг - Число - смещение ", 'ц', ".", 126)
+        )
+    }
+
+    #[test]
+    fn test_method_description_checked_by_default() {
+        snapshot(
+            &described_methods(),
+            DiagnosticsConfig::default(),
+            expect![[r#"
+            LineLength @ 1:1..1:129
+              message: Длина строки 128 превышает максимальную 120
               severity: Information
-            LineLength @ 5:1..5:122
-              message: Длина строки 121 превышает максимальную 119
+            LineLength @ 4:1..4:142
+              message: Длина строки 141 превышает максимальную 120
               severity: Information
-            LineLength @ 6:1..6:123
-              message: Длина строки 122 превышает максимальную 119
-              severity: Information
-            LineLength @ 9:1..9:128
-              message: Длина строки 127 превышает максимальную 119
-              severity: Information
-            LineLength @ 12:1..12:137
-              message: Длина строки 136 превышает максимальную 119
-              severity: Information
-            LineLength @ 13:1..13:136
-              message: Длина строки 135 превышает максимальную 119
-              severity: Information
-            LineLength @ 37:1..37:128
-              message: Длина строки 127 превышает максимальную 119
-              severity: Information
-            LineLength @ 41:1..41:141
-              message: Длина строки 140 превышает максимальную 119
-              severity: Information
-            LineLength @ 45:1..45:144
-              message: Длина строки 143 превышает максимальную 119
-              severity: Information
-            LineLength @ 48:1..48:140
-              message: Длина строки 139 превышает максимальную 119
-              severity: Information
-            LineLength @ 50:1..50:139
-              message: Длина строки 138 превышает максимальную 119
-              severity: Information
-            LineLength @ 53:1..53:178
-              message: Длина строки 177 превышает максимальную 119
-              severity: Information
-            LineLength @ 57:1..57:163
-              message: Длина строки 162 превышает максимальную 119
-              severity: Information
-            LineLength @ 61:1..61:146
-              message: Длина строки 145 превышает максимальную 119
-              severity: Information"#]]
-        .assert_eq(&format_diags(code, &diagnostics));
+            LineLength @ 12:1..12:127
+              message: Длина строки 126 превышает максимальную 120
+              severity: Information"#]],
+        );
     }
 
     #[test]
     fn test_exclude_method_description() {
-        let code = FIXTURE;
-        let mut config = DiagnosticsConfig::default();
-        config.parameters.insert(
-            DiagnosticCode::LineLength,
-            serde_json::json!({"checkMethodDescription": false}),
+        snapshot(
+            &described_methods(),
+            with(serde_json::json!({"checkMethodDescription": false})),
+            expect![[r#"
+                LineLength @ 1:1..1:129
+                  message: Длина строки 128 превышает максимальную 120
+                  severity: Information"#]],
         );
-
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-
-        expect![[r#"
-            LineLength @ 5:1..5:122
-              message: Длина строки 121 превышает максимальную 120
-              severity: Information
-            LineLength @ 6:1..6:123
-              message: Длина строки 122 превышает максимальную 120
-              severity: Information
-            LineLength @ 9:1..9:128
-              message: Длина строки 127 превышает максимальную 120
-              severity: Information
-            LineLength @ 12:1..12:137
-              message: Длина строки 136 превышает максимальную 120
-              severity: Information
-            LineLength @ 13:1..13:136
-              message: Длина строки 135 превышает максимальную 120
-              severity: Information
-            LineLength @ 37:1..37:128
-              message: Длина строки 127 превышает максимальную 120
-              severity: Information
-            LineLength @ 41:1..41:141
-              message: Длина строки 140 превышает максимальную 120
-              severity: Information
-            LineLength @ 45:1..45:144
-              message: Длина строки 143 превышает максимальную 120
-              severity: Information
-            LineLength @ 48:1..48:140
-              message: Длина строки 139 превышает максимальную 120
-              severity: Information
-            LineLength @ 50:1..50:139
-              message: Длина строки 138 превышает максимальную 120
-              severity: Information
-            LineLength @ 53:1..53:178
-              message: Длина строки 177 превышает максимальную 120
-              severity: Information"#]]
-        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     /// BOM не делает первую строку несущей код.
@@ -539,14 +505,10 @@ mod tests {
     /// первой строкой, потому что только там BOM ему соседствует.
     #[test]
     fn a_byte_order_mark_does_not_make_the_first_line_code() {
-        let long_comment = format!("// {}", "о".repeat(150));
-        let code = format!("{long_comment}\nПроцедура Тест()\nКонецПроцедуры\n");
+        let long_comment = format!("// {}", "ж".repeat(140));
+        let code = format!("{long_comment}\nФункция Пересадки()\n\tВозврат 0;\nКонецФункции\n");
 
-        let mut config = DiagnosticsConfig::default();
-        config.parameters.insert(
-            DiagnosticCode::LineLength,
-            serde_json::json!({"excludeTrailingComments": true}),
-        );
+        let config = with(serde_json::json!({"excludeTrailingComments": true}));
 
         let without = check_ast_diagnostic_with_config(&code, config.clone(), check);
         assert_eq!(without.len(), 1, "вход обязан давать находку, иначе сверка пуста");
@@ -556,53 +518,8 @@ mod tests {
     }
 
     #[test]
-    fn test_exclude_trailing_comments() {
-        let code = FIXTURE;
-        let mut config = DiagnosticsConfig::default();
-        config.parameters.insert(
-            DiagnosticCode::LineLength,
-            serde_json::json!({"excludeTrailingComments": true}),
-        );
-
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
-
-        expect![[r#"
-            LineLength @ 5:1..5:122
-              message: Длина строки 121 превышает максимальную 120
-              severity: Information
-            LineLength @ 6:1..6:123
-              message: Длина строки 122 превышает максимальную 120
-              severity: Information
-            LineLength @ 9:1..9:128
-              message: Длина строки 127 превышает максимальную 120
-              severity: Information
-            LineLength @ 13:1..13:125
-              message: Длина строки 124 превышает максимальную 120
-              severity: Information
-            LineLength @ 37:1..37:128
-              message: Длина строки 127 превышает максимальную 120
-              severity: Information
-            LineLength @ 41:1..41:141
-              message: Длина строки 140 превышает максимальную 120
-              severity: Information
-            LineLength @ 45:1..45:144
-              message: Длина строки 143 превышает максимальную 120
-              severity: Information
-            LineLength @ 48:1..48:140
-              message: Длина строки 139 превышает максимальную 120
-              severity: Information
-            LineLength @ 50:1..50:139
-              message: Длина строки 138 превышает максимальную 120
-              severity: Information
-            LineLength @ 53:1..53:178
-              message: Длина строки 177 превышает максимальную 120
-              severity: Information
-            LineLength @ 57:1..57:163
-              message: Длина строки 162 превышает максимальную 120
-              severity: Information
-            LineLength @ 61:1..61:146
-              message: Длина строки 145 превышает максимальную 120
-              severity: Information"#]]
-        .assert_eq(&format_diags(code, &diagnostics));
+    fn test_default_config_reports_through_the_plain_entry() {
+        let code = sized("Маршрут = \"", 'z', "\";", 121);
+        assert_eq!(check_ast_diagnostic(&code, check).len(), 1);
     }
 }

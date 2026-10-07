@@ -191,13 +191,13 @@ impl Input {
 }
 
 const MODULE_FIXTURE: &str = include_str!("fixtures/Module.bsl");
-const QUERY_FIXTURE: &str = include_str!("fixtures/user_query_with_highlighting_issue.sdbl");
+const QUERY_FIXTURE: &str = include_str!("fixtures/sdbl_independent_package.sdbl");
 
 /// Числа сняты замером при авторстве и меняются только вместе с фикстурой.
 /// Они и есть положительный контроль корпуса: преобразование, тихо переставшее
 /// заменять, ломает их немедленно.
 const MODULE_FIXTURE_REPLACEMENTS: usize = 12_077;
-const QUERY_FIXTURE_REPLACEMENTS: usize = 131;
+const QUERY_FIXTURE_REPLACEMENTS: usize = 36;
 
 /// Места, объявленные строчно-чувствительными. Замена перевода строки здесь
 /// обязана менять разбор.

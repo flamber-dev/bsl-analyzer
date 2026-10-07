@@ -450,19 +450,31 @@ fn check_text(
 mod tests {
     use crate::test_utils::check_hir_diagnostic_with_config;
     use crate::{DiagnosticCode, DiagnosticsConfig};
+    use expect_test::expect;
 
-    const FIXTURE: &str = r#"Функция Тест()
-    Сообщить("Атмена"); // Срабатывание здесь
-    Возврат;
+    const CLEAN: &str = r#"Функция ОстатокТеста(Замес)
+	Сообщить("Тесто готово");
+	Возврат Замес.Количество;
 КонецФункции
 
-Функция ВаринатыОплаты() // срабатывание здесь
-    ТипЗнч(Ссылка);      // нет срабатывания
-    Возврат;
-    Сообщить("ыть");      // срабатывание здесь
-    ДеньНедели = Формат(ДатаКолонки, "ДФ=ддд"); // Нет срабатывания. Форматная строка
-    ЗапроситьДанныеОКВЭДФССВТранзакции = Истина; // Нет срабатывания. Аббревиатура
-КонецФункции"#;
+Процедура ЗаполнитьЦены()
+	Цена = Формат(ДатаВыпечки, "ДФ=дд.ММ.гг");
+	ЗагрузитьДанныеЕГАИСОстатков = Ложь;
+	ТипЗнч(Цена);
+КонецПроцедуры
+"#;
+
+    const FIXTURE: &str = r#"Функция ОстатокТеста(Замес)
+	Сообщить("Тесто гатово");
+	Возврат Замес.Количество;
+КонецФункции
+
+Процедура ЗаполнитьЦеены()
+	Цена = Формат(ДатаВыпечки, "ДФ=дд.ММ.гг");
+	ЗагрузитьДанныеЕГАИСОстатков = Ложь;
+	Сообщить("zqx");
+КонецПроцедуры
+"#;
 
     fn config_with_typo_enabled() -> DiagnosticsConfig {
         let mut config = DiagnosticsConfig::default();
@@ -470,77 +482,99 @@ mod tests {
         config
     }
 
+    /// The distinct words reported as typos, one per line, sorted.
+    ///
+    /// Words, not ranges: today each word is reported several times and its range is
+    /// shifted by the opening quote of the literal (recorded as a finding in the
+    /// attestation), so a range snapshot would pin that defect instead of the rule.
+    fn snapshot(code: &str, config: DiagnosticsConfig, expected: expect_test::Expect) {
+        let all = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let mut words: Vec<_> =
+            all.into_iter().filter(|d| d.code == DiagnosticCode::Typo).map(|d| d.message).collect();
+        words.sort();
+        words.dedup();
+        expected.assert_eq(&words.join("\n"));
+    }
+
+    #[test]
+    fn test_disabled_by_default() {
+        snapshot(FIXTURE, DiagnosticsConfig::default(), expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_dictionary_words_are_silent() {
+        snapshot(CLEAN, config_with_typo_enabled(), expect![[r#""#]]);
+    }
+
     #[test]
     fn test_typo_basic() {
-        let code = FIXTURE;
-
-        let config = config_with_typo_enabled();
-        let all = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
-        let diagnostics: Vec<_> = all.iter().filter(|d| d.code == DiagnosticCode::Typo).collect();
-
-        assert!(diagnostics.len() >= 3, "Should detect at least 3 typos (Атмена, Варинаты, ыть)");
+        snapshot(
+            FIXTURE,
+            config_with_typo_enabled(),
+            expect![[r#"
+            Возможная опечатка в "zqx"
+            Возможная опечатка в "Цеены"
+            Возможная опечатка в "гатово""#]],
+        );
     }
 
     #[test]
     fn test_typo_with_min_word_length() {
-        let code = FIXTURE;
-
         let mut config = config_with_typo_enabled();
-        config.parameters.insert(
-            DiagnosticCode::Typo,
-            serde_json::json!({
-                "minWordLength": 4
-            }),
-        );
-
-        let all = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
-        let diagnostics: Vec<_> = all.iter().filter(|d| d.code == DiagnosticCode::Typo).collect();
-
-        assert!(
-            diagnostics.len() >= 2,
-            "Should detect at least 2 typos (minWordLength=4, 'ыть' excluded)"
+        config.parameters.insert(DiagnosticCode::Typo, serde_json::json!({"minWordLength": 4}));
+        snapshot(
+            FIXTURE,
+            config,
+            expect![[r#"
+            Возможная опечатка в "Цеены"
+            Возможная опечатка в "гатово""#]],
         );
     }
 
     #[test]
     fn test_typo_with_user_words_to_ignore() {
-        let code = FIXTURE;
-
         let mut config = config_with_typo_enabled();
-        config.parameters.insert(
-            DiagnosticCode::Typo,
-            serde_json::json!({
-                "userWordsToIgnore": "Варинаты"
-            }),
+        config
+            .parameters
+            .insert(DiagnosticCode::Typo, serde_json::json!({"userWordsToIgnore": "Цеены"}));
+        snapshot(
+            FIXTURE,
+            config,
+            expect![[r#"
+            Возможная опечатка в "zqx"
+            Возможная опечатка в "гатово""#]],
         );
-
-        let all = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
-        let diagnostics: Vec<_> = all.iter().filter(|d| d.code == DiagnosticCode::Typo).collect();
-
-        let has_varinaty = diagnostics.iter().any(|d| d.message.contains("Варинаты"));
-        assert!(!has_varinaty, "Should NOT detect 'Варинаты' (in user ignore list)");
     }
 
     #[test]
     fn test_typo_case_insensitive() {
-        let code = FIXTURE;
-
         let mut config = config_with_typo_enabled();
         config.parameters.insert(
             DiagnosticCode::Typo,
-            serde_json::json!({
-                "userWordsToIgnore": "ваРинаты",
-                "caseInsensitive": true
-            }),
+            serde_json::json!({"userWordsToIgnore": "цЕЕНЫ", "caseInsensitive": true}),
         );
+        snapshot(
+            FIXTURE,
+            config,
+            expect![[r#"
+            Возможная опечатка в "zqx"
+            Возможная опечатка в "гатово""#]],
+        );
+    }
 
-        let all = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
-        let diagnostics: Vec<_> = all.iter().filter(|d| d.code == DiagnosticCode::Typo).collect();
-
-        let has_varinaty = diagnostics.iter().any(|d| d.message.contains("Варинаты"));
-        assert!(
-            !has_varinaty,
-            "Should NOT detect 'Варинаты' (case-insensitive match with 'ваРинаты')"
+    #[test]
+    fn test_ignore_list_is_case_sensitive_by_default() {
+        let mut config = config_with_typo_enabled();
+        config
+            .parameters
+            .insert(DiagnosticCode::Typo, serde_json::json!({"userWordsToIgnore": "цЕЕНЫ"}));
+        snapshot(
+            FIXTURE,
+            config,
+            expect![[r#"
+            Возможная опечатка в "zqx"
+            Возможная опечатка в "Цеены"
+            Возможная опечатка в "гатово""#]],
         );
     }
 
@@ -550,24 +584,22 @@ mod tests {
         let dictionaries = get_dictionaries();
 
         let should_be_valid = [
-            "Функция",
-            "Процедура",
-            "Возврат",
-            "Если",
-            "Тогда",
-            "Результат",
-            "Значение",
-            "Параметр",
-            "Строка",
-            "Число",
-            "Возвращает",
-            "Получает",
-            "Устанавливает",
-            "Проверяет",
-            "текущее",
-            "новый",
-            "старый",
-            "первый",
+            "Пока",
+            "Цикл",
+            "Количество",
+            "Сумма",
+            "Дата",
+            "Ошибка",
+            "Сообщение",
+            "Создает",
+            "Удаляет",
+            "Записывает",
+            "последний",
+            "следующий",
+            "пустой",
+            "общий",
+            "Value",
+            "Count",
         ];
 
         for word in should_be_valid {
@@ -577,5 +609,6 @@ mod tests {
                 word
             );
         }
+        assert!(!is_valid_word("Цеены", &dictionaries), "мерка обязана отвергать опечатку");
     }
 }

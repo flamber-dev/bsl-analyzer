@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xs="http://www.w3.org/2001/XMLSchema" version="2.20">
+  <Form uuid="30000000-0000-0000-0000-00000000030b">
+    <Properties>
+      <Name>формаёж</Name>
+      <ObjectBelonging>Adopted</ObjectBelonging><ExtendedConfigurationObject>30000000-0000-0000-0000-00000000030a</ExtendedConfigurationObject><FormType>Managed</FormType>
+    </Properties>
+  </Form>
+</MetaDataObject>

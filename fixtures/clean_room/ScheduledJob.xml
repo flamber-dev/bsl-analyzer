@@ -1,0 +1,10 @@
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+  <ScheduledJob uuid="15300000-0000-4000-8000-000000000004">
+    <Properties>
+      <Name>Обновление</Name>
+      <MethodName>CommonModule.ЁжModule.Обработать</MethodName>
+      <Use>true</Use>
+      <Predefined>true</Predefined>
+    </Properties>
+  </ScheduledJob>
+</MetaDataObject>

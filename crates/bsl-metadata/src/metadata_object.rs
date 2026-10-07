@@ -826,30 +826,6 @@ impl MetadataObject {
         }
     }
 
-    pub fn with_children(
-        mdo_type: MdoType,
-        name: impl Into<String>,
-        children: Vec<MetadataObject>,
-    ) -> Self {
-        Self {
-            mdo_type,
-            name: name.into(),
-            name_en: None,
-            attributes: Vec::new(),
-            tabular_sections: Vec::new(),
-            children,
-            enum_values: Vec::new(),
-            predefined_items: Vec::new(),
-            check_unique: false,
-            code_series: crate::enums::CodeSeries::default(),
-            constant_type: None,
-            register_records: Vec::new(),
-            uuid: None,
-            object_belonging: crate::ObjectBelonging::Own,
-            extended_configuration_object: None,
-        }
-    }
-
     pub fn with_details(
         mdo_type: MdoType,
         name: impl Into<String>,
@@ -1012,10 +988,6 @@ impl MetadataObject {
 
     pub fn find_child(&self, name: &str) -> Option<&MetadataObject> {
         self.children.iter().find(|child| stdx::case::eq_ignore_case(&child.name, name))
-    }
-
-    pub fn has_child(&self, name: &str) -> bool {
-        self.find_child(name).is_some()
     }
 
     pub fn find_attribute(&self, name: &str) -> Option<&Attribute> {

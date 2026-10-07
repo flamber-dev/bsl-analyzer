@@ -2649,11 +2649,18 @@ mod tests {
                 delivered
             });
             assert!(arrived, "the hub delivered {target:?} above seq {floor}; it saw {seen:?}");
-            // Only now does an empty sink view mean the sink is DONE with that delivery:
-            // it acknowledges after nudging, so the entry stands in its batch until then.
-            assert!(eventually(Duration::from_secs(15), || {
-                hub.materialize(cursor).entries.is_empty()
-            }));
+            // Only now does the delivery's absence from the sink view mean the sink is DONE with
+            // it: it acknowledges after nudging, so the entry stands in its batch until then.
+            // The view as a whole cannot be the signal: the sink's own lease restamps and graph
+            // cache writes land inside this tree, and while the forced due debt keeps it
+            // rescanning with no backoff every pass feeds the next one, so a view with nothing
+            // in it is a gap the loop may never leave open.
+            assert!(
+                eventually(Duration::from_secs(15), || {
+                    hub.materialize(cursor).entries.iter().all(|entry| entry.canonical != target)
+                }),
+                "the sink never acknowledged {target:?}"
+            );
         };
         let write_and_wait =
             |path: &std::path::Path, text: &str| settle(path, &|| fs::write(path, text).unwrap());

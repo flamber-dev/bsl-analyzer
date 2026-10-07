@@ -1,9 +1,6 @@
-use std::collections::HashSet;
-
 use crate::diagnostics::SdblDiagnostic;
 use crate::hir::JoinHir;
 use crate::hir::TableRef;
-use crate::standard_fields::virtual_table_type;
 use syntax::ast::AstNode;
 
 use super::context::LoweringContext;
@@ -107,13 +104,7 @@ impl LoweringContext<'_> {
         };
 
         if table.is_virtual_table {
-            if let Some(vt_type) = table.parts.last().and_then(|p| virtual_table_type(p)) {
-                self.diagnostics.push(SdblDiagnostic::JoinWithVirtualTable {
-                    table_name: table.full_name.clone(),
-                    virtual_table_type: vt_type.to_string(),
-                    range: table.range,
-                });
-            }
+            self.report_virtual_table_join(&table.parts, table.range);
         }
 
         if let Some(alias) = self.scope.add_table(table.clone()) {
@@ -133,8 +124,8 @@ impl LoweringContext<'_> {
             )
         });
 
-        if let Some(ref expr_node) = condition_node {
-            self.check_join_or_with_multiple_fields(expr_node);
+        if let Some(condition) = &condition_node {
+            self.report_or_in_join_condition(condition);
         }
 
         let condition = condition_node.map(|expr| self.lower_expr(&expr));
@@ -142,129 +133,54 @@ impl LoweringContext<'_> {
         JoinHir { join_type, table, condition, range: join.syntax().text_range() }
     }
 
-    fn check_join_or_with_multiple_fields(&mut self, expr_node: &syntax::SyntaxNode) {
-        use syntax::SyntaxToken;
-
-        let or_tokens: Vec<SyntaxToken> = expr_node
-            .descendants_with_tokens()
-            .filter_map(|el| el.into_token())
-            .filter(|token| token.kind() == syntax::SyntaxKind::KW_OR)
-            .collect();
-
-        for or_token in or_tokens {
-            let containing_expr = self.find_containing_logical_expr_for_join(&or_token);
-
-            if let Some(expr) = containing_expr {
-                let field_names = self.extract_field_names_from_expr(&expr);
-
-                if field_names.len() > 1 {
-                    self.diagnostics
-                        .push(SdblDiagnostic::LogicalOrInJoin { range: or_token.text_range() });
-                }
-            }
-        }
-    }
-
-    fn find_containing_logical_expr_for_join(
-        &self,
-        or_token: &syntax::SyntaxToken,
-    ) -> Option<syntax::SyntaxNode> {
-        use syntax::SyntaxKind;
-
-        let mut current = or_token.parent()?;
-
-        loop {
-            match current.kind() {
-                SyntaxKind::SDBL_LOGICAL_OR_EXPR
-                | SyntaxKind::SDBL_LOGICAL_AND_EXPR
-                | SyntaxKind::SDBL_PAREN_EXPR => {
-                    return Some(current);
-                }
-                SyntaxKind::SDBL_JOIN_CLAUSE => {
-                    return Some(current);
-                }
-                _ => {
-                    current = current.parent()?;
-                }
-            }
-        }
-    }
-
-    fn extract_field_names_from_expr(&self, expr: &syntax::SyntaxNode) -> HashSet<String> {
-        use syntax::{SyntaxKind, SyntaxToken};
-
-        let mut fields = HashSet::new();
-
-        let tokens: Vec<SyntaxToken> =
-            expr.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
-        let mut i = 0;
-        while i < tokens.len() {
-            let token = &tokens[i];
-
-            if token.kind().is_name_token()
-                && i + 2 < tokens.len()
-                && tokens[i + 1].kind() == SyntaxKind::DOT
-                && tokens[i + 2].kind().is_name_token()
-            {
-                let mut parts: Vec<String> = vec![token.text().to_string()];
-                parts.push(tokens[i + 2].text().to_string());
-                i += 3;
-
-                while i + 1 < tokens.len()
-                    && tokens[i].kind() == SyntaxKind::DOT
-                    && tokens[i + 1].kind().is_name_token()
-                {
-                    parts.push(tokens[i + 1].text().to_string());
-                    i += 2;
-                }
-
-                if !parts.iter().any(|p| self.is_sql_keyword(p)) {
-                    fields.insert(parts.join("."));
-                }
-
+    /// Reports a disjunction in a join condition unless it can be rewritten as `В (...)`.
+    ///
+    /// The join can use an index only for conditions joined by `И`; a disjunction over
+    /// different subjects defeats it. A disjunction over one subject is the exception the
+    /// query standard allows, because it is equivalent to a membership test. Nested queries
+    /// inside the condition are part of the condition, so their disjunctions are judged too.
+    fn report_or_in_join_condition(&mut self, condition: &syntax::SyntaxNode) {
+        for node in condition.descendants() {
+            if node.kind() != syntax::SyntaxKind::SDBL_LOGICAL_OR_EXPR {
                 continue;
             }
+            let or_tokens: Vec<_> = node
+                .children_with_tokens()
+                .filter_map(|element| element.into_token())
+                .filter(|token| token.kind() == syntax::SyntaxKind::KW_OR)
+                .collect();
+            if or_tokens.is_empty() || disjunction_has_single_subject(&node) {
+                continue;
+            }
+            for token in or_tokens {
+                self.diagnostics
+                    .push(SdblDiagnostic::LogicalOrInJoin { range: token.text_range() });
+            }
+        }
+    }
+}
 
-            if token.kind() == SyntaxKind::IDENT {
-                let text = token.text();
-                if !self.is_sql_keyword(text) {
-                    fields.insert(text.to_string());
+/// A disjunction has a single subject when every operand constrains the same column
+/// spelling and none of them computes the subject through a function, a pattern, a range
+/// or a choice: only then can the platform turn it into one index lookup by a list.
+fn disjunction_has_single_subject(or_node: &syntax::SyntaxNode) -> bool {
+    let mut subject: Option<String> = None;
+    for node in or_node.descendants() {
+        match node.kind() {
+            syntax::SyntaxKind::SDBL_FUNCTION_CALL
+            | syntax::SyntaxKind::SDBL_LIKE_EXPR
+            | syntax::SyntaxKind::SDBL_BETWEEN_EXPR
+            | syntax::SyntaxKind::SDBL_CASE_EXPR => return false,
+            syntax::SyntaxKind::SDBL_COLUMN_REF => {
+                let spelling = node.text().to_string();
+                match &subject {
+                    Some(known) if *known != spelling => return false,
+                    Some(_) => {}
+                    None => subject = Some(spelling),
                 }
             }
-
-            i += 1;
+            _ => {}
         }
-
-        fields
     }
-
-    fn is_sql_keyword(&self, text: &str) -> bool {
-        matches!(
-            text.to_uppercase().as_str(),
-            "AND"
-                | "OR"
-                | "NOT"
-                | "IS"
-                | "NULL"
-                | "TRUE"
-                | "FALSE"
-                | "И"
-                | "ИЛИ"
-                | "НЕ"
-                | "ЕСТЬ"
-                | "ИСТИНА"
-                | "ЛОЖЬ"
-                | "SELECT"
-                | "FROM"
-                | "WHERE"
-                | "JOIN"
-                | "ON"
-                | "ВЫБРАТЬ"
-                | "ИЗ"
-                | "ГДЕ"
-                | "СОЕДИНЕНИЕ"
-                | "ПО"
-        )
-    }
+    true
 }

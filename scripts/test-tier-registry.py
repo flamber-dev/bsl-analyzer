@@ -26,6 +26,58 @@ PURPOSES = {
     "vcs": ("Git diff", "analysis scoping"),
 }
 ADDITIONS = set(PURPOSES)
+MOVED_TO_A = {"sdbl-hir", "parser", "lexer"}
+VERIFIED = "d50f2fd8"
+DIFF_BASE = "c6d140ee"
+RECOVERY_301 = "crates/parser/src/grammar/sdbl/expressions.rs"
+GUARDED_PREFIXES = ("crates/parser/", "crates/lexer/", "crates/ide-diagnostics/")
+MOVED_MANIFESTS = ("crates/parser/Cargo.toml", "crates/lexer/Cargo.toml")
+DIFF_ALLOWLIST = (
+    "crates/sdbl-hir/**",
+    RECOVERY_301,
+    "crates/*/tests/**",
+    "docs/legal/**",
+    "docs/plans/**",
+    "LICENSING.md",
+    "NOTICE",
+    "scripts/test-tier-registry.py",
+    "Cargo.toml",
+    "crates/*/Cargo.toml",
+)
+
+
+def path_matches(path, pattern):
+    """Segment-exact match: `*` is exactly one segment, a trailing `**` is one or more."""
+    parts, pats = path.split("/"), pattern.split("/")
+    if pats[-1] == "**":
+        pats = pats[:-1]
+        if len(parts) <= len(pats):
+            return False
+        parts = parts[: len(pats)]
+    if len(parts) != len(pats):
+        return False
+    return all(pat == "*" or pat == part for pat, part in zip(pats, parts))
+
+
+def name_status_paths(output):
+    """Every path named by `git diff --name-status`, both sides of a rename or copy."""
+    paths = []
+    for line in output.splitlines():
+        fields = line.split("\t")
+        paths.extend(fields[1:])
+    return paths
+
+
+def diff_violations(changed):
+    """Paths outside the allowlist; the guarded crates admit only the #301 recovery file and the moved manifests."""
+    bad = []
+    for path in changed:
+        if path.startswith(GUARDED_PREFIXES):
+            if path != RECOVERY_301 and path not in MOVED_MANIFESTS:
+                bad.append(path)
+        elif not any(path_matches(path, pattern) for pattern in DIFF_ALLOWLIST):
+            bad.append(path)
+    return bad
 AUDIT_PATH = "docs/legal/tier-a-provenance-audit.md"
 STANDARD = "crates/hir-def/src/module_structure/standard.rs"
 OLD_STANDARD = "crates/ide-diagnostics/src/utils/standard_regions.rs"
@@ -175,14 +227,15 @@ class TierRegistryTests(unittest.TestCase):
         for name in names(self.licensing, "A"):
             with self.subTest(crate=name):
                 self.assertEqual(marks[name], closure(self.graph, name) & tier_b)
-        self.assertEqual(marks["syntax"], {"lexer"})
-        self.assertNotIn("parser", marks["syntax"], "syntax's dev dependency must not enter the closure")
+        self.assertEqual(marks["syntax"], set())
+        self.assertEqual(marks["ide"], {"ide-diagnostics"})
+        self.assertNotIn("parser", closure(self.graph, "syntax"), "syntax's dev dependency must not enter the closure")
         print("E1 Tier B dependency column checked for", len(marks), "crates")
 
     def test_I2_six_rows_license_inheritance_and_existing_tiers(self):
         a, b = names(self.licensing, "A"), names(self.licensing, "B")
-        self.assertEqual(Counter(a), Counter(names(self.baseline, "A")) + Counter(ADDITIONS))
-        self.assertEqual(Counter(b), Counter(names(self.baseline, "B")))
+        self.assertEqual(Counter(a), Counter(names(self.baseline, "A")) + Counter(ADDITIONS) + Counter(MOVED_TO_A))
+        self.assertEqual(Counter(b), Counter(names(self.baseline, "B")) - Counter(MOVED_TO_A))
         purposes = {row[0].strip().strip("`"): row[1] for row in rows(self.licensing, "A")}
         for name in ADDITIONS:
             with self.subTest(crate=name):
@@ -194,6 +247,14 @@ class TierRegistryTests(unittest.TestCase):
                 self.assertIs(manifest["package"]["license"]["workspace"], True)
                 self.assertEqual(self.packages[name]["license"], "MIT OR Apache-2.0")
                 self.assertNotIn(name, names(self.baseline, "A"))
+        for name in MOVED_TO_A:
+            with self.subTest(moved=name):
+                self.assertEqual(a.count(name), 1)
+                self.assertNotIn(name, b)
+                self.assertIn(name, names(self.baseline, "B"))
+                manifest = tomllib.loads(Path(self.packages[name]["manifest_path"]).read_text())
+                self.assertIs(manifest["package"]["license"]["workspace"], True)
+                self.assertEqual(self.packages[name]["license"], "MIT OR Apache-2.0")
         print("E1 packages/A/B/missing:", len(self.packages), len(a), len(b), sorted(set(self.packages) - set(a + b)))
 
     def test_I3_I5_audit_sections_and_historical_boundary(self):
@@ -284,9 +345,9 @@ class TierRegistryTests(unittest.TestCase):
         self.assertIn(AUDIT_PATH, architecture)
         print("I5 NOTICE:", sorted(entries))
 
-    def test_I6_only_repository_changed_in_product_and_ci_files(self):
+    def test_I6a_historical_154_only_repository_changed_in_product_and_ci_files(self):
         paths = ["crates", "xtask", "Cargo.toml", "Cargo.lock", ".github", ".gitlab-ci.yml"]
-        changed = command("git", "diff", "--name-only", BASE, "--", *paths).splitlines()
+        changed = command("git", "diff", "--name-only", BASE, VERIFIED, "--", *paths).splitlines()
         untracked = command("git", "ls-files", "--others", "--exclude-standard", "--", *paths).splitlines()
         self.assertEqual(untracked, [], "untracked product/CI files must not escape the comparison")
         self.assertEqual(changed, ["crates/hir-ty/Cargo.toml"])
@@ -295,6 +356,122 @@ class TierRegistryTests(unittest.TestCase):
         self.assertEqual(after, before.replace('repository = "https://github.com/1c-syntax/bsl-analyzer"', "repository.workspace = true"))
         self.assertEqual((ROOT / STANDARD).read_text(), historical(STANDARD))
         print("I6 product/CI diff:", changed, "; only repository; standard.rs byte-identical")
+
+    def test_I6_current_diff_against_develop_stays_inside_allowlist(self):
+        command("git", "merge-base", "--is-ancestor", DIFF_BASE, "origin/develop")
+        command("git", "merge-base", "--is-ancestor", DIFF_BASE, "HEAD")
+        status = command("git", "diff", "--name-status", "-M", "-C", DIFF_BASE, "--")
+        changed = name_status_paths(status)
+        changed += command("git", "ls-files", "--others", "--exclude-standard").splitlines()
+        self.assertEqual(diff_violations(sorted(set(changed))), [], "changes outside the allowlist")
+        print("I6 diff vs", DIFF_BASE, ":", len(set(changed)), "paths, all allowlisted")
+
+    def test_I6_rename_names_both_paths(self):
+        paths = name_status_paths("R100\tcrates/lexer/src/lib.rs\tcrates/sdbl-hir/src/x.rs\nM\tNOTICE\nC075\tcrates/parser/src/a.rs\tdocs/legal/a.md")
+        self.assertEqual(paths, [
+            "crates/lexer/src/lib.rs", "crates/sdbl-hir/src/x.rs", "NOTICE",
+            "crates/parser/src/a.rs", "docs/legal/a.md",
+        ])
+        self.assertEqual(diff_violations(paths), ["crates/lexer/src/lib.rs", "crates/parser/src/a.rs"])
+
+    def test_I6_allowlist_rejects_and_accepts_known_cases(self):
+        self.assertEqual(diff_violations([
+            "crates/sdbl-hir/src/lib.rs", "crates/sdbl-hir/Cargo.toml", "crates/ide/tests/x.rs",
+            "docs/legal/a.md", "docs/plans/p.md", "LICENSING.md", "NOTICE", "Cargo.toml",
+            "crates/hir-ty/Cargo.toml", RECOVERY_301, "crates/ide/tests/a/b/c.rs", "crates/sdbl-hir/tests/f.rs",
+            "crates/parser/Cargo.toml", "crates/lexer/Cargo.toml",
+        ]), [])
+        rejected = [
+            "crates/lexer/src/lib.rs", "crates/ide-diagnostics/src/lib.rs", "crates/parser/src/lib.rs",
+            "crates/parser/tests/t.rs", "crates/parser/src/Cargo.toml", "crates/ide-diagnostics/Cargo.toml", "crates/hir-ty/src/lib.rs",
+            ".gitlab-ci.yml", "Cargo.lock", "docs/other.md",
+            "crates/hir-ty/src/Cargo.toml", "crates/hir-ty/Cargo.toml/x", "crates/a/b/Cargo.toml",
+            "crates/lexer/tests/a/b.rs", "crates/parser/tests/a/b/c.rs", "crates/ide/tests", "crates/ide/src/tests/x.rs",
+            "docs/legal", "docs/legalx/a.md", "crates/sdbl-hir", "crates/sdbl-hirx/a.rs", "Cargo.toml/x",
+        ]
+        self.assertEqual(diff_violations(rejected), rejected)
+
+    def test_I7_current_manifests_change_only_allowlisted_license_and_repository_fields(self):
+        default_license, default_repository = "MIT OR Apache-2.0", "https://github.com/itrous/bsl-analyzer"
+        allowed = {
+            ("crates/hir-ty/Cargo.toml", "package.repository"): ("https://github.com/1c-syntax/bsl-analyzer", {"workspace": True}),
+            ("crates/sdbl-hir/Cargo.toml", "package.license"): ("LGPL-3.0-or-later", {"workspace": True}),
+            ("crates/parser/Cargo.toml", "package.license"): ("LGPL-3.0-or-later", {"workspace": True}),
+            ("crates/lexer/Cargo.toml", "package.license"): ("LGPL-3.0-or-later", {"workspace": True}),
+        }
+
+        def fields(text):
+            if text is None:
+                return None
+            data = tomllib.loads(text)
+            result = {}
+            for prefix, node in (("", data), ("workspace.", data.get("workspace", {}))):
+                for section_name in ("dependencies", "dev-dependencies", "build-dependencies"):
+                    if section_name in node:
+                        result[f"{prefix}{section_name}"] = node[section_name]
+            for target, node in data.get("target", {}).items():
+                for section_name in ("dependencies", "dev-dependencies", "build-dependencies"):
+                    if section_name in node:
+                        result[f"target.{target}.{section_name}"] = node[section_name]
+            for table in ("package", "workspace.package"):
+                node = data
+                for part in table.split("."):
+                    node = node.get(part, {})
+                for field in ("license", "repository"):
+                    if field in node:
+                        result[f"{table}.{field}"] = node[field]
+            return result
+
+        def at_base(path):
+            try:
+                return historical(path)
+            except subprocess.CalledProcessError:
+                return None
+
+        current = set(command("git", "ls-files", "--", "Cargo.toml", "*/Cargo.toml").split())
+        current |= set(command("git", "ls-files", "--others", "--exclude-standard", "--", "Cargo.toml", "*/Cargo.toml").split())
+        base = set(command("git", "ls-tree", "-r", "--name-only", BASE).split())
+        base = {path for path in base if path == "Cargo.toml" or path.endswith("/Cargo.toml")}
+        seen = set()
+        for path in sorted(current | base):
+            before = fields(at_base(path))
+            after = fields((ROOT / path).read_text()) if path in current else None
+            with self.subTest(manifest=path):
+                if after is None:
+                    self.fail("manifest present at base was removed")
+                if before is None:
+                    for field, value in after.items():
+                        if not field.endswith(("license", "repository")):
+                            self.fail(f"new manifest {path} declares {field}: its tier cannot be verified")
+                        self.assertIn(
+                            value,
+                            ({"workspace": True}, default_license if field.endswith("license") else default_repository),
+                            f"new manifest {path}: {field}",
+                        )
+                    self.assertTrue(
+                        after.get("package.license") == {"workspace": True}
+                        or after.get("package.license") == default_license,
+                        f"new manifest {path} declares no default-tier license",
+                    )
+                    continue
+                for field in sorted(set(before) | set(after)):
+                    if before.get(field) == after.get(field):
+                        continue
+                    key = (path, field)
+                    self.assertIn(key, allowed, f"unlisted change of {field} (dependencies must equal the base)")
+                    self.assertEqual((before.get(field), after.get(field)), allowed[key])
+                    seen.add(key)
+        self.assertEqual(seen, set(allowed), "an allowlisted change is not present")
+        for moved in ("parser", "lexer"):
+            path = f"crates/{moved}/Cargo.toml"
+            before, after = tomllib.loads(historical(path)), tomllib.loads((ROOT / path).read_text())
+            self.assertEqual(before["package"].pop("license"), "LGPL-3.0-or-later")
+            self.assertEqual(after["package"].pop("license"), {"workspace": True})
+            self.assertEqual(after, before, f"{path} may differ from the base only in package.license")
+        for moved in ("sdbl-hir", "parser", "lexer"):
+            self.assertEqual(fields((ROOT / f"crates/{moved}/Cargo.toml").read_text())["package.license"], {"workspace": True})
+        self.assertEqual(fields((ROOT / "Cargo.toml").read_text())["workspace.package.license"], default_license)
+        print("I7 manifest license/repository changes:", sorted(seen))
 
 
 if __name__ == "__main__":

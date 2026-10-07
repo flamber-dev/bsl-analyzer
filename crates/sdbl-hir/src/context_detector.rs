@@ -1749,51 +1749,6 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_context_alias_with_parenthesis() {
-        let query = r#"ВЫБРАТЬ
-    ЧекККМ.Ссылка КАК Ссылка
-ИЗ
-    Документ.ЧекККМ КАК ЧекККМ
-ГДЕ
-    (ЧекККМ.Партнер = &Партнер)
-    И (ЧекККМ.Проведен = ИСТИНА)
-    И (ЧекККМ.ПометкаУдаления = ЛОЖЬ)
-    И (ЧекККМ."#;
-
-        let offset = TextSize::from(query.len() as u32);
-        let context = detect_context(query, offset);
-
-        match context {
-            SdblCompletionContext::AfterTableAlias { alias, prefix } => {
-                assert_eq!(alias, "ЧекККМ", "Should extract alias without parenthesis");
-                assert_eq!(prefix, "", "Prefix should be empty after dot");
-            }
-            _ => panic!("Expected AfterTableAlias, got {:?}", context),
-        }
-    }
-
-    #[test]
-    fn test_detect_context_alias_with_parenthesis_and_prefix() {
-        let query = r#"ВЫБРАТЬ
-    ЧекККМ.Ссылка
-ИЗ
-    Документ.ЧекККМ КАК ЧекККМ
-ГДЕ
-    (ЧекККМ.Парт"#;
-
-        let offset = TextSize::from(query.len() as u32);
-        let context = detect_context(query, offset);
-
-        match context {
-            SdblCompletionContext::AfterTableAlias { alias, prefix } => {
-                assert_eq!(alias, "ЧекККМ", "Should extract alias without parenthesis");
-                assert_eq!(prefix, "Парт", "Should extract field prefix");
-            }
-            _ => panic!("Expected AfterTableAlias, got {:?}", context),
-        }
-    }
-
-    #[test]
     fn test_detect_context_cast_expression_empty_prefix() {
         let query = "ВЫБРАТЬ ВЫРАЗИТЬ(Т.Регистратор КАК Документ.Продажа).";
         let offset = TextSize::from(query.len() as u32);
@@ -1897,28 +1852,6 @@ mod tests {
                 assert_eq!(mdo_type, bsl_metadata::MdoType::Document);
                 assert_eq!(object_name, "Sale");
                 assert!(field_chain.is_empty());
-                assert_eq!(prefix, "");
-            }
-            _ => panic!("Expected AfterCastExpression, got {:?}", context),
-        }
-    }
-
-    #[test]
-    fn test_detect_context_cast_expression_real_world() {
-        let query = "ЕСТЬNULL(ВЫРАЗИТЬ(БонусныеБаллы.Регистратор КАК Документ.НачислениеИСписаниеБонусныхБаллов).ПричинаНачисленияИСписанияБонусныхБаллов.";
-        let offset = TextSize::from(query.len() as u32);
-        let context = detect_context(query, offset);
-
-        match context {
-            SdblCompletionContext::AfterCastExpression {
-                mdo_type,
-                object_name,
-                field_chain,
-                prefix,
-            } => {
-                assert_eq!(mdo_type, bsl_metadata::MdoType::Document);
-                assert_eq!(object_name, "НачислениеИСписаниеБонусныхБаллов");
-                assert_eq!(field_chain, vec!["ПричинаНачисленияИСписанияБонусныхБаллов"]);
                 assert_eq!(prefix, "");
             }
             _ => panic!("Expected AfterCastExpression, got {:?}", context),

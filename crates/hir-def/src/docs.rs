@@ -344,15 +344,12 @@ fn parse_method_docs(comments: &[String]) -> Option<MethodDocs> {
 
     let mut section_indices = Vec::new();
     let mut in_parameters = false;
-    let mut prev_blank = false;
     for (i, line) in comments.iter().enumerate() {
         let trimmed = line.trim();
-        if let Some((section, payload)) = section_header(trimmed, in_parameters, prev_blank) {
+        if let Some((section, payload)) = section_header(trimmed, in_parameters) {
             in_parameters = section == Section::Parameters;
             section_indices.push(SectionMarker::new(i, section, payload));
         }
-
-        prev_blank = trimmed.is_empty();
     }
 
     let purpose_end = section_indices.first().map(|marker| marker.index).unwrap_or(comments.len());
@@ -412,17 +409,13 @@ enum Section {
 }
 
 /// Keeps structural documentation and its source tokens on the same section rules.
-fn section_header(
-    line: &str,
-    in_parameters: bool,
-    prev_blank: bool,
-) -> Option<(Section, Option<String>)> {
+fn section_header(line: &str, in_parameters: bool) -> Option<(Section, Option<String>)> {
     let lower = line.fold_lower();
     let returns_header = returns_section_header(line);
     if is_parameters_keyword(&lower) {
         Some((Section::Parameters, None))
     } else if returns_header != ReturnsHeader::NotReturns
-        && !is_parameter_named_like_returns(in_parameters, prev_blank, &lower, line)
+        && !is_parameter_named_like_returns(in_parameters, &lower, line)
     {
         let payload = match returns_header {
             ReturnsHeader::WithPayload(payload) => Some(payload),
@@ -511,14 +504,8 @@ fn is_ambiguous_returns_keyword(keyword: &str) -> bool {
 /// a line would truncate the parameter list and make the parameters after it look
 /// undocumented. A real returns header (`Результат:`) is not a parameter line and is
 /// unaffected.
-fn is_parameter_named_like_returns(
-    in_parameters: bool,
-    prev_blank: bool,
-    lower: &str,
-    line: &str,
-) -> bool {
+fn is_parameter_named_like_returns(in_parameters: bool, lower: &str, line: &str) -> bool {
     in_parameters
-        && !prev_blank
         && (lower.starts_with("результат") || lower.starts_with("result"))
         && parse_parameter_line(line).is_some()
 }
@@ -1978,10 +1965,31 @@ mod tests {
     }
 
     #[test]
-    fn test_result_block_after_blank_line_is_returns_not_parameter() {
-        // A blank line ends the parameter list, so a following `Результат - Тип` block is
-        // the Returns section (no explicit `Возвращаемое значение:` header) and must not
-        // be absorbed as an extra parameter.
+    fn test_blank_line_between_parameters_keeps_result_parameter() {
+        for name in ["Результат", "Result"] {
+            let comments = vec![
+                "Записывает оценку.".to_string(),
+                "".to_string(),
+                "Параметры:".to_string(),
+                "  ИмяЗадачи - Строка - имя задачи.".to_string(),
+                "".to_string(),
+                format!("  {name} - Структура - результат поиска."),
+                "  Оценка - Структура - оценка.".to_string(),
+            ];
+
+            let docs = parse_method_docs(&comments).unwrap();
+
+            let names: Vec<_> = docs.parameters.iter().map(|p| p.name.as_str()).collect();
+            assert_eq!(names, vec!["ИмяЗадачи", name, "Оценка"]);
+            assert!(docs.returned_value.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_blank_line_does_not_end_parameters_section() {
+        // Only the next section header closes "Параметры:"; a blank line does not.
+        // Consequence: an abbreviated return without a colon after a blank line is read as
+        // one more parameter.
         let comments = vec![
             "Определяет, является ли организация юридическим лицом.".to_string(),
             "".to_string(),
@@ -1993,10 +2001,31 @@ mod tests {
 
         let docs = parse_method_docs(&comments).unwrap();
 
-        assert_eq!(docs.parameters.len(), 1);
-        assert_eq!(docs.parameters[0].name, "Организация");
-        assert_eq!(docs.returned_value.len(), 1);
-        assert_eq!(docs.returned_value[0].name, "Булево");
+        let names: Vec<_> = docs.parameters.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["Организация", "Результат"]);
+        assert!(docs.returned_value.is_empty());
+    }
+
+    #[test]
+    fn test_result_header_with_colon_after_blank_line_is_returns() {
+        for header in ["Результат:", "Возвращаемое значение:", "Returns:", "Return value:"]
+        {
+            let comments = vec![
+                "Определяет условие.".to_string(),
+                "".to_string(),
+                "Параметры:".to_string(),
+                "  Организация - СправочникСсылка.Организации - организация.".to_string(),
+                "".to_string(),
+                header.to_string(),
+                "  Булево - Истина, если условие выполнено.".to_string(),
+            ];
+
+            let docs = parse_method_docs(&comments).unwrap();
+
+            assert_eq!(docs.parameters.len(), 1, "{header}");
+            assert_eq!(docs.returned_value.len(), 1, "{header}");
+            assert_eq!(docs.returned_value[0].name, "Булево", "{header}");
+        }
     }
 
     #[test]

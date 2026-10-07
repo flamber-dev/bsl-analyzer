@@ -48,121 +48,88 @@ mod tests {
     use crate::DiagnosticCode;
     use expect_test::expect;
 
+    fn check(code: &str, expected: expect_test::Expect) {
+        let diagnostics: Vec<_> = check_hir_diagnostic(code)
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::FunctionOutParameter)
+            .collect();
+        expected.assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_local_and_val_parameters_are_silent() {
+        let code = r#"Функция СтоимостьДоставки(Маршрут, Знач Тариф)
+	Расстояние = Маршрут.Длина;
+	Тариф = Тариф * 2;
+	Маршрут.Проверен = Истина;
+	Если Маршрут = Неопределено Тогда
+		Возврат 0;
+	КонецЕсли;
+	Возврат Расстояние * Тариф;
+КонецФункции
+"#;
+        check(code, expect![[r#""#]]);
+    }
+
     #[test]
     fn test_function_out_parameter() {
-        let code = r#"Процедура А(А, Знач Б)
-    А = 1;
-КонецПроцедуры
-
-Функция Б(А, Знач Б)
-    а = 1;
-
-    Если А = 1 Тогда
-    КонецЕсли;
-
-    Б = 2;
-
+        let code = r#"Функция СтоимостьДоставки(Маршрут, Знач Тариф)
+	маршрут = Маршрут.Длина;
+	Тариф = Тариф * 2;
+	Возврат Тариф;
 КонецФункции
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let func_diags: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::FunctionOutParameter)
-            .collect();
-
-        expect![[r#"
-            FunctionOutParameter @ 6:5..6:6
-              message: Функция изменяет параметр 'а'. Используйте возвращаемое значение вместо выходного параметра
-              severity: Warning"#]].assert_eq(&format_diags(code, &func_diags));
-        assert!(func_diags[0].message.contains("а"));
-    }
-
-    #[test]
-    fn test_procedure_allowed() {
-        let code = r#"
-Процедура Тест(А, Знач Б)
-    А = 1;
-КонецПроцедуры
-"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let func_diags: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::FunctionOutParameter)
-            .collect();
-        expect![[r#""#]].assert_eq(&format_diags(code, &func_diags));
-    }
-
-    #[test]
-    fn test_val_parameter_not_flagged() {
-        let code = r#"
-Функция Тест(Знач А, Знач Б)
-    А = 1;
-    Возврат А;
-КонецФункции
-"#;
-        let diagnostics = check_hir_diagnostic(code);
-        let func_diags: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::FunctionOutParameter)
-            .collect();
-        expect![[r#""#]].assert_eq(&format_diags(code, &func_diags));
+        check(
+            code,
+            expect![[r#"
+            FunctionOutParameter @ 2:2..2:9
+              message: Функция изменяет параметр 'маршрут'. Используйте возвращаемое значение вместо выходного параметра
+              severity: Warning"#]],
+        );
     }
 
     #[test]
     fn test_case_insensitive() {
-        let code = r#"
-Функция Тест(Параметр)
-    ПАРАМЕТР = 1;
-    Возврат ПАРАМЕТР;
+        let code = r#"Функция НормализоватьКод(КодТовара)
+	КОДТОВАРА = СокрЛП(КодТовара);
+	Возврат кодтовара;
 КонецФункции
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let func_diags: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::FunctionOutParameter)
-            .collect();
-        expect![[r#"
-            FunctionOutParameter @ 3:5..3:13
-              message: Функция изменяет параметр 'ПАРАМЕТР'. Используйте возвращаемое значение вместо выходного параметра
-              severity: Warning"#]].assert_eq(&format_diags(code, &func_diags));
+        check(
+            code,
+            expect![[r#"
+            FunctionOutParameter @ 2:2..2:11
+              message: Функция изменяет параметр 'КОДТОВАРА'. Используйте возвращаемое значение вместо выходного параметра
+              severity: Warning"#]],
+        );
     }
 
     #[test]
-    fn test_only_simple_assignment() {
-        let code = r#"
-Функция Тест(Объект)
-    Объект.Свойство = 1;
-    Возврат Объект;
-КонецФункции
+    fn test_procedure_allowed() {
+        let code = r#"Процедура ЗаполнитьМаршрут(Маршрут, Знач Склад)
+	Маршрут = Новый Структура("Склад", Склад);
+КонецПроцедуры
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let func_diags: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::FunctionOutParameter)
-            .collect();
-        expect![[r#""#]].assert_eq(&format_diags(code, &func_diags));
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_multiple_violations() {
-        let code = r#"
-Функция Обработка(Данные, Результат)
-    Данные = Новый Массив;
-    Результат = ОбработатьДанные(Данные);
-    Возврат Истина;
+        let code = r#"Функция РазобратьАдрес(Адрес, Индекс, Знач Страна)
+	Индекс = Лев(Адрес, 6);
+	Адрес = Сред(Адрес, 8);
+	Возврат Страна <> "";
 КонецФункции
 "#;
-        let diagnostics = check_hir_diagnostic(code);
-        let func_diags: Vec<_> = diagnostics
-            .into_iter()
-            .filter(|d| d.code == DiagnosticCode::FunctionOutParameter)
-            .collect();
-        expect![[r#"
-            FunctionOutParameter @ 3:5..3:11
-              message: Функция изменяет параметр 'Данные'. Используйте возвращаемое значение вместо выходного параметра
+        check(
+            code,
+            expect![[r#"
+            FunctionOutParameter @ 2:2..2:8
+              message: Функция изменяет параметр 'Индекс'. Используйте возвращаемое значение вместо выходного параметра
               severity: Warning
-            FunctionOutParameter @ 4:5..4:14
-              message: Функция изменяет параметр 'Результат'. Используйте возвращаемое значение вместо выходного параметра
-              severity: Warning"#]].assert_eq(&format_diags(code, &func_diags));
+            FunctionOutParameter @ 3:2..3:7
+              message: Функция изменяет параметр 'Адрес'. Используйте возвращаемое значение вместо выходного параметра
+              severity: Warning"#]],
+        );
     }
 }

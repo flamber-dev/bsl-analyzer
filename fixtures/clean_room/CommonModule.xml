@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+  <CommonModule uuid="15300000-0000-4000-8000-000000000001">
+    <Properties>
+      <Name>ЁжModule</Name>
+      <ObjectBelonging>Adopted</ObjectBelonging>
+      <ExtendedConfigurationObject>15300000-0000-4000-8000-000000000002</ExtendedConfigurationObject>
+      <Server>true</Server>
+      <Global>true</Global>
+      <ClientManagedApplication>true</ClientManagedApplication>
+      <ClientOrdinaryApplication>true</ClientOrdinaryApplication>
+      <ExternalConnection>true</ExternalConnection>
+      <ServerCall>true</ServerCall>
+      <Privileged>true</Privileged>
+      <ReturnValuesReuse>DuringSession</ReturnValuesReuse>
+    </Properties>
+  </CommonModule>
+</MetaDataObject>

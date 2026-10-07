@@ -170,134 +170,162 @@ fn check_line_start(
 #[cfg(test)]
 mod tests {
     use super::check;
-    use crate::test_utils::check_ast_diagnostic;
-    #[test]
-    fn test_operator_at_end_two_lines() {
-        let code = r#"СуммаДокумента = СуммаБезСкидки +
-                 СуммаРучнойСкидки +
-                 СуммаАвтоматическойСкидки;"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 2, "Should detect 2 operators at line end");
-    }
+    use crate::test_utils::{check_ast_diagnostic, format_diags};
+    use expect_test::expect;
 
-    #[test]
-    fn test_operator_at_end_before_comment() {
-        let code = r#"ПоляОтбора = "Номенклатура,Характеристика,Склад" +
-   ДополнительныеПоляОтбора;"#;
+    fn snapshot(code: &str, expected: expect_test::Expect) {
         let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should detect + at line end even before comment");
-    }
-
-    #[test]
-    fn test_operator_before_string_continuation_passes() {
-        let code = r#"ТекстЗапроса = ТекстЗапроса +
-"ВЫБРАТЬ
-| Номенклатура.Ссылка КАК Ссылка
-|ИЗ
-| Справочник. Номенклатура КАК Номенклатура";"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "String continuation after + should not warn");
-    }
-
-    #[test]
-    fn test_or_keyword_at_line_end() {
-        let code = r#"Если (ВидОперации = Перечисления.ВидыОперацийПоступлениеМПЗ.ПоступлениеРозница) ИЛИ
-  (ВидОперации = Перечисления.ВидыОперацийПоступлениеМПЗ.ПоступлениеРозницаКомиссия) Тогда
-  Возврат Истина;
-КонецЕсли;"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Should detect ИЛИ at line end");
-    }
-
-    #[test]
-    fn test_comma_at_line_start_with_content() {
-        let code = r#"ИменаДокументов.Добавить(Метаданные.Документы.СтрокаВыпискиРасход.Имя
-    ,Метаданные.Документы.СтрокаВыпискиРасход.Синоним);"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 1, "Comma at line start with content should warn");
-    }
-
-    #[test]
-    fn test_lone_comma_placeholder_passes() {
-        let code = r#"ЗафиксироватьОшибку(
-    ИмяСобытияЖР(),
-    УровеньЖурналаРегистрации.Ошибка,
-    ,
-    ТекстОшибки);"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Lone comma placeholder should not warn");
-    }
-
-    #[test]
-    fn test_closing_paren_at_line_start_warns() {
-        let code = r#"Результат = Функция(Аргумент1
-    , Аргумент2
-    );"#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert!(!diagnostics.is_empty(), "Should detect ) at line start");
+        expected.assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn test_correct_line_breaks() {
-        let code = r#"
-Функция Тест()
-    Результат = Value1
-        + Value2
-        + Value3;
-    Возврат Результат;
+        let code = r#"Функция ВесПосылки(Посылка)
+	Итог = Посылка.ВесТовара
+		+ Посылка.ВесУпаковки
+		- Посылка.Скидка;
+	Если Итог > 30
+		И Посылка.Хрупкая Тогда
+		Итог = Итог * 2;
+	КонецЕсли;
+	Возврат Итог;
 КонецФункции
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Should not detect correct line breaks");
+        snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
-    fn test_operator_at_end() {
-        let code = r#"
-Функция Тест()
-    Результат = Value1 +
-        Value2;
-КонецФункции
+    fn test_operator_at_end_two_lines() {
+        let code = r#"Итог = Посылка.ВесТовара +
+	Посылка.ВесУпаковки -
+	Посылка.Скидка;
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert!(!diagnostics.is_empty(), "Should detect '+' at line end");
+        snapshot(
+            code,
+            expect![[r#"
+            IncorrectLineBreak @ 1:26..1:27
+              message: Неправильный перенос строки: '+' в конце строки
+              severity: Hint
+            IncorrectLineBreak @ 2:22..2:23
+              message: Неправильный перенос строки: '-' в конце строки
+              severity: Hint"#]],
+        );
     }
 
     #[test]
-    fn test_logical_operator_at_end() {
-        let code = r#"
-Процедура Тест()
-    Если Условие1 ИЛИ
-        Условие2 Тогда
-        Сообщить("Да");
-    КонецЕсли;
-КонецПроцедуры
+    fn test_operator_at_end_after_string_operand() {
+        let code = r#"Заголовок = "Посылка № " +
+	Посылка.Номер;
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert!(!diagnostics.is_empty(), "Should detect 'ИЛИ' at line end");
+        snapshot(
+            code,
+            expect![[r#"
+            IncorrectLineBreak @ 1:26..1:27
+              message: Неправильный перенос строки: '+' в конце строки
+              severity: Hint"#]],
+        );
     }
 
     #[test]
-    fn test_closing_paren_at_start() {
-        let code = r#"
-Функция Тест()
-    Результат = Функция(Аргумент1
-    );
-КонецФункции
+    fn test_operator_before_string_continuation_passes() {
+        let code = r#"Текст = Текст +
+"ВЫБРАТЬ
+|	Посылки.Номер КАК Номер
+|ИЗ
+|	Документ.Посылка КАК Посылки";
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert!(!diagnostics.is_empty(), "Should detect ')' at line start");
+        snapshot(code, expect![[r#""#]]);
     }
 
     #[test]
     fn test_multiline_string_ok() {
-        let code = r#"
-Функция Тест()
-    Текст = "Строка1" +
-        "Строка2";
+        let code = r#"Функция Подпись()
+	Возврат "Отправитель: склад" +
+		" № 4";
 КонецФункции
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
-        assert_eq!(diagnostics.len(), 0, "Multiline string concatenation should be OK");
+        snapshot(code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_logical_operators_at_line_end() {
+        let code = r#"Процедура ПроверитьМаршрут(Посылка)
+	Если Посылка.Срочная ИЛИ
+		Посылка.Вес > 30 Тогда
+		Посылка.Курьер = "Экспресс";
+	КонецЕсли;
+	Если (Посылка.Страна = "Казахстан") И
+		(Посылка.Таможня = Неопределено) Тогда
+		Посылка.Отложить();
+	КонецЕсли;
+КонецПроцедуры
+"#;
+        snapshot(
+            code,
+            expect![[r#"
+            IncorrectLineBreak @ 2:23..2:26
+              message: Неправильный перенос строки: 'ИЛИ' в конце строки
+              severity: Hint
+            IncorrectLineBreak @ 6:38..6:39
+              message: Неправильный перенос строки: 'И' в конце строки
+              severity: Hint"#]],
+        );
+    }
+
+    #[test]
+    fn test_comma_at_line_start_with_content() {
+        let code = r#"Маршрут.Добавить(Склады.Центральный.Адрес
+	,Склады.Северный.Адрес);
+"#;
+        snapshot(
+            code,
+            expect![[r#"
+            IncorrectLineBreak @ 2:2..2:26
+              message: Incorrect line break: ',' at line start
+              severity: Hint"#]],
+        );
+    }
+
+    #[test]
+    fn test_lone_comma_placeholder_passes() {
+        let code = r#"ЗаписатьСобытие(
+	"Отгрузка",
+	УровеньЖурналаРегистрации.Предупреждение,
+	,
+	ОписаниеОшибки);
+"#;
+        snapshot(code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_closing_paren_at_line_start() {
+        let code = r#"Функция Тариф(Посылка)
+	Возврат РассчитатьТариф(Посылка.Вес, Посылка.Зона
+	);
+КонецФункции
+"#;
+        snapshot(
+            code,
+            expect![[r#"
+            IncorrectLineBreak @ 3:2..3:3
+              message: Incorrect line break: ')' at line start
+              severity: Hint"#]],
+        );
+    }
+
+    #[test]
+    fn test_semicolon_at_line_start() {
+        let code = r#"Процедура Отметить(Посылка)
+	Посылка.Отправлена = Истина
+	;
+КонецПроцедуры
+"#;
+        snapshot(
+            code,
+            expect![[r#"
+            IncorrectLineBreak @ 3:2..3:3
+              message: Incorrect line break: ';' at line start
+              severity: Hint"#]],
+        );
     }
 }

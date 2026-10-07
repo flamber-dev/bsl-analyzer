@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xs="http://www.w3.org/2001/XMLSchema" version="2.20">
+  <Events>
+    <Event name="OnOpen">Расш_ПриОткрытии</Event>
+  </Events>
+  <ChildItems>
+    <InputField name="ПолеРасширения" id="100">
+      <DataPath>Объект.Номер</DataPath>
+    </InputField>
+  </ChildItems>
+  <Attributes>
+    <Attribute name="счётчик" id="12"><Type><v8:Type>xs:string</v8:Type></Type></Attribute>
+    <Attribute name="РасшРеквизитФормы" id="13"><Type><v8:Type>xs:string</v8:Type></Type></Attribute>
+  </Attributes>
+  <Commands>
+    <Command name="КомандаРасширения" id="100">
+      <Action>КомандаРасширенияОбработка</Action>
+    </Command>
+  </Commands>
+  <BaseForm version="2.20">
+    <Attributes/>
+  </BaseForm>
+</Form>
