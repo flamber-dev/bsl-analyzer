@@ -1110,6 +1110,25 @@ pub fn check_with_cfe_unreadable(
     )
 }
 
+/// [`check_with_cfe_unreadable`] on a chosen profile, for a rule whose default
+/// profile differs from `all_enabled` — an incomplete-surface stand has to run on
+/// the very profile the rule ships with, or it proves nothing about it.
+pub fn check_with_cfe_unreadable_config(
+    source: &str,
+    fixture: test_fixture::CfeFixture,
+    unreadable: &[&str],
+    config: crate::DiagnosticsConfig,
+) -> Vec<Diagnostic> {
+    check_cfe_at_with_unreadable_config(
+        "CommonModules/Caller/Ext/Module.bsl",
+        source,
+        fixture,
+        unreadable,
+        config,
+        crate::diagnostics,
+    )
+}
+
 /// [`check_with_cfe_unreadable`], with the analyzed file placed at `caller_relative`
 /// inside the fixture's first extension and its diagnostics produced by `run` rather
 /// than the whole registry. A diagnostic keyed to a module TYPE (the session module,
@@ -1159,6 +1178,23 @@ pub(crate) fn check_cfe_at_with_unreadable_config_and_setup(
     config: crate::DiagnosticsConfig,
     setup: impl FnOnce(&test_fixture::CfeFixture),
     run: impl FnOnce(&crate::DiagnosticsContext<'_>) -> Vec<Diagnostic>,
+) -> Vec<Diagnostic> {
+    check_cfe_at_with_db(caller_relative, source, fixture, unreadable, config, setup, |_, ctx| {
+        run(ctx)
+    })
+}
+
+/// [`check_cfe_at_with_unreadable_config_and_setup`] whose `run` also gets the database,
+/// for a stand that has to go through [`crate::file_diagnostics`] — the only entry that
+/// adds the extension-merge passes.
+pub(crate) fn check_cfe_at_with_db(
+    caller_relative: &str,
+    source: &str,
+    fixture: test_fixture::CfeFixture,
+    unreadable: &[&str],
+    config: crate::DiagnosticsConfig,
+    setup: impl FnOnce(&test_fixture::CfeFixture),
+    run: impl FnOnce(&ide_db::RootDatabaseImpl, &crate::DiagnosticsContext<'_>) -> Vec<Diagnostic>,
 ) -> Vec<Diagnostic> {
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::metadata::intern_configuration_path;
@@ -1252,7 +1288,7 @@ pub(crate) fn check_cfe_at_with_unreadable_config_and_setup(
     let provider = ide_db::SalsaProvider::new(&db, Some(config_path_input));
     let ctx = crate::DiagnosticsContext::new(&config, caller_file_id, &provider);
 
-    run(&ctx)
+    run(&db, &ctx)
 }
 
 pub fn check_snapshot_with_cfe(

@@ -170,6 +170,7 @@ pub enum DiagnosticCode {
 
     UnresolvedName,
     UnresolvedMethodCall,
+    UnresolvedBareCall,
     MismatchedArgCount,
     TypeMismatch,
     TypeMismatchByDocComment,

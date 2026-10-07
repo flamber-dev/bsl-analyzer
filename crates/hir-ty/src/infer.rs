@@ -241,6 +241,57 @@ enum BareNameVerdict {
     Indeterminate,
 }
 
+/// The receiver a bare name implicitly hangs off in the module being inferred.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ImplicitSelfSurface {
+    /// The module has no implicit receiver, so the bare cascade is the whole story.
+    None,
+    Receiver(TypeId),
+    /// A receiver this crate types only for member access, not as a value: its
+    /// surface is the methods the platform catalog lists under these type names.
+    PlatformTypes(Vec<&'static str>),
+    /// A receiver whose methods the platform catalog files under a per-object
+    /// prefix (`КонстантаМенеджерЗначения.<Имя>`), the same for every object.
+    PlatformPrefix(&'static str),
+    /// An implicit receiver exists but its surface cannot be produced — a gap, not
+    /// an absence.
+    Unreadable,
+}
+
+/// The catalog prefix of a constant's value manager — the receiver of its
+/// `ValueManagerModule`.
+const CONSTANT_VALUE_MANAGER_PREFIX: &str = "ConstantValueManager";
+
+/// Global functions the platform still compiles although neither its help nor the
+/// bundled catalog lists them: 8.2-era names kept for compatibility. Checked live on
+/// 8.3.17.1549 and 8.3.27.2214 (compatibility mode 8.3.17), external data processors
+/// built with 8.3.17:
+/// - `КодЛокализации()` / `LocaleCode()` compiles on the server and in the thick
+///   client and returns the infobase locale ("ru_UA");
+/// - `УстановитьЗаголовокПриложения()`, `ПолучитьЗаголовокПриложения()` and their
+///   English spellings compile in a thin-client form module;
+/// - `УстановитьЗаголовокСистемы()`, `ПолучитьЗаголовокСистемы()` compile in the
+///   thick client of an ordinary application (not on the server; the guessed English
+///   spellings `SetSystemTitle` / `GetSystemTitle` compile nowhere and are left out).
+///
+/// Typical configurations call every one of them, so a bare call of one is never
+/// reported absent, in whatever environment. Silence only: the call keeps the type it
+/// had.
+const UNDOCUMENTED_PLATFORM_GLOBALS: &[&str] = &[
+    "КодЛокализации",
+    "LocaleCode",
+    "УстановитьЗаголовокПриложения",
+    "SetApplicationCaption",
+    "ПолучитьЗаголовокПриложения",
+    "GetApplicationCaption",
+    "УстановитьЗаголовокСистемы",
+    "ПолучитьЗаголовокСистемы",
+];
+
+fn is_undocumented_platform_global(name: &str) -> bool {
+    UNDOCUMENTED_PLATFORM_GLOBALS.iter().any(|global| global.to_lowercase() == name.to_lowercase())
+}
+
 fn classify_bare_name_miss(
     mut gaps: Vec<BareNameGap>,
     platform_status: bsl_platform::PlatformCatalogStatus,
@@ -277,6 +328,19 @@ pub enum InferenceDiagnostic {
         receiver_name: Name,
         method_name: Name,
         kind: UnresolvedMethodKind,
+    },
+
+    /// A bare `Имя(...)` — no receiver — whose name is owned by nothing: not a
+    /// method of this module, not a method of the module's implicit receiver, not
+    /// an export of a global common or application module, not a platform global.
+    /// Separate from [`InferenceDiagnostic::UnresolvedMethodCall`], which always
+    /// names the receiver the method was looked for on; there is no receiver here.
+    ///
+    /// Reported only on the `Absent` verdict of the bare-name cascade, so a miss
+    /// under any [`BareNameGap`] says nothing.
+    UnresolvedBareCall {
+        expr: ExprId,
+        name: Name,
     },
 
     MismatchedArgCount {
@@ -555,6 +619,12 @@ pub struct InferenceContext<'db> {
     /// out of default verdicts.
     checked_env: hir_def::execution_env::EnvFlags,
 
+    /// The statement walk is inside a `#Если` branch that nothing proves compiled:
+    /// either it leaves no environment of a known body, or the body's environment
+    /// is unknown (an empty [`Self::body_env`], as in effective and weaving bodies),
+    /// so the branch may be compiled nowhere.
+    in_uncompiled_branch: bool,
+
     /// Lazily-built, usage-aware user global surface. Both maps are constructed
     /// together so global modules are enumerated at most once per inference run.
     global_exports: Option<Arc<FxHashMap<NormName, GlobalCallableExport>>>,
@@ -813,6 +883,7 @@ impl<'db> InferenceContext<'db> {
             return_expr_ids: Vec::new(),
             body_env,
             checked_env: opts.checked_environments,
+            in_uncompiled_branch: false,
             global_exports: None,
             global_read_exports: None,
             global_surface_partly_unknown: false,
@@ -1125,6 +1196,7 @@ impl<'db> InferenceContext<'db> {
         let key = match &diag {
             InferenceDiagnostic::UnresolvedName { expr, .. } => *expr,
             InferenceDiagnostic::UnresolvedMethodCall { expr, .. } => *expr,
+            InferenceDiagnostic::UnresolvedBareCall { expr, .. } => *expr,
             InferenceDiagnostic::MismatchedArgCount { call_expr, .. } => *call_expr,
             InferenceDiagnostic::TypeMismatch { expr, .. } => *expr,
             InferenceDiagnostic::UnresolvedField { expr, .. } => *expr,
@@ -2148,8 +2220,10 @@ impl<'db> InferenceContext<'db> {
                 // environments its condition compiles for; nesting works
                 // because each frame restores its own parent mask.
                 let parent = self.body_env;
+                let parent_uncompiled = self.in_uncompiled_branch;
                 let mut remaining = parent;
                 self.body_env = preproc.condition.narrow_branch(&mut remaining);
+                self.in_uncompiled_branch = parent_uncompiled || self.body_env.is_empty();
                 self.infer_stmts(&preproc.then_branch);
                 for (idx, (_, _, branch)) in preproc.elsif_branches.iter().enumerate() {
                     self.body_env = match preproc.elsif_conditions.get(idx) {
@@ -2162,13 +2236,16 @@ impl<'db> InferenceContext<'db> {
                             remaining
                         }
                     };
+                    self.in_uncompiled_branch = parent_uncompiled || self.body_env.is_empty();
                     self.infer_stmts(branch);
                 }
                 if let Some(else_branch) = &preproc.else_branch {
                     self.body_env = remaining;
+                    self.in_uncompiled_branch = parent_uncompiled || self.body_env.is_empty();
                     self.infer_stmts(else_branch);
                 }
                 self.body_env = parent;
+                self.in_uncompiled_branch = parent_uncompiled;
             }
 
             Stmt::While { condition, body } => {
@@ -2834,6 +2911,12 @@ impl<'db> InferenceContext<'db> {
             return found(self.db.unknown(), BareNameOrigin::UserBinding, all_env);
         }
 
+        self.bare_name_miss()
+    }
+
+    /// What a miss of every owner amounts to: `Absent` only when the user global
+    /// surface, the configuration root and the platform catalog are all complete.
+    fn bare_name_miss(&mut self) -> BareNameResolution {
         // Building the cached maps also records whether every user-global body
         // (global common + application modules) was readable and enumerable.
         self.global_export_map();
@@ -3462,8 +3545,223 @@ impl<'db> InferenceContext<'db> {
             if let Some(return_ty) = self.infer_local_method_call(name, args, callee) {
                 return return_ty;
             }
+            // The verdict recorded for the callee is about a value read. When a variable
+            // answered that read it says nothing about the call, which needs the verdict
+            // the cascade gives with no variable: a name no method owns does not compile
+            // even with a parameter of that name in scope.
+            let verdict = if self.variable_holds_name(name) {
+                match self.bare_name_miss() {
+                    BareNameResolution::Absent => BareNameVerdict::Absent,
+                    _ => BareNameVerdict::Indeterminate,
+                }
+            } else {
+                self.bare_name_verdicts
+                    .get(&callee)
+                    .copied()
+                    .unwrap_or(BareNameVerdict::Indeterminate)
+            };
+            self.report_absent_bare_call(name, callee, verdict);
         }
         self.db.unknown()
+    }
+
+    /// Whether a variable answers `name` as a value: a parameter or `Перем` of the
+    /// body, an implicit local written in it, a module-level `Перем`, or an export
+    /// variable of an application module.
+    fn variable_holds_name(&mut self, name: &hir_def::Name) -> bool {
+        self.body_declares_binding(name)
+            || self.assigned_var_names.contains(&NormName::intern(name.as_str()))
+            || self.get_resolver().resolve_module_variable(self.db, name).is_some()
+            || self.global_read_export(name).is_some()
+    }
+
+    /// The last stop of the bare-call cascade: `Имя(...)` that no method of this
+    /// module, no method of its implicit receiver, no export of a global common or
+    /// application module and no platform global owns. BSL refuses to compile the
+    /// WHOLE module around such a call, so silence here costs far more than a
+    /// squiggle — but only a proven absence earns the verdict.
+    ///
+    /// Certainty is not decided a second time: `verdict` is the callee's own
+    /// bare-name verdict (`classify_bare_name_miss`, recorded by
+    /// [`Self::infer_path_name`] while this very call inferred the callee expression),
+    /// or, when a variable answered that value read, the same miss classification
+    /// asked directly ([`Self::bare_name_miss`]). A miss under ANY [`BareNameGap`] — an
+    /// unread user global surface, a missing configuration root, a platform catalog
+    /// that is Missing / Unverified / UnsupportedTarget — is `Indeterminate` and says
+    /// nothing.
+    ///
+    /// The bare-name cascade knows nothing about the IMPLICIT receiver, and in an
+    /// object, record-set or manager module that receiver owns a whole platform
+    /// surface: `ЭтоНовый()`, `Записать()` in an object module, `Загрузить()` in a
+    /// record-set module, `ПолучитьМакет()` in a report's object module, `Закрыть()`
+    /// in a managed form module are all `ЭтотОбъект.<метод>()` written without the
+    /// receiver. So it is cleared here, through the platform catalog the qualified
+    /// spelling is judged by, and where the receiver exists but cannot be built the
+    /// call keeps its silence.
+    fn report_absent_bare_call(
+        &mut self,
+        name: &hir_def::Name,
+        callee: ExprId,
+        verdict: BareNameVerdict,
+    ) {
+        if name.is_missing() || verdict != BareNameVerdict::Absent {
+            return;
+        }
+        if is_undocumented_platform_global(name.as_str()) || self.module_compiles_nowhere() {
+            return;
+        }
+        // The platform compiles a module per environment and drops the branches that
+        // environment rules out, so a call no environment of this body compiles cannot
+        // fail the module — `#Если Клиент` inside a server-only form procedure is the
+        // common shape.
+        if self.in_uncompiled_branch {
+            return;
+        }
+        match self.implicit_self_surface() {
+            ImplicitSelfSurface::None => {}
+            ImplicitSelfSurface::Unreadable => return,
+            ImplicitSelfSurface::Receiver(receiver_ty) => {
+                if crate::method_lookup::lookup_method_with_refinement(
+                    self.db,
+                    receiver_ty,
+                    name,
+                    None,
+                )
+                .is_some()
+                {
+                    return;
+                }
+            }
+            ImplicitSelfSurface::PlatformTypes(type_names) => {
+                let data = bsl_platform::PlatformData::instance();
+                if type_names.iter().any(|ty| data.get_method(ty, name.as_str()).is_some()) {
+                    return;
+                }
+            }
+            ImplicitSelfSurface::PlatformPrefix(prefix) => {
+                if !bsl_platform::find_prefixed_methods(prefix, name.as_str()).is_empty() {
+                    return;
+                }
+            }
+        }
+        self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedBareCall {
+            expr: callee,
+            name: name.clone(),
+        });
+    }
+
+    /// A common module whose flags select no environment at all: the platform accepts
+    /// it and compiles its body nowhere, so nothing in it can fail (checked with
+    /// `/CheckModules` for every environment on 8.3.17 and 8.3.27). Such modules occur
+    /// in real configurations: a developer-tools library ships one. An empty
+    /// [`Self::body_env`] cannot carry this: it also means "environment unknown".
+    fn module_compiles_nowhere(&self) -> bool {
+        let Some(module_id) = self.get_resolver().module_id() else {
+            return false;
+        };
+        let metadata = self.db.module_metadata(module_id);
+        if metadata.module_type != bsl_metadata::ModuleType::CommonModule {
+            return false;
+        }
+        metadata.common_module.as_deref().is_some_and(|module| {
+            !(module.is_server()
+                || module.is_server_call()
+                || module.is_external_connection()
+                || module.is_client_managed_application()
+                || module.is_client_ordinary_application())
+        })
+    }
+
+    /// What a bare name in this module implicitly hangs off — the value `ЭтотОбъект`
+    /// denotes here.
+    ///
+    /// The match is on the module TYPE and therefore exhaustive on purpose: a new
+    /// module kind must be classified deliberately, because getting it wrong in the
+    /// `None` direction accuses correct code.
+    ///
+    /// `Unreadable` is the honest answer wherever a receiver exists but its surface
+    /// cannot be produced. An ordinary form lives there: its `Form.bin` dialog is not
+    /// read, and its module also sees the exports of the main attribute's object
+    /// module, which nothing here enumerates. So does a form whose `Form.xml` failed
+    /// to load. A managed form module sees no object module at all — the object
+    /// lives on the server behind `РеквизитФормыВЗначение` — so its receiver is the
+    /// form and the extension its main attribute mixes in, and nothing more.
+    fn implicit_self_surface(&self) -> ImplicitSelfSurface {
+        use bsl_metadata::ModuleType;
+
+        let resolver = self.get_resolver();
+        let Some(module_id) = resolver.module_id() else {
+            return ImplicitSelfSurface::Unreadable;
+        };
+        let metadata = self.db.module_metadata(module_id);
+        match metadata.module_type {
+            ModuleType::CommonModule
+            | ModuleType::ApplicationModule
+            | ModuleType::ManagedApplicationModule
+            | ModuleType::OrdinaryApplicationModule
+            | ModuleType::SessionModule
+            | ModuleType::ExternalConnectionModule
+            | ModuleType::CommandModule
+            | ModuleType::HTTPServiceModule
+            | ModuleType::WebServiceModule
+            | ModuleType::IntegrationServiceModule => ImplicitSelfSurface::None,
+
+            ModuleType::ObjectModule => {
+                match crate::this_object::resolve_this_object_owner(self.db, &resolver) {
+                    Some((mdo_type, name)) => {
+                        ImplicitSelfSurface::Receiver(self.db.mk_this_object(
+                            ConfigId::Root,
+                            MdoRefFacet::new(mdo_type, name.as_str().to_string()),
+                        ))
+                    }
+                    None => ImplicitSelfSurface::Unreadable,
+                }
+            }
+
+            ModuleType::ManagerModule => {
+                match crate::this_object::resolve_this_manager_owner(self.db, &resolver) {
+                    Some((mdo_type, name)) => {
+                        ImplicitSelfSurface::Receiver(self.db.mk_this_manager(
+                            ConfigId::Root,
+                            MdoRefFacet::new(mdo_type, name.as_str().to_string()),
+                        ))
+                    }
+                    None => ImplicitSelfSurface::Unreadable,
+                }
+            }
+
+            ModuleType::RecordSetModule => {
+                match crate::this_object::resolve_this_record_set_owner(self.db, &resolver)
+                    .and_then(|(mdo_type, name)| {
+                        Some((hir_def::ty::MetadataKind::record_set_kind_for(mdo_type)?, name))
+                    }) {
+                    Some((kind, name)) => ImplicitSelfSurface::Receiver(self.db.metadata_ref(
+                        kind,
+                        name.as_str().to_string(),
+                        &RootConfigCtx,
+                    )),
+                    None => ImplicitSelfSurface::Unreadable,
+                }
+            }
+
+            ModuleType::FormModule => match metadata.form.as_deref() {
+                Some(form) if form.is_managed() => ImplicitSelfSurface::PlatformTypes(
+                    crate::form_self::managed_form_self_method_types(form),
+                ),
+                _ => ImplicitSelfSurface::Unreadable,
+            },
+
+            // Only a constant owns a value-manager module; its receiver is
+            // `КонстантаМенеджерЗначения.<Имя>`.
+            ModuleType::ValueManagerModule => match metadata.mdo.as_deref() {
+                Some(mdo) if mdo.mdo_type == bsl_metadata::MdoType::Constant => {
+                    ImplicitSelfSurface::PlatformPrefix(CONSTANT_VALUE_MANAGER_PREFIX)
+                }
+                _ => ImplicitSelfSurface::Unreadable,
+            },
+
+            ModuleType::Unknown => ImplicitSelfSurface::Unreadable,
+        }
     }
 
     /// Resolves a call against the methods of the module being inferred, judges it

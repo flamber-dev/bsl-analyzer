@@ -165,6 +165,7 @@ pub mod unknown_field_in_query;
 pub mod unknown_preprocessor_symbol;
 pub mod unlimited_length_string_usage_in_query;
 pub mod unreachable_code;
+pub mod unresolved_bare_call;
 pub mod unresolved_field;
 pub mod unresolved_method_call;
 pub mod unresolved_name;
@@ -488,6 +489,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
 
         DiagnosticCode::UnresolvedName => Some(&unresolved_name::METADATA),
         DiagnosticCode::UnresolvedMethodCall => Some(&unresolved_method_call::METADATA),
+        DiagnosticCode::UnresolvedBareCall => Some(&unresolved_bare_call::METADATA),
         DiagnosticCode::MismatchedArgCount => Some(&mismatched_arg_count::METADATA),
         DiagnosticCode::TypeMismatch => Some(&type_mismatch::METADATA),
         DiagnosticCode::TypeMismatchByDocComment => Some(&type_mismatch_by_doc_comment::METADATA),
