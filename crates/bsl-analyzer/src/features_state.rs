@@ -44,7 +44,7 @@ pub fn apply_project_config_to_db(db: &mut RootDatabaseImpl, config: &ProjectCon
     let min = config.min_platform_version.as_deref().map(Arc::<str>::from);
     if min
         .as_deref()
-        .is_some_and(|value| bsl_platform::PlatformVersion::parse_catalog(value).is_none())
+        .is_some_and(|value| bsl_platform::PlatformVersion::parse_release(value).is_none())
     {
         tracing::warn!(
             min_platform_version = ?min,

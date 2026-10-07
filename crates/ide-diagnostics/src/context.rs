@@ -181,7 +181,7 @@ impl<'a> AnalysisContext<'a> {
     /// version.
     pub fn min_platform_version(&self) -> Option<bsl_platform::PlatformVersion> {
         let value = self.provider.min_platform_version()?;
-        bsl_platform::PlatformVersion::parse_catalog(&value)
+        bsl_platform::PlatformVersion::parse_release(&value)
     }
 
     pub fn main_configuration(&self) -> Option<Arc<bsl_metadata::Configuration>> {

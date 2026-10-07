@@ -5,7 +5,7 @@ use crate::{Diagnostic, DiagnosticCode};
 use bsl_platform::PlatformVersion;
 use hir::LocalRange;
 use hir::Name;
-use syntax::SyntaxKind;
+use syntax::{SyntaxKind, SyntaxNode};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -56,7 +56,9 @@ pub fn from_hir(
 
 /// The language part, which no member lookup sees: an `Асинх` method declaration
 /// and a `Ждать` operator. Both are syntax, so they are judged here, on the
-/// tokens of the body, and dated [`hir::min_platform::ASYNC_INTRODUCED`].
+/// tokens of the body, and dated [`hir::min_platform::ASYNC_INTRODUCED`]. Silent
+/// where the member checks are: in a module compiled nowhere, and for `Ждать` in
+/// a statement inference walked as an uncompiled `#Если` branch.
 pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::PlatformMemberNewerThanMinVersion;
     if ctx.is_disabled_with_metadata(code) {
@@ -69,13 +71,20 @@ pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     if !introduced.release_newer_than(minimum) {
         return;
     }
+    if ctx.module_metadata().compiles_nowhere() {
+        return;
+    }
+    let infer = ctx.infer();
     for token in ctx.tokens() {
         let Some(parent) = token.parent() else {
             continue;
         };
         let owned = match token.kind() {
             SyntaxKind::KW_ASYNC => crate::body_context::is_method_node(&parent),
-            SyntaxKind::KW_AWAIT => parent.kind() == SyntaxKind::AWAIT_EXPR,
+            SyntaxKind::KW_AWAIT => {
+                parent.kind() == SyntaxKind::AWAIT_EXPR
+                    && !in_uncompiled_stmt(ctx, &parent, infer.uncompiled_stmts())
+            }
             _ => false,
         };
         if !owned {
@@ -90,6 +99,17 @@ pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
             acc.push(diagnostic);
         }
     }
+}
+
+/// Whether the innermost statement around `node` is one inference walked inside
+/// an uncompiled `#Если` branch.
+fn in_uncompiled_stmt(ctx: &BodyContext, node: &SyntaxNode, uncompiled: &[hir::StmtId]) -> bool {
+    if uncompiled.is_empty() {
+        return false;
+    }
+    node.ancestors()
+        .find_map(|ancestor| ctx.source_map().stmt_at_range(ctx.range_of(&ancestor)))
+        .is_some_and(|stmt| uncompiled.contains(&stmt))
 }
 
 #[cfg(test)]
@@ -235,6 +255,7 @@ mod tests {
 "#;
         assert!(newer(source, None).is_empty());
         assert!(newer(source, Some("not a version")).is_empty(), "an unparseable floor is off");
+        assert!(newer(source, Some("8.3.17 (typo)")).is_empty(), "a suffixed floor is off");
     }
 
     #[test]
@@ -291,34 +312,83 @@ mod tests {
         );
     }
 
+    /// The rule's messages for `body` as the whole of the common module `Проба`:
+    /// a server module, or — `compiled_nowhere` — one with every environment off.
+    fn in_common_module(body: &str, compiled_nowhere: bool) -> Vec<String> {
+        let mut builder = test_fixture::CfeFixtureBuilder::new("");
+        builder.add_base_module("Проба", body);
+        crate::test_utils::check_cfe_at_with_db_setup(
+            "CommonModules/Проба/Ext/Module.bsl",
+            body,
+            builder.build(),
+            &[],
+            DiagnosticsConfig::default(),
+            |fixture| {
+                if !compiled_nowhere {
+                    return;
+                }
+                let path = fixture.root().join("CommonModules/Проба.xml");
+                let xml = std::fs::read_to_string(&path).expect("read module metadata");
+                std::fs::write(
+                    &path,
+                    xml.replace("<Server>true</Server>", "<Server>false</Server>"),
+                )
+                .expect("write module metadata");
+            },
+            |db| db.set_min_platform_version(Some("8.3.17".into())),
+            |db, ctx| crate::file_diagnostics(db, ctx.file_id, ctx.config),
+        )
+        .into_iter()
+        .filter(|diag| diag.code == DiagnosticCode::PlatformMemberNewerThanMinVersion)
+        .map(|diag| diag.message)
+        .collect()
+    }
+
     #[test]
     fn an_uncompiled_branch_stays_silent() {
-        fn in_server_module(body: &str) -> Vec<String> {
-            let mut builder = test_fixture::CfeFixtureBuilder::new("");
-            builder.add_base_module("Проба", body);
-            crate::test_utils::check_cfe_at_with_db_setup(
-                "CommonModules/Проба/Ext/Module.bsl",
-                body,
-                builder.build(),
-                &[],
-                DiagnosticsConfig::default(),
-                |_| {},
-                |db| db.set_min_platform_version(Some("8.3.17".into())),
-                |db, ctx| crate::file_diagnostics(db, ctx.file_id, ctx.config),
-            )
-            .into_iter()
-            .filter(|diag| diag.code == DiagnosticCode::PlatformMemberNewerThanMinVersion)
-            .map(|diag| diag.message)
-            .collect()
-        }
         const CALL: &str =
             "    Результат = СтрЗаменитьПоРегулярномуВыражению(\"abc\", \"b\", \"x\");\n";
-        let plain = in_server_module(&format!("Процедура Тест() Экспорт\n{CALL}КонецПроцедуры\n"));
+        let plain =
+            in_common_module(&format!("Процедура Тест() Экспорт\n{CALL}КонецПроцедуры\n"), false);
         assert_eq!(plain.len(), 1, "the server compiles the plain call: {plain:?}");
-        let branch = in_server_module(&format!(
-            "Процедура Тест() Экспорт\n#Если ТолстыйКлиентОбычноеПриложение Тогда\n{CALL}#КонецЕсли\nКонецПроцедуры\n"
+        let branch = in_common_module(
+            &format!(
+                "Процедура Тест() Экспорт\n#Если ТолстыйКлиентОбычноеПриложение Тогда\n{CALL}#КонецЕсли\nКонецПроцедуры\n"
+            ),
+            false,
+        );
+        assert!(branch.is_empty(), "a server module never compiles that branch: {branch:?}");
+    }
+
+    /// The input that tells a token walk from a compiled-branch walk: the same
+    /// `Ждать` once in the plain body and once under a branch the server skips.
+    #[test]
+    fn await_in_an_uncompiled_branch_stays_silent() {
+        const AWAIT: &str = "    Ждать Пауза();\n";
+        let awaits = |messages: Vec<String>| {
+            messages.into_iter().filter(|m| m.contains("'Ждать'")).collect::<Vec<_>>()
+        };
+        let plain = awaits(in_common_module(
+            &format!("Процедура Тест() Экспорт\n{AWAIT}КонецПроцедуры\n"),
+            false,
+        ));
+        assert_eq!(plain.len(), 1, "the server compiles the plain `Ждать`: {plain:?}");
+        let branch = awaits(in_common_module(
+            &format!(
+                "Процедура Тест() Экспорт\n#Если ТолстыйКлиентОбычноеПриложение Тогда\n    Если Истина Тогда\n    {AWAIT}    КонецЕсли;\n#КонецЕсли\nКонецПроцедуры\n"
+            ),
+            false,
         ));
         assert!(branch.is_empty(), "a server module never compiles that branch: {branch:?}");
+    }
+
+    #[test]
+    fn async_in_a_module_compiled_nowhere_stays_silent() {
+        const BODY: &str = "Асинх Процедура Тест() Экспорт\n    Ждать Пауза();\nКонецПроцедуры\n";
+        let server = in_common_module(BODY, false);
+        assert_eq!(server.len(), 2, "`Асинх` and `Ждать` in a server module: {server:?}");
+        let nowhere = in_common_module(BODY, true);
+        assert!(nowhere.is_empty(), "a module compiled nowhere cannot fail: {nowhere:?}");
     }
 
     #[test]

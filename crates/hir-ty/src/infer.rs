@@ -638,6 +638,9 @@ pub struct InferenceContext<'db> {
     /// so the branch may be compiled nowhere.
     in_uncompiled_branch: bool,
 
+    /// Statements walked while [`Self::in_uncompiled_branch`] held.
+    uncompiled_stmts: Vec<StmtId>,
+
     /// The project's `min_platform_version`, parsed once per body; `None` turns
     /// the min-platform check off entirely.
     min_platform: Option<bsl_platform::PlatformVersion>,
@@ -679,6 +682,10 @@ pub struct BodyInferenceResult {
     pub expr_types: FxHashMap<ExprId, TypeId>,
     pub diagnostics: Vec<InferenceDiagnostic>,
     pub call_arg_bindings: Vec<CallArgBinding>,
+    /// Statements walked inside a `#Если` branch nothing proves compiled (see
+    /// `InferenceContext::in_uncompiled_branch`): the syntax-level checks that
+    /// must stay silent there read it.
+    pub uncompiled_stmts: Vec<StmtId>,
 
     pub(crate) return_expr_ids: Vec<ExprId>,
 }
@@ -693,6 +700,7 @@ impl BodyInferenceResult {
             expr_types: FxHashMap::default(),
             diagnostics: Vec::new(),
             call_arg_bindings: Vec::new(),
+            uncompiled_stmts: Vec::new(),
             return_expr_ids: Vec::new(),
         }
     }
@@ -707,6 +715,8 @@ pub struct ModuleCodeInferenceResult {
     pub expr_types: FxHashMap<ExprId, TypeId>,
     pub diagnostics: Vec<InferenceDiagnostic>,
     pub call_arg_bindings: Vec<CallArgBinding>,
+    /// See [`BodyInferenceResult::uncompiled_stmts`].
+    pub uncompiled_stmts: Vec<StmtId>,
 }
 
 impl Default for ModuleCodeInferenceResult {
@@ -719,6 +729,7 @@ impl Default for ModuleCodeInferenceResult {
             expr_types: FxHashMap::default(),
             diagnostics: Vec::new(),
             call_arg_bindings: Vec::new(),
+            uncompiled_stmts: Vec::new(),
         }
     }
 }
@@ -737,6 +748,7 @@ impl ModuleCodeInferenceResult {
             expr_types: body.expr_types,
             diagnostics: body.diagnostics,
             call_arg_bindings: body.call_arg_bindings,
+            uncompiled_stmts: body.uncompiled_stmts,
         }
     }
 }
@@ -808,6 +820,13 @@ impl InferOwnerResult {
         match self {
             InferOwnerResult::Method(r) => &r.call_arg_bindings,
             InferOwnerResult::ModuleCode(r) => &r.call_arg_bindings,
+        }
+    }
+
+    pub fn uncompiled_stmts(&self) -> &[StmtId] {
+        match self {
+            InferOwnerResult::Method(r) => &r.uncompiled_stmts,
+            InferOwnerResult::ModuleCode(r) => &r.uncompiled_stmts,
         }
     }
 }
@@ -901,9 +920,10 @@ impl<'db> InferenceContext<'db> {
             body_env,
             checked_env: opts.checked_environments,
             in_uncompiled_branch: false,
+            uncompiled_stmts: Vec::new(),
             min_platform: db
                 .min_platform_version()
-                .and_then(|value| bsl_platform::PlatformVersion::parse_catalog(&value)),
+                .and_then(|value| bsl_platform::PlatformVersion::parse_release(&value)),
             global_exports: None,
             global_read_exports: None,
             global_surface_partly_unknown: false,
@@ -1688,6 +1708,7 @@ impl<'db> InferenceContext<'db> {
             expr_types: self.expr_types,
             diagnostics: self.diagnostics,
             call_arg_bindings: self.call_arg_bindings,
+            uncompiled_stmts: self.uncompiled_stmts,
             return_expr_ids: self.return_expr_ids,
         }
     }
@@ -2120,6 +2141,9 @@ impl<'db> InferenceContext<'db> {
     }
 
     fn infer_stmt(&mut self, stmt_idx: StmtIdx) {
+        if self.in_uncompiled_branch {
+            self.uncompiled_stmts.push(StmtId::from_idx(stmt_idx));
+        }
         let stmt = self.body.stmt_idx(stmt_idx).clone();
         match &stmt {
             Stmt::Assign { target, value } => {
@@ -3759,26 +3783,12 @@ impl<'db> InferenceContext<'db> {
         });
     }
 
-    /// A common module whose flags select no environment at all: the platform accepts
-    /// it and compiles its body nowhere, so nothing in it can fail (checked with
-    /// `/CheckModules` for every environment on 8.3.17 and 8.3.27). Such modules occur
-    /// in real configurations: a developer-tools library ships one. An empty
-    /// [`Self::body_env`] cannot carry this: it also means "environment unknown".
+    /// See [`hir_def::ModuleMetadata::compiles_nowhere`].
     fn module_compiles_nowhere(&self) -> bool {
         let Some(module_id) = self.get_resolver().module_id() else {
             return false;
         };
-        let metadata = self.db.module_metadata(module_id);
-        if metadata.module_type != bsl_metadata::ModuleType::CommonModule {
-            return false;
-        }
-        metadata.common_module.as_deref().is_some_and(|module| {
-            !(module.is_server()
-                || module.is_server_call()
-                || module.is_external_connection()
-                || module.is_client_managed_application()
-                || module.is_client_ordinary_application())
-        })
+        self.db.module_metadata(module_id).compiles_nowhere()
     }
 
     /// What a bare name in this module implicitly hangs off — the value `ЭтотОбъект`
