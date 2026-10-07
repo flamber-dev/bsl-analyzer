@@ -136,6 +136,12 @@ mod tests {
         assert_eq!(effective_mode(Some("8.3.x")), None);
         assert_eq!(effective_mode(Some("8.2.13 (опечатка)")), None);
         assert_eq!(effective_mode(Some("Version8_2_13 (опечатка)")), None);
+        assert_eq!(effective_mode(Some("1.0")), None);
+        assert_eq!(effective_mode(Some("8.3.17.1549")), None);
+        assert_eq!(
+            effective_mode(Some("Version8_1")),
+            Some(PlatformVersion { major: 8, minor: 1, patch: 0, build: None })
+        );
         assert_eq!(effective_mode(None), None);
     }
 }

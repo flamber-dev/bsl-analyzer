@@ -92,7 +92,8 @@ impl PlatformVersion {
             .or_else(|| value.strip_prefix("Версия"))
             .map(|rest| rest.replace('_', "."));
         let version = Self::parse_release(digits.as_deref().unwrap_or(value))?;
-        Some(Some(version))
+        // Every mode is an 8.x release line; a build number never names one.
+        (version.major == 8 && version.build.is_none()).then_some(Some(version))
     }
 }
 
