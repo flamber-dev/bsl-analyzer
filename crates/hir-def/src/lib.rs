@@ -373,6 +373,24 @@ pub struct ModuleMetadata {
 }
 
 impl ModuleMetadata {
+    /// A common module whose flags select no environment at all: the platform accepts
+    /// it and compiles its body nowhere, so nothing in it can fail (checked with
+    /// `/CheckModules` for every environment on 8.3.17 and 8.3.27). Such modules occur
+    /// in real configurations: a developer-tools library ships one. An empty
+    /// execution environment cannot carry this: it also means "environment unknown".
+    pub fn compiles_nowhere(&self) -> bool {
+        if self.module_type != bsl_metadata::ModuleType::CommonModule {
+            return false;
+        }
+        self.common_module.as_deref().is_some_and(|module| {
+            !(module.is_server()
+                || module.is_server_call()
+                || module.is_external_connection()
+                || module.is_client_managed_application()
+                || module.is_client_ordinary_application())
+        })
+    }
+
     /// Whether this is the module of an ORDINARY form (a `Form.bin` dialog): code of
     /// a thick client only, with no compilation directives.
     /// Managed-form rules (directive defaults, `ЭтотОбъект`, `ОткрытьФорму`, no modal

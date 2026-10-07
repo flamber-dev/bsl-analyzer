@@ -38,14 +38,18 @@ impl PlatformVersion {
         (self.major, self.minor, self.patch) == (other.major, other.minor, other.patch)
     }
 
-    /// Lenient parse of a catalog "available since" value or a configured release:
-    /// `8.0`, `8.3.6`, `8.3.17.1549`, and the help's suffixed spelling
-    /// `8.3.6 (в режиме совместимости с версией 8.3.6 и последующими)` — the base
-    /// is the text before ` (`. Two to four numeric parts; missing ones are 0.
-    /// Anything else is `None`, which callers treat as "no version known".
+    /// Lenient parse of a catalog "available since" value: [`Self::parse_release`]
+    /// of the text before ` (`, so the help's suffixed spelling
+    /// `8.3.6 (в режиме совместимости с версией 8.3.6 и последующими)` reads as
+    /// `8.3.6`. Anything else is `None`, which callers treat as "no version known".
     pub fn parse_catalog(value: &str) -> Option<Self> {
-        let base = value.split_once(" (").map_or(value, |(base, _)| base).trim();
-        let parts = base.split('.').collect::<Vec<_>>();
+        Self::parse_release(value.split_once(" (").map_or(value, |(base, _)| base))
+    }
+
+    /// A release as a person writes it in a setting: `8.0`, `8.3.6`, `8.3.17.1549`.
+    /// Two to four numeric parts, missing ones are 0; any other text is `None`.
+    pub fn parse_release(value: &str) -> Option<Self> {
+        let parts = value.trim().split('.').collect::<Vec<_>>();
         if !(2..=4).contains(&parts.len()) {
             return None;
         }
@@ -407,6 +411,12 @@ mod tests {
         assert_eq!(PlatformVersion::parse_catalog(""), None);
         assert_eq!(PlatformVersion::parse_catalog("8.3.x"), None);
         assert_eq!(PlatformVersion::parse_catalog("8.3.1.2.3"), None);
+        assert_eq!(PlatformVersion::parse_release("8.3.17.1549"), Some(v(8, 3, 17, Some(1549))));
+        assert_eq!(
+            PlatformVersion::parse_release("8.3.17 (typo)"),
+            None,
+            "a setting takes no suffix: the compatibility-mode spelling is the catalog's"
+        );
 
         let min = PlatformVersion::parse_catalog("8.3.17.1549").unwrap();
         assert!(PlatformVersion::parse_catalog("8.3.18").unwrap().release_newer_than(min));
