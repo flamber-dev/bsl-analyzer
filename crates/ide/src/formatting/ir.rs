@@ -418,14 +418,16 @@ fn is_block_boundary_keyword(kind: SyntaxKind) -> bool {
 }
 
 /// Whether the token heads a method declaration: its `Процедура`/`Функция`
-/// keyword, or the lead token of a compilation directive (`&НаКлиенте`) or
-/// method annotation (`&Вместо(...)`) attached to that declaration. The
-/// annotation's own `PROCEDURE_DEF`/`FUNCTION_DEF` counts toward its depth, yet
-/// it sits at the declaration's indent. An annotation the parser did not attach
-/// to a method (e.g. before a local `Перем`) stays at the depth it is found at.
+/// keyword, its `Асинх` modifier, or the lead token of a compilation directive
+/// (`&НаКлиенте`) or method annotation (`&Вместо(...)`) attached to that
+/// declaration. Their own `PROCEDURE_DEF`/`FUNCTION_DEF` counts toward their
+/// depth, yet they sit at the declaration's indent. An annotation the parser did
+/// not attach to a method (e.g. before a local `Перем`) stays at the depth it is
+/// found at.
 fn is_method_header_token(kind: SyntaxKind, parent: &SyntaxNode) -> bool {
     match kind {
         SyntaxKind::KW_PROCEDURE | SyntaxKind::KW_FUNCTION => true,
+        SyntaxKind::KW_ASYNC => is_method_def(parent.kind()),
         SyntaxKind::ANN_AT_CLIENT
         | SyntaxKind::ANN_AT_SERVER
         | SyntaxKind::ANN_AT_SERVER_NO_CONTEXT

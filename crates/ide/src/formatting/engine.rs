@@ -224,6 +224,13 @@ mod tests {
     }
 
     #[test]
+    fn test_directive_before_async_method_not_indented() {
+        let code = "Процедура А()\nКонецПроцедуры\n\n&НаКлиенте\nАсинх Процедура Б()\nКонецПроцедуры\n\n&НаКлиенте\n\nАсинх Функция В()\nКонецФункции";
+        let expected = "Процедура А()\nКонецПроцедуры\n\n&НаКлиенте\nАсинх Процедура Б()\nКонецПроцедуры\n\n&НаКлиенте\n\nАсинх Функция В()\nКонецФункции\n";
+        assert_eq!(format(code), expected);
+    }
+
+    #[test]
     fn test_trim_trailing_whitespace() {
         let code = "Процедура Тест()   \nКонецПроцедуры  ";
         let formatted = format(code);
