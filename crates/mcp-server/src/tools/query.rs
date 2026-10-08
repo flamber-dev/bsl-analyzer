@@ -427,9 +427,11 @@ fn render_text(
     if local.is_metadata_checked() {
         out.push_str("Локальная проверка по метаданным workspace\n");
     } else {
+        // Every byte here is outside the budget's reach — trimming drops findings, never this
+        // line — so it says "not checked, call again" once and no more.
         out.push_str(
-            "Локальная проверка без метаданных workspace: НЕ ПРОВЕРЕНО по метаданным \
-             (поля, таблицы и параметры виртуальных таблиц не сверялись)\n",
+            "Локальная проверка без метаданных workspace: НЕ ПРОВЕРЕНО по метаданным — \
+             повторите вызов позже\n",
         );
         if let Some(reason) = &local.degraded_reason {
             let _ = writeln!(out, "  причина: {reason}");
@@ -442,10 +444,7 @@ fn render_text(
         } else {
             // "No findings" here would read as a verdict on the whole query, and it is one only
             // on the text: the rules that need metadata never ran.
-            out.push_str(
-                "  замечаний по тексту запроса нет; по метаданным запрос НЕ проверен — повторите вызов, \
-                 когда метаданные будут готовы\n",
-            );
+            out.push_str("  замечаний по тексту запроса нет\n");
         }
     } else {
         for (_, line) in local_items {
@@ -1014,10 +1013,7 @@ mod tests {
             roots: Vec::new(),
         };
         let platform = PlatformBlock { valid: Some(false), errors, error: None };
-        // Above the fixed skeleton of a degraded answer, whose header and verdict line spell out
-        // that the query was not checked against metadata: below it no truncation can fit the
-        // budget, and the test would measure that floor instead of the note.
-        let budget_tokens = 300usize;
+        let budget_tokens = 200usize;
 
         let render = render_validation("ВЫБРАТЬ 1", local, None, Some(platform), budget_tokens);
         let envelope = render.structured_content.clone().expect("structured");
