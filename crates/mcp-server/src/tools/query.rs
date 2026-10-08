@@ -13,7 +13,7 @@ pub fn schema() -> CallToolResult {
     structured(json!({
         "schema_version": "2",
         "actions": ["validate", "execute", "schema"],
-        "validate": "check an SDBL query. Offline it runs the parser AND the workspace query rules; with the metadata substrate ready the metadata-aware rules (unknown field, missing table) run too. The answer names its own completeness per block: `workspace_semantics` | `parser` | `platform`, and the local block says it in words too — `metadata_checked` (bool) and `status` (`checked_against_metadata` | `not_checked_against_metadata`). An empty `diagnostics` under `not_checked_against_metadata` is NOT a verdict on fields and tables: repeat the call. With --onec-url the platform's verdict is added as a second block, never replacing the local one.",
+        "validate": "check an SDBL query. Offline it runs the parser AND the workspace query rules; with the metadata substrate ready the metadata-aware rules (unknown field, missing table) run too. The answer names its own completeness per block: `workspace_semantics` | `parser` | `platform`, and the local block says it in words too — `metadata_checked` (bool) and `status` (`checked_against_metadata` | `not_checked_against_metadata`). An empty `diagnostics` under `not_checked_against_metadata` is NOT a verdict on fields and tables; `degraded_reason` says whether repeating the call can help. With --onec-url the platform's verdict is added as a second block, never replacing the local one.",
         "execute": "run a SELECT query against the live 1C base (requires --onec-url). `limit` caps rows; `parameters` binds named query parameters.",
         "params": {
             "query": "the SDBL text (required for validate and execute)",
@@ -428,11 +428,9 @@ fn render_text(
         out.push_str("Локальная проверка по метаданным workspace\n");
     } else {
         // Every byte here is outside the budget's reach — trimming drops findings, never this
-        // line — so it says "not checked, call again" once and no more.
-        out.push_str(
-            "Локальная проверка без метаданных workspace: НЕ ПРОВЕРЕНО по метаданным — \
-             повторите вызов позже\n",
-        );
+        // line. Whether a repeated call can help depends on the cause, so that advice is left
+        // to the reason line below.
+        out.push_str("Локальная проверка без метаданных workspace: НЕ ПРОВЕРЕНО по метаданным\n");
         if let Some(reason) = &local.degraded_reason {
             let _ = writeln!(out, "  причина: {reason}");
         }
