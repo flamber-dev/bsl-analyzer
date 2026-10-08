@@ -126,6 +126,8 @@ async fn a_ready_workspace_answers_with_metadata_semantics() {
         local(&envelope)["degraded_reason"].is_null(),
         "a complete answer states no reason to be incomplete: {envelope}",
     );
+    assert_eq!(local(&envelope)["metadata_checked"], true, "{envelope}");
+    assert_eq!(local(&envelope)["status"], "checked_against_metadata", "{envelope}");
 }
 
 /// The first call happens while the resident is still cold, so it is the degraded answer —
@@ -152,6 +154,10 @@ async fn the_first_call_degrades_without_claiming_completeness() {
             codes(&first).iter().any(|c| c == "JoinWithSubQuery"),
             "the structural rules still apply while metadata loads: {first}",
         );
+        // Said in words as well as by `backend`: a caller that only looks for an empty list of
+        // findings must not take this answer for a check against metadata.
+        assert_eq!(local(&first)["metadata_checked"], false, "{first}");
+        assert_eq!(local(&first)["status"], "not_checked_against_metadata", "{first}");
     }
 
     // Whatever the first call saw, the tool must have kicked the build — otherwise a workspace
