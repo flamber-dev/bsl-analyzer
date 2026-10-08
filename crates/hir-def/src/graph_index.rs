@@ -2004,6 +2004,10 @@ pub fn display_scope(key: &ModuleKey) -> String {
         ModuleKey::Manager { mdo_type, name } => {
             format!("{}.{name}.МодульМенеджера", mdo_type.russian_name())
         }
+        // A constant's object slot holds its value-manager module.
+        ModuleKey::Object { mdo_type: MdoType::Constant, name } => {
+            format!("{}.{name}.МодульМенеджераЗначения", MdoType::Constant.russian_name())
+        }
         ModuleKey::Object { mdo_type, name } => {
             format!("{}.{name}.МодульОбъекта", mdo_type.russian_name())
         }
