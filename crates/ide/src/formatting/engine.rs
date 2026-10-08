@@ -208,6 +208,22 @@ mod tests {
     }
 
     #[test]
+    fn test_blank_line_inside_method_header_not_indented() {
+        let code = "&Перед(\"П\")\n\n&НаКлиенте\n\nПроцедура П()\nКонецПроцедуры";
+        let expected = "&Перед(\"П\")\n\n&НаКлиенте\n\nПроцедура П()\nКонецПроцедуры\n";
+        assert_eq!(format(code), expected);
+    }
+
+    #[test]
+    fn test_annotation_not_attached_to_method_keeps_body_indent() {
+        // Inside a body the parser does not attach the annotation to any
+        // declaration, so it indents like the statement around it.
+        let code = "Процедура П()\nЕсли 1 Тогда\n&НаКлиенте\nПерем А;\nКонецЕсли;\nКонецПроцедуры";
+        let expected = "Процедура П()\n\tЕсли 1 Тогда\n\t\t&НаКлиенте\n\t\tПерем А;\n\tКонецЕсли;\nКонецПроцедуры\n";
+        assert_eq!(format(code), expected);
+    }
+
+    #[test]
     fn test_trim_trailing_whitespace() {
         let code = "Процедура Тест()   \nКонецПроцедуры  ";
         let formatted = format(code);
