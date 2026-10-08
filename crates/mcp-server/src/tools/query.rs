@@ -1014,7 +1014,10 @@ mod tests {
             roots: Vec::new(),
         };
         let platform = PlatformBlock { valid: Some(false), errors, error: None };
-        let budget_tokens = 200usize;
+        // Above the fixed skeleton of a degraded answer, whose header and verdict line spell out
+        // that the query was not checked against metadata: below it no truncation can fit the
+        // budget, and the test would measure that floor instead of the note.
+        let budget_tokens = 300usize;
 
         let render = render_validation("ВЫБРАТЬ 1", local, None, Some(platform), budget_tokens);
         let envelope = render.structured_content.clone().expect("structured");
