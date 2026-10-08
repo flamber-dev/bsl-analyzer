@@ -1,8 +1,9 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
 use hir::call_graph::{CallTarget, CallerId, EdgeKind};
 use hir::{AnnotationKind, Expr, IdConversion, Stmt};
+use ide_db::TextRange;
 use rustc_hash::FxHashSet;
 use stdx::case::CaseExt;
 
@@ -102,7 +103,18 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                     severity: ctx.severity(code),
                     range,
                     tags: ctx.tags(code),
-                    fixes: vec![],
+                    // Passing by value changes what the callee may do to the argument, so the
+                    // fix is opt-in and excluded from `source.fixAll`.
+                    fixes: vec![Fix::manual(
+                        format!(
+                            "Установить модификатор \"Знач\" для параметра {}",
+                            param.name.as_str()
+                        ),
+                        vec![TextEdit {
+                            range: TextRange::empty(range.start()),
+                            new_text: "Знач ".to_string(),
+                        }],
+                    )],
                 });
             }
         }
@@ -172,8 +184,25 @@ fn collect_assigned_from_stmt(stmt: &Stmt, body: &hir::Body, assigned: &mut FxHa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::check_diagnostics_snapshot_for;
+    use crate::test_utils::{check_diagnostics_snapshot_for, check_hir_diagnostic};
     use expect_test::expect;
+
+    #[test]
+    fn fix_inserts_znach_before_param() {
+        let code = "&НаКлиенте\nПроцедура Клиент()\n    Сервер(2);\nКонецПроцедуры\n\n&НаСервере\nПроцедура Сервер(Парам1)\nКонецПроцедуры\n";
+        let diags: Vec<_> = check_hir_diagnostic(code)
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::TransferringParametersBetweenClientAndServer)
+            .collect();
+        assert_eq!(diags.len(), 1, "expected exactly one diagnostic");
+        assert_eq!(diags[0].fixes.len(), 1, "expected a quick fix: {:?}", diags[0].fixes);
+        let edit = &diags[0].fixes[0].edits[0];
+        let start: usize = edit.range.start().into();
+        let end: usize = edit.range.end().into();
+        let mut s = code.to_string();
+        s.replace_range(start..end, &edit.new_text);
+        assert!(s.contains("Процедура Сервер(Знач Парам1)"), "got: {s}");
+    }
     #[test]
     fn test_by_ref_param_in_server_method_called_from_client() {
         let code = r#"&НаКлиенте
