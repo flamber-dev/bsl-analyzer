@@ -107,6 +107,32 @@ mod tests {
         assert_eq!(codes.len(), 1, "ожидался ровно вызов модуля, не сериализатор: {codes:?}");
     }
 
+    /// В модуле формы без читаемых метаданных неразрешённый получатель молчит как
+    /// возможный реквизит формы, но запуск внешнего приложения по написанию
+    /// остаётся: замолчавшая точка безопасности хуже вердикта по имени.
+    #[test]
+    fn unresolved_receiver_in_form_without_metadata_still_detected_by_name() {
+        let fixture = r#"
+//- /CommonModules/Прочий/Ext/Module.bsl
+Процедура Что() Экспорт
+КонецПроцедуры
+
+//- /Catalogs/Тест/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+Процедура Тест()
+    ФайловаяСистемаКлиент.ОткрытьФайл(Путь);
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic_with_fixtures(fixture);
+        assert!(
+            diagnostics.iter().any(|d| d.code == DiagnosticCode::ExternalAppStarting),
+            "ожидался запуск внешнего приложения: {diagnostics:?}"
+        );
+        assert!(
+            !diagnostics.iter().any(|d| d.code == DiagnosticCode::UnresolvedMethodCall),
+            "получатель в форме без метаданных не должен считаться неразрешённым: {diagnostics:?}"
+        );
+    }
+
     /// Нечитаемое тело постороннего общего модуля не должно гасить вердикт
     /// о голом запуске: это суждение об имени, а не о контракте аргументов.
     #[test]

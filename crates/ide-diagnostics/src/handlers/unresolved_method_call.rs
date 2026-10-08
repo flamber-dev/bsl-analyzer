@@ -120,6 +120,29 @@ mod tests {
     }
 
     #[test]
+    fn form_module_untyped_receiver_is_silent_not_unresolved_module() {
+        // In a form module a bare-identifier receiver that resolves to nothing is almost
+        // always a form attribute / element / the main object `Объект`. Half the config's
+        // forms are binary (`Form.bin`, no `Form.xml`), so their attribute list cannot be
+        // read at all — such a call must not be reported as "не удалось разрешить модуль".
+        // (The harness never loads `Form.xml`, so this models exactly the binary-form case.)
+        let fixture = r#"
+//- /Catalogs/Тест/Forms/ФормаЭлемента/Ext/Form/Module.bsl
+Процедура Обработчик()
+    Объект.Пустая();
+    ТЗВходит.Добавить();
+КонецПроцедуры
+"#;
+        let diags = check_hir_diagnostic_with_fixtures(fixture);
+        let umc: Vec<_> =
+            diags.iter().filter(|d| d.code == DiagnosticCode::UnresolvedMethodCall).collect();
+        assert!(
+            umc.is_empty(),
+            "untyped form-module receivers must stay silent, not fire UnresolvedMethodCall: {umc:?}"
+        );
+    }
+
+    #[test]
     fn unresolved_receiver_messages_are_neutral_for_both_reasons() {
         let receiver = Name::new("НеизвестныйПолучатель");
         for kind in
@@ -489,6 +512,32 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::UnresolvedMethodCall)
             .map(|d| d.message)
             .collect()
+    }
+
+    #[test]
+    fn managed_form_with_readable_metadata_still_reports_unknown_receiver() {
+        // The silence for unresolved bare receivers holds only where the form's attribute
+        // list cannot be read. A managed form with readable metadata enumerates its
+        // attributes, so a name matching none of them is still reported — as an
+        // undefined name, which subsumes the unresolved-receiver verdict.
+        let diags = crate::test_utils::check_form_with_common_modules(
+            "&НаКлиенте\nПроцедура Сохранить()\n    НеизвестныйМодуль.Метод();\nКонецПроцедуры\n",
+            &[],
+        );
+        let reported: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.code,
+                    DiagnosticCode::UnresolvedName | DiagnosticCode::UnresolvedMethodCall
+                ) && d.message.contains("НеизвестныйМодуль")
+            })
+            .collect();
+        assert_eq!(
+            reported.len(),
+            1,
+            "expected the unknown receiver to be reported once, got: {diags:?}"
+        );
     }
 
     #[test]
