@@ -1213,3 +1213,75 @@ fn assigned_local_over_method_beats_same_named_object_member() {
         items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>()
     );
 }
+
+fn write_enum_fixture(root: &Path) {
+    std::fs::create_dir_all(root.join("Enums")).expect("create Enums directory");
+    std::fs::write(
+        root.join("Configuration.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Configuration uuid="11111111-1111-1111-1111-111111111111">
+        <Properties>
+            <Name>EnumConfig</Name>
+        </Properties>
+        <ChildObjects>
+            <Enum>Разрядность</Enum>
+        </ChildObjects>
+    </Configuration>
+</MetaDataObject>"#,
+    )
+    .expect("write synthetic Configuration.xml");
+    std::fs::write(
+        root.join("Enums/Разрядность.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Enum uuid="22222222-2222-2222-2222-222222222222">
+        <Properties>
+            <Name>Разрядность</Name>
+        </Properties>
+        <ChildObjects>
+            <EnumValue uuid="33333333-3333-3333-3333-333333333331">
+                <Properties>
+                    <Name>x64</Name>
+                </Properties>
+            </EnumValue>
+            <EnumValue uuid="33333333-3333-3333-3333-333333333332">
+                <Properties>
+                    <Name>x32</Name>
+                </Properties>
+            </EnumValue>
+        </ChildObjects>
+    </Enum>
+</MetaDataObject>"#,
+    )
+    .expect("write synthetic Enum XML");
+}
+
+#[test]
+fn completion_after_enum_manager_offers_enum_values() {
+    let temp_dir = tempfile::tempdir().expect("create synthetic config tempdir");
+    write_enum_fixture(temp_dir.path());
+
+    let items = complete_with_config_path(
+        r#"//- /test.bsl
+Функция Тест()
+    Если Истина Тогда
+        Возврат Перечисления.Разрядность.$0
+    КонецЕсли;
+КонецФункции
+"#,
+        temp_dir.path(),
+    );
+
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    for value in ["x64", "x32"] {
+        let item = item_with_label(&items, value).unwrap_or_else(|| {
+            panic!("enum value {value} must complete after Перечисления.Разрядность.; labels: {labels:?}")
+        });
+        assert_eq!(item.kind, CompletionItemKind::EnumMember);
+    }
+    assert!(
+        has_label(&items, "ПустаяСсылка"),
+        "manager methods must still be offered next to the values; labels: {labels:?}"
+    );
+}
