@@ -246,11 +246,16 @@ fn decide_newline_gap(ir: &Ir, gap_index: usize, gap_text: &str) -> GapDecision 
     let next_kind = ir.atoms[gap_index].kind;
     let body_level = block_depth(&lca);
     let next_depth = block_depth(next_node);
-    let final_level = if is_block_boundary_keyword(next_kind) {
+    let in_method_header = is_method_header_token(next_kind, next_node);
+    let final_level = if is_block_boundary_keyword(next_kind) || in_method_header {
         next_depth.saturating_sub(1)
     } else {
         next_depth
     };
+    // Blank lines between a method's directives/annotations and its keyword
+    // belong to the header, not the body, so they take the header's indent.
+    let body_level =
+        if in_method_header && is_method_def(lca.kind()) { final_level } else { body_level };
     let newlines = count_newlines(gap_text);
     GapDecision::NewlineWithIndent { newlines, body_level, final_level }
 }
@@ -410,6 +415,38 @@ fn is_block_boundary_keyword(kind: SyntaxKind) -> bool {
             | SyntaxKind::PRE_ELSE
             | SyntaxKind::PRE_END_IF
     )
+}
+
+/// Whether the token heads a method declaration: its `Процедура`/`Функция`
+/// keyword, its `Асинх` modifier, or the lead token of a compilation directive
+/// (`&НаКлиенте`) or method annotation (`&Вместо(...)`) attached to that
+/// declaration. Their own `PROCEDURE_DEF`/`FUNCTION_DEF` counts toward their
+/// depth, yet they sit at the declaration's indent. An annotation the parser did
+/// not attach to a method (e.g. before a local `Перем`) stays at the depth it is
+/// found at.
+fn is_method_header_token(kind: SyntaxKind, parent: &SyntaxNode) -> bool {
+    match kind {
+        SyntaxKind::KW_PROCEDURE | SyntaxKind::KW_FUNCTION => true,
+        SyntaxKind::KW_ASYNC => is_method_def(parent.kind()),
+        SyntaxKind::ANN_AT_CLIENT
+        | SyntaxKind::ANN_AT_SERVER
+        | SyntaxKind::ANN_AT_SERVER_NO_CONTEXT
+        | SyntaxKind::ANN_AT_CLIENT_AT_SERVER
+        | SyntaxKind::ANN_AT_CLIENT_AT_SERVER_NO_CONTEXT
+        | SyntaxKind::ANN_BEFORE
+        | SyntaxKind::ANN_AFTER
+        | SyntaxKind::ANN_AROUND
+        | SyntaxKind::ANN_CHANGE_AND_VALIDATE
+        | SyntaxKind::ANN_CUSTOM => {
+            matches!(parent.kind(), SyntaxKind::COMPILER_DIRECTIVE | SyntaxKind::ANNOTATION)
+                && parent.parent().is_some_and(|decl| is_method_def(decl.kind()))
+        }
+        _ => false,
+    }
+}
+
+fn is_method_def(kind: SyntaxKind) -> bool {
+    matches!(kind, SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF)
 }
 
 fn is_statement_boundary_container(kind: SyntaxKind) -> bool {

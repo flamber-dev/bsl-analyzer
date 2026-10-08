@@ -13,7 +13,7 @@ pub fn schema() -> CallToolResult {
     structured(json!({
         "schema_version": "2",
         "actions": ["validate", "execute", "schema"],
-        "validate": "check an SDBL query. Offline it runs the parser AND the workspace query rules; with the metadata substrate ready the metadata-aware rules (unknown field, missing table) run too. The answer names its own completeness per block: `workspace_semantics` | `parser` | `platform`. With --onec-url the platform's verdict is added as a second block, never replacing the local one.",
+        "validate": "check an SDBL query. Offline it runs the parser AND the workspace query rules; with the metadata substrate ready the metadata-aware rules (unknown field, missing table) run too. The answer names its own completeness per block: `workspace_semantics` | `parser` | `platform`, and the local block says it in words too — `metadata_checked` (bool) and `status` (`checked_against_metadata` | `not_checked_against_metadata`). An empty `diagnostics` under `not_checked_against_metadata` is NOT a verdict on fields and tables; `degraded_reason` says whether repeating the call can help. With --onec-url the platform's verdict is added as a second block, never replacing the local one.",
         "execute": "run a SELECT query against the live 1C base (requires --onec-url). `limit` caps rows; `parameters` binds named query parameters.",
         "params": {
             "query": "the SDBL text (required for validate and execute)",
@@ -112,6 +112,12 @@ struct LocalBlock {
     /// the list of participants would report a root as having contributed when it only got
     /// named.
     roots: Vec<String>,
+}
+
+impl LocalBlock {
+    fn is_metadata_checked(&self) -> bool {
+        self.backend == "workspace_semantics"
+    }
 }
 
 /// Step 2. Always runs, always exactly one block.
@@ -347,8 +353,17 @@ fn envelope_and_text(
 ) -> (serde_json::Value, String) {
     let mut results = Vec::new();
 
+    // Stated in words beside `backend`: a caller that checks only for an empty `diagnostics`
+    // must not be able to read a parse-only answer as "the query is correct".
+    let metadata_checked = local.is_metadata_checked();
     let mut local_json = json!({
         "backend": local.backend,
+        "metadata_checked": metadata_checked,
+        "status": if metadata_checked {
+            "checked_against_metadata"
+        } else {
+            "not_checked_against_metadata"
+        },
         "diagnostics": local_items.iter().map(|(v, _)| v.clone()).collect::<Vec<_>>(),
         "truncated": local_truncated,
     });
@@ -409,17 +424,26 @@ fn render_text(
     let _ = query;
     let mut out = String::new();
 
-    if local.backend == "workspace_semantics" {
+    if local.is_metadata_checked() {
         out.push_str("Локальная проверка по метаданным workspace\n");
     } else {
-        out.push_str("Локальная проверка без метаданных workspace\n");
+        // Every byte here is outside the budget's reach — trimming drops findings, never this
+        // line. Whether a repeated call can help depends on the cause, so that advice is left
+        // to the reason line below.
+        out.push_str("Локальная проверка без метаданных workspace: НЕ ПРОВЕРЕНО по метаданным\n");
         if let Some(reason) = &local.degraded_reason {
             let _ = writeln!(out, "  причина: {reason}");
         }
     }
 
     if local.diagnostics.is_empty() {
-        out.push_str("  замечаний нет\n");
+        if local.is_metadata_checked() {
+            out.push_str("  замечаний нет\n");
+        } else {
+            // "No findings" here would read as a verdict on the whole query, and it is one only
+            // on the text: the rules that need metadata never ran.
+            out.push_str("  замечаний по тексту запроса нет\n");
+        }
     } else {
         for (_, line) in local_items {
             out.push_str(line);
@@ -782,6 +806,41 @@ mod tests {
                 "`{query}` must be reported as broken, got {codes:?}",
             );
         }
+    }
+
+    /// The degraded answer must not end on a sentence that reads as a verdict on the query: an
+    /// agent that stops at "замечаний нет" takes a parse-only answer for a full check. Asserted
+    /// on both halves, because a caller may read either.
+    #[test]
+    fn an_answer_without_metadata_says_the_query_was_not_checked_against_it() {
+        let query = "ВЫБРАТЬ Т.НетТакогоПоля КАК П ИЗ Справочник.Номенклатура КАК Т";
+        let local = LocalBlock {
+            backend: "parser",
+            diagnostics: parse_only(&ide::DiagnosticsConfig::all_enabled(), query),
+            degraded_reason: Some("метаданные workspace ещё не готовы".to_string()),
+            roots: Vec::new(),
+        };
+        let render = render_validation(query, local, None, None, 6000);
+        let text = extract_text(&render).to_string();
+        let envelope = render.structured_content.expect("structured");
+
+        assert!(text.contains("НЕ ПРОВЕРЕНО по метаданным"), "{text}");
+        assert!(!text.contains("замечаний нет"), "{text}");
+        assert_eq!(envelope["results"][0]["metadata_checked"], false, "{envelope}");
+        assert_eq!(envelope["results"][0]["status"], "not_checked_against_metadata");
+
+        let local = LocalBlock {
+            backend: "workspace_semantics",
+            diagnostics: Vec::new(),
+            degraded_reason: None,
+            roots: vec![String::new()],
+        };
+        let render = render_validation(query, local, None, None, 6000);
+        let text = extract_text(&render).to_string();
+        let envelope = render.structured_content.expect("structured");
+        assert!(text.contains("замечаний нет"), "{text}");
+        assert_eq!(envelope["results"][0]["metadata_checked"], true, "{envelope}");
+        assert_eq!(envelope["results"][0]["status"], "checked_against_metadata");
     }
 
     #[test]
