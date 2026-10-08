@@ -627,6 +627,13 @@ fn parse_module_path(path: &str) -> Option<(ModulePathType, String, ModuleFileKi
         match file_kind {
             Some(Conv::ManagerModule) => return Some((mod_type, name, ModuleFileKind::Manager)),
             Some(Conv::ObjectModule) => return Some((mod_type, name, ModuleFileKind::Object)),
+            // Only a constant owns a value-manager module, and it is object-like: its
+            // receiver is `КонстантаМенеджерЗначения.<Имя>`, reached through
+            // `СоздатьМенеджерЗначения()`, never through `Константы.<Имя>`. A constant
+            // has no `ObjectModule.bsl`, so the object slot is free.
+            Some(Conv::ValueManagerModule) if mod_type == ModulePathType::Constant => {
+                return Some((mod_type, name, ModuleFileKind::Object))
+            }
             Some(Conv::RecordSetModule) => {
                 return Some((mod_type, name, ModuleFileKind::RecordSet))
             }
@@ -793,6 +800,54 @@ mod tests {
             ),
             Some(manager),
         );
+    }
+
+    /// A constant's value-manager module is indexed as its OBJECT module: a call through
+    /// `Константы.X` (the manager) must not reach it, and it is not a sibling body of the
+    /// constant's manager module.
+    #[test]
+    fn value_manager_module_is_a_constant_object_module_not_a_manager() {
+        let manager = FileId::from_raw(1);
+        let value_manager = FileId::from_raw(2);
+        let index = ModuleIndex::build_from_paths(
+            [
+                (manager, "Constants/К/Ext/ManagerModule.bsl"),
+                (value_manager, "Constants/К/Ext/ValueManagerModule.bsl"),
+            ]
+            .into_iter(),
+        );
+        let name = Name::new("К");
+
+        assert_eq!(index.manager_candidates(ManagerType::Constants, &name), &[manager]);
+        assert!(index.sibling_bodies(manager).is_empty());
+        assert!(index.sibling_bodies(value_manager).is_empty());
+        assert_eq!(index.resolve_object_module(MdoType::Constant, &name), Some(value_manager));
+        assert_eq!(index.object_module_candidates(MdoType::Constant, &name), &[value_manager]);
+        assert_eq!(
+            module_key_for_path("Constants/К/Ext/ValueManagerModule.bsl"),
+            Some(ModuleKey::Object { mdo_type: MdoType::Constant, name: "К".to_string() }),
+        );
+    }
+
+    /// Only constants own a value-manager module; the same file name under any other
+    /// collection is not a module this index knows.
+    #[test]
+    fn value_manager_module_of_a_non_constant_is_not_indexed() {
+        for (path, mdo_type, name) in [
+            ("Catalogs/Товары/Ext/ValueManagerModule.bsl", MdoType::Catalog, "Товары"),
+            (
+                "InformationRegisters/Регистр/Ext/ValueManagerModule.bsl",
+                MdoType::InformationRegister,
+                "Регистр",
+            ),
+        ] {
+            let index = ModuleIndex::build_from_paths([(FileId::from_raw(1), path)].into_iter());
+            assert_eq!(module_key_for_path(path), None, "{path}");
+            assert!(index.object_module_candidates(mdo_type, &Name::new(name)).is_empty());
+            assert_eq!(index.manager_count(), 0, "{path}");
+            assert_eq!(index.object_module_count(), 0, "{path}");
+            assert_eq!(index.record_set_module_count(), 0, "{path}");
+        }
     }
 
     #[test]
