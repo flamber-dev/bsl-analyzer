@@ -515,6 +515,32 @@ mod tests {
     }
 
     #[test]
+    fn managed_form_with_readable_metadata_still_reports_unknown_receiver() {
+        // The silence for unresolved bare receivers holds only where the form's attribute
+        // list cannot be read. A managed form with readable metadata enumerates its
+        // attributes, so a name matching none of them is still reported — as an
+        // undefined name, which subsumes the unresolved-receiver verdict.
+        let diags = crate::test_utils::check_form_with_common_modules(
+            "&НаКлиенте\nПроцедура Сохранить()\n    НеизвестныйМодуль.Метод();\nКонецПроцедуры\n",
+            &[],
+        );
+        let reported: Vec<_> = diags
+            .iter()
+            .filter(|d| {
+                matches!(
+                    d.code,
+                    DiagnosticCode::UnresolvedName | DiagnosticCode::UnresolvedMethodCall
+                ) && d.message.contains("НеизвестныйМодуль")
+            })
+            .collect();
+        assert_eq!(
+            reported.len(),
+            1,
+            "expected the unknown receiver to be reported once, got: {diags:?}"
+        );
+    }
+
+    #[test]
     fn form_self_call_to_missing_method_emits() {
         let umc = form_umc(
             "&НаКлиенте\nПроцедура Сохранить()\n    ЭтотОбъект.НетТакогоМетода();\nКонецПроцедуры\n",

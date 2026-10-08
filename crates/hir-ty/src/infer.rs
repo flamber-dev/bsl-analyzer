@@ -4374,23 +4374,6 @@ impl<'db> InferenceContext<'db> {
             crate::platform_global_lookup::PlatformGlobalLookup::NotAContainer => {}
         }
 
-        // In a form module whose form metadata is not a readable managed form (binary
-        // `Form.bin`, or no form metadata at all) the attribute list is unknown, so a bare
-        // receiver that resolved to nothing above is most likely a form attribute, element
-        // or the main object (`Объект`). Stay silent (untyped) instead of reporting it as an
-        // unresolved module. A managed form with readable metadata keeps the precise check.
-        if let Some(module_id) = resolver.module_id() {
-            let metadata = self.db.module_metadata(module_id);
-            if metadata.module_type == bsl_metadata::ModuleType::FormModule
-                && !metadata.form.as_ref().is_some_and(|form| form.is_managed())
-            {
-                for arg in args {
-                    self.infer_expr(*arg);
-                }
-                return BareReceiverDispatch::Resolved(self.db.unknown());
-            }
-        }
-
         for arg in args {
             self.infer_expr(*arg);
         }
@@ -4402,21 +4385,32 @@ impl<'db> InferenceContext<'db> {
         // Nothing typed the receiver, so no library module can be recognised by type
         // here. A security hotspot that goes quiet in that state is worse than one
         // judged by name, so the owner is matched by spelling here and only here.
-        // Both unresolved verdicts qualify: a name the workspace calls absent is
-        // still not evidence that the call is something else, and the call already
-        // carries its own unresolved report.
+        // Both unresolved verdicts qualify, and so does a receiver left silent below as
+        // a possible form member: neither is evidence that the call is something else.
         if let Some(category) = guarded_module_call(module_name.as_str(), method_name.as_str()) {
             self.push_inference_diagnostic(InferenceDiagnostic::GuardedCall {
                 expr: call_expr,
                 category,
             });
         }
-        self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
-            expr: call_expr,
-            receiver_name: module_name.clone(),
-            method_name: method_name.clone(),
-            kind,
+        // In a form module whose form metadata is not a readable managed form (binary
+        // `Form.bin`, or no form metadata at all) the attribute list is unknown, so a bare
+        // receiver that resolved to nothing above is most likely a form attribute, element
+        // or the main object (`Объект`). Stay silent (untyped) instead of reporting it as an
+        // unresolved module. A managed form with readable metadata keeps the precise check.
+        let form_surface_unknown = resolver.module_id().is_some_and(|module_id| {
+            let metadata = self.db.module_metadata(module_id);
+            metadata.module_type == bsl_metadata::ModuleType::FormModule
+                && !metadata.form.as_ref().is_some_and(|form| form.is_managed())
         });
+        if !form_surface_unknown {
+            self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
+                expr: call_expr,
+                receiver_name: module_name.clone(),
+                method_name: method_name.clone(),
+                kind,
+            });
+        }
         BareReceiverDispatch::Resolved(self.db.unknown())
     }
 
