@@ -4343,6 +4343,23 @@ impl<'db> InferenceContext<'db> {
             crate::platform_global_lookup::PlatformGlobalLookup::NotAContainer => {}
         }
 
+        // In a form module whose form metadata is not a readable managed form (binary
+        // `Form.bin`, or no form metadata at all) the attribute list is unknown, so a bare
+        // receiver that resolved to nothing above is most likely a form attribute, element
+        // or the main object (`Объект`). Stay silent (untyped) instead of reporting it as an
+        // unresolved module. A managed form with readable metadata keeps the precise check.
+        if let Some(module_id) = resolver.module_id() {
+            let metadata = self.db.module_metadata(module_id);
+            if metadata.module_type == bsl_metadata::ModuleType::FormModule
+                && !metadata.form.as_ref().is_some_and(|form| form.is_managed())
+            {
+                for arg in args {
+                    self.infer_expr(*arg);
+                }
+                return BareReceiverDispatch::Resolved(self.db.unknown());
+            }
+        }
+
         for arg in args {
             self.infer_expr(*arg);
         }
