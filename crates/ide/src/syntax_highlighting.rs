@@ -186,7 +186,7 @@ fn traverse_node<DB: RootDatabase>(
                     continue;
                 }
 
-                if token.kind().is_name_token() {
+                if token.kind().is_name_token() && !is_region_directive_name(&token) {
                     if let Some(hl) = highlight_name_semantic(ctx, &token) {
                         highlights.push(hl);
                         continue;
@@ -312,6 +312,17 @@ fn highlight_token<DB: RootDatabase>(
     };
 
     Some(HlRange { range, tag, modifiers: HlMod::new() })
+}
+
+/// The name in a region directive (`#Область БыстрыйЗапуск`) is the label of a
+/// flat folding marker, not an identifier. It must never be resolved
+/// semantically: when the label happens to match a procedure name, resolving it
+/// would emit a `Function` semantic token that overrides the editor's region
+/// coloring, so that one region reads as a method call while every other region
+/// name looks normal. Leaving it untagged lets the textmate region coloring show
+/// through, consistent with all other region names.
+fn is_region_directive_name(token: &SyntaxToken) -> bool {
+    token.parent().is_some_and(|p| p.kind() == SyntaxKind::PRE_REGION_DIR)
 }
 
 fn highlight_def_site_token(token: &SyntaxToken) -> Option<HlRange> {
@@ -449,6 +460,34 @@ mod tests {
         db.set_file_text(file_id, source);
 
         (db, file_id)
+    }
+
+    #[test]
+    fn test_region_name_matching_proc_is_not_a_method() {
+        // A region whose name matches a procedure name must NOT be highlighted
+        // as a function/method: it is a folding-marker label, not a call.
+        let code =
+            "#Область БыстрыйЗапуск\nПроцедура БыстрыйЗапуск()\nКонецПроцедуры\n#КонецОбласти\n";
+        let (db, file_id) = create_db_with_file(code);
+        let highlights = highlight(&db, file_id);
+
+        // The `#Область` label range (byte offsets of "БыстрыйЗапуск" on line 1).
+        let label_start = "#Область ".len();
+        let label_end = label_start + "БыстрыйЗапуск".len();
+
+        let miscolored = highlights.highlights.iter().any(|hl| {
+            hl.tag == HlTag::Function
+                && usize::from(hl.range.start()) >= label_start
+                && usize::from(hl.range.end()) <= label_end
+        });
+        assert!(!miscolored, "region name must not be tagged as a function/method");
+
+        // The procedure definition on line 2 must still be highlighted normally.
+        let has_proc_def = highlights
+            .highlights
+            .iter()
+            .any(|hl| hl.tag == HlTag::Procedure && usize::from(hl.range.start()) > label_end);
+        assert!(has_proc_def, "the procedure definition must still be highlighted");
     }
 
     #[test]
