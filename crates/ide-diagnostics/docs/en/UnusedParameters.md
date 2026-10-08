@@ -8,6 +8,8 @@ Unused parameters make the API harder to understand and complicate call sites. T
 
 In form modules a method bound as a handler at runtime keeps its platform-fixed signature and is skipped as well: both direct `УстановитьДействие` registrations and any method named by an identifier-shaped string literal in the same module (a command created in code, a helper module fed a parameter structure). String data that coincides with a method name therefore also exempts that method's parameters.
 
+An exported form-module method is skipped too: it is an interface for code outside the form (for example an external data processor calling `Форма.Метод(...)` by name), so the caller dictates its parameters. Non-exported form-module methods are checked as usual.
+
 ## Examples
 
 Incorrect:
