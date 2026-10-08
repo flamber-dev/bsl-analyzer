@@ -3487,25 +3487,9 @@ impl<'db> InferenceContext<'db> {
                     // are the receiver's remaining surface — resolve and judge them
                     // exactly as the equivalent bare call, and report the miss:
                     // unlike a bare name, a self receiver has nowhere else to look.
-                    //
-                    // Only exported methods are members of the form value: a
-                    // non-exported one compiles, but 8.3.17 and 8.3.27 both fail the
-                    // call at run time with «Метод объекта не обнаружен (Имя)», on
-                    // the client and on the server alike. The call still resolves to
-                    // the declaration, so navigation and argument checks keep working.
                     if let Some(self_name) = self.form_self_receiver_name(base_id) {
-                        if self.find_local_method(&method_name).is_some_and(|m| !m.is_export) {
-                            self.push_inference_diagnostic(
-                                InferenceDiagnostic::UnresolvedMethodCall {
-                                    expr: callee,
-                                    receiver_name: self_name.clone(),
-                                    method_name: method_name.clone(),
-                                    kind: UnresolvedMethodKind::SelfMethodNotExport,
-                                },
-                            );
-                        }
                         let result = self
-                            .infer_local_method_call(&method_name, args, callee)
+                            .infer_form_self_call(&self_name, &method_name, args, callee)
                             .unwrap_or_else(|| {
                                 self.push_inference_diagnostic(
                                     InferenceDiagnostic::UnresolvedMethodCall {
@@ -4012,6 +3996,32 @@ impl<'db> InferenceContext<'db> {
         Some(self.record_candidate_call_arg_binding(callee, args, candidates))
     }
 
+    /// `ЭтотОбъект.Метод()` / `ЭтаФорма.Метод()` reaching this form module's own
+    /// method: judged exactly as the equivalent bare call, plus the export rule —
+    /// only exported methods are members of the form value. A non-exported one
+    /// compiles, but 8.3.17 and 8.3.27 both fail the call at run time with «Метод
+    /// объекта не обнаружен (Имя)», on the client and on the server alike. The call
+    /// still resolves to the declaration, so navigation and argument checks keep
+    /// working. `None` means the module declares no such method; whether that is a
+    /// miss is the caller's decision.
+    fn infer_form_self_call(
+        &mut self,
+        self_name: &hir_def::Name,
+        method_name: &hir_def::Name,
+        args: &[ExprId],
+        callee: ExprId,
+    ) -> Option<TypeId> {
+        if self.find_local_method(method_name).is_some_and(|m| !m.is_export) {
+            self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
+                expr: callee,
+                receiver_name: self_name.clone(),
+                method_name: method_name.clone(),
+                kind: UnresolvedMethodKind::SelfMethodNotExport,
+            });
+        }
+        self.infer_local_method_call(method_name, args, callee)
+    }
+
     /// The declaration a call to `name` from this module's own code reaches.
     fn find_local_method(
         &self,
@@ -4245,7 +4255,7 @@ impl<'db> InferenceContext<'db> {
         // `ЭтотОбъект.Метод()` / `ЭтаФорма.Метод()` in a form module whose form metadata is
         // not a readable managed form (binary `Form.bin`, or no form metadata at all) is a
         // self-reference to the module, not a module named `ЭтотОбъект`/`ЭтаФорма`. A user
-        // method of this module resolves like a bare self-call; any other name is a platform
+        // method of this module is judged as in a managed form; any other name is a platform
         // form member we cannot enumerate, so stay silent instead of reporting the receiver
         // as an unresolved module.
         if is_self_name(&module_name.as_str().fold_lower())
@@ -4257,18 +4267,10 @@ impl<'db> InferenceContext<'db> {
             for arg in args {
                 self.infer_expr(*arg);
             }
-            if let Some(method_id) = resolver.resolve_module_method(self.db, method_name) {
-                let symbol_tree = self.db.symbol_tree(method_id.module);
-                if let Some(method_symbol) = symbol_tree.find_method_by_id(method_id) {
-                    let sig = crate::method_resolution::materialise_signature_enriched(
-                        self.db,
-                        method_id,
-                        method_symbol,
-                    );
-                    return BareReceiverDispatch::Resolved(sig.ret);
-                }
-            }
-            return BareReceiverDispatch::Resolved(self.db.unknown());
+            let ret = self
+                .infer_form_self_call(module_name, method_name, args, call_expr)
+                .unwrap_or_else(|| self.db.unknown());
+            return BareReceiverDispatch::Resolved(ret);
         }
 
         // A form attribute shadows module and global names for a bare receiver.
