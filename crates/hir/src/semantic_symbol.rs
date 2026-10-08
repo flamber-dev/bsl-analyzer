@@ -210,7 +210,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
 
     pub fn symbol_for_token(&self, token: &syntax::SyntaxToken) -> Option<SemanticSymbol> {
         match crate::classify_token(token) {
-            NameClass::FreeName { token } => self.symbol_for_free_name(&token),
+            NameClass::FreeName { token, is_call } => self.symbol_for_free_name(&token, is_call),
             NameClass::FieldName { receiver, token, is_call } => {
                 self.symbol_for_field_name(&receiver, &token, is_call)
             }
@@ -219,7 +219,17 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
         }
     }
 
-    fn symbol_for_free_name(&self, token: &syntax::SyntaxToken) -> Option<SemanticSymbol> {
+    fn symbol_for_free_name(
+        &self,
+        token: &syntax::SyntaxToken,
+        is_call: bool,
+    ) -> Option<SemanticSymbol> {
+        if is_call {
+            if let Some(definition) = self.resolve_bare_call_to_definition(token) {
+                return Some(symbol_from_definition(self.db(), definition, None));
+            }
+        }
+
         // A global common module export shadows a same-named platform global, but a local or
         // same-module symbol wins — the helper gates on those. Checked before the builtin
         // short-circuit so Local → Module → Global-CM → Platform holds for goto/hover/refs too.
@@ -385,6 +395,13 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
             return None;
         }
 
+        if crate::name_classify::is_bare_call_callee(token) {
+            if let Some(def) = self.resolve_bare_call_to_definition(token) {
+                tracing::debug!(?def, "resolved as bare call target");
+                return Some(def);
+            }
+        }
+
         // A global common module export extends the global context and so shadows a
         // same-named platform global. Resolved before builtins to keep Local → Module →
         // Global-CM → Platform consistent with name inference and signature help; the helper
@@ -399,12 +416,23 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
             return Some(def);
         }
 
+        // A call took its method above, so what reaches here is a value read, an assignment
+        // target or a method's own declaration name. A value is never a method: a module
+        // `Перем` of the name owns every such use but the declaration.
+        let module_variable = self.module_variable(&name);
+        if let Some(var_id) =
+            module_variable.filter(|_| !crate::name_classify::is_method_declaration_name(token))
+        {
+            tracing::debug!(?var_id, "resolved as module variable");
+            return Some(Definition::Variable(var_id));
+        }
+
         if let Some(method_id) = self.module_method(&name) {
             tracing::debug!(?method_id, "resolved as module method");
             return Some(Definition::Method(method_id));
         }
 
-        if let Some(var_id) = self.module_variable(&name) {
+        if let Some(var_id) = module_variable {
             tracing::debug!(?var_id, "resolved as module variable");
             return Some(Definition::Variable(var_id));
         }
@@ -429,6 +457,25 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
 
         tracing::debug!("unresolved identifier: {}", token_text);
         None
+    }
+
+    /// The method a bare call `Имя(...)` calls: one of this module, else an export of a global
+    /// common or application module, else a platform function — the order inference calls
+    /// them in. Variables are not asked: a call looks among methods only, so a parameter,
+    /// `Перем` or implicit local of the name leaves the call to the method (checked live on
+    /// 8.3.17 and 8.3.27). `None` when no method owns the name; the caller then keeps its
+    /// value-name reading, and inference reports the call as unresolved.
+    fn resolve_bare_call_to_definition(&self, token: &syntax::SyntaxToken) -> Option<Definition> {
+        let name = Name::new(token.text());
+        if let Some(method_id) = self.module_method(&name) {
+            return Some(Definition::Method(method_id));
+        }
+        if let Some(export @ Definition::Method(_)) =
+            self.global_exports().get(&fold_lower_per_char(token.text()))
+        {
+            return Some(export.clone());
+        }
+        self.sema.try_resolve_builtin(token.text())
     }
 
     /// See `Semantics::global_export_definition`'s shadow contract: a nearer

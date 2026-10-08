@@ -40,7 +40,9 @@ pub(crate) fn hover<DB: RootDatabase>(
         NameClass::FieldName { receiver, token, is_call } => {
             hover_field(db, file_id, &receiver, &token, is_call, locale)
         }
-        NameClass::FreeName { token } => hover_free_name(db, file_id, &token, locale),
+        NameClass::FreeName { token, is_call } => {
+            hover_free_name(db, file_id, &token, is_call, locale)
+        }
         NameClass::TypeRef { token } => {
             hover_for_platform_type(db, token.text(), token.text_range())
         }
@@ -150,6 +152,7 @@ fn hover_free_name<DB: RootDatabase>(
     db: &DB,
     file_id: FileId,
     token: &SyntaxToken,
+    is_call: bool,
     locale: Locale,
 ) -> Option<HoverResult> {
     let sema = Semantics::new(db);
@@ -164,18 +167,21 @@ fn hover_free_name<DB: RootDatabase>(
     // Inference cannot answer it here. It reports a held name as `Unknown`, and
     // `type_of_token` collapses that into `None` — indistinguishable from having
     // no type at all.
+    //
+    // The callee of `Имя(...)` is never held: a variable does not own a call name.
     let held = std::cell::OnceCell::new();
     let name_is_held = || {
         *held.get_or_init(|| {
-            hir::bare_root::claim_at(
-                db,
-                file_id,
-                token.text_range().start(),
-                &hir::Name::new(token.text()),
-                token.text_range().start(),
-            )
-            .0
-            .is_some()
+            !is_call
+                && hir::bare_root::claim_at(
+                    db,
+                    file_id,
+                    token.text_range().start(),
+                    &hir::Name::new(token.text()),
+                    token.text_range().start(),
+                )
+                .0
+                .is_some()
         })
     };
 
