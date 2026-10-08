@@ -68,6 +68,58 @@ mod tests {
     use crate::DiagnosticCode;
 
     #[test]
+    fn this_object_and_this_form_self_calls_resolve_in_form_module() {
+        // `ЭтотОбъект.Метод()` / `ЭтаФорма.Метод()` in a form module are self-references
+        // to the current module, not a module named `ЭтотОбъект`/`ЭтаФорма`. Neither may
+        // fire the "не удалось разрешить модуль" (ReceiverNotResolved) diagnostic.
+        let fixture = r#"
+//- /Catalogs/Тест/Forms/Форма/Ext/Form/Module.bsl
+Процедура МояПроцедура() Экспорт
+КонецПроцедуры
+
+Процедура Обработчик()
+    ЭтотОбъект.МояПроцедура();
+    ЭтаФорма.МояПроцедура();
+КонецПроцедуры
+"#;
+        let diags = check_hir_diagnostic_with_fixtures(fixture);
+        let umc: Vec<_> =
+            diags.iter().filter(|d| d.code == DiagnosticCode::UnresolvedMethodCall).collect();
+        assert!(
+            umc.is_empty(),
+            "ЭтотОбъект/ЭтаФорма self-calls must resolve, not fire UnresolvedMethodCall: {umc:?}"
+        );
+    }
+
+    #[test]
+    fn this_object_self_calls_keep_call_checks_in_form_module_without_form_metadata() {
+        // Resolving the self receiver must not drop what the managed-form path checks:
+        // argument count, the export rule, and silence on unknown platform form members.
+        let fixture = r#"
+//- /Catalogs/Тест/Forms/Форма/Ext/Form/Module.bsl
+Процедура Экспортная(А, Б) Экспорт
+КонецПроцедуры
+
+Процедура Закрытая()
+КонецПроцедуры
+
+Процедура Обработчик()
+    ЭтотОбъект.Экспортная(1);
+    ЭтаФорма.Закрытая();
+    ЭтаФорма.ОбновитьОтображениеДанных();
+КонецПроцедуры
+"#;
+        let diags = check_hir_diagnostic_with_fixtures(fixture);
+        let arg_count: Vec<_> =
+            diags.iter().filter(|d| d.code == DiagnosticCode::MismatchedArgCount).collect();
+        assert_eq!(arg_count.len(), 1, "expected one MismatchedArgCount, got: {diags:?}");
+        let umc: Vec<_> =
+            diags.iter().filter(|d| d.code == DiagnosticCode::UnresolvedMethodCall).collect();
+        assert_eq!(umc.len(), 1, "expected one UnresolvedMethodCall, got: {umc:?}");
+        assert!(umc[0].message.contains("Закрытая"), "expected the non-export call: {umc:?}");
+    }
+
+    #[test]
     fn unresolved_receiver_messages_are_neutral_for_both_reasons() {
         let receiver = Name::new("НеизвестныйПолучатель");
         for kind in
