@@ -63,16 +63,15 @@ fn collect_syntax_ranges(
 }
 
 /// Текст запроса — многострочный литерал: складка идёт от открывающей
-/// кавычки до последнего строкового токена. Оборванному литералу парсер
-/// при восстановлении отдаёт следующий за ним код, и складка по всему узлу
-/// захватила бы строку с этим кодом.
+/// кавычки до закрывающей. Оборванный литерал не сворачивается вовсе: пока
+/// строка не закрыта, её границу задаёт восстановление парсера, которое
+/// отдаёт литералу и следующий за ним код.
 fn string_literal_range(literal: &SyntaxNode) -> Option<TextRange> {
-    let last = literal
+    let tail = literal
         .children_with_tokens()
         .filter_map(|element| element.into_token())
-        .filter(|token| token.kind().is_string_literal())
-        .last()?;
-    Some(TextRange::new(literal.text_range().start(), last.text_range().end()))
+        .find(|token| token.kind() == SyntaxKind::STRING_TAIL)?;
+    Some(TextRange::new(literal.text_range().start(), tail.text_range().end()))
 }
 
 /// Серия комментариев сворачивается по частям, владеющим своей строкой:
@@ -370,20 +369,38 @@ mod tests {
         assert_eq!(ranges, vec![(0, 6, None), (1, 5, None)]);
     }
 
-    /// Оборванный литерал сворачивается только по своим строкам `|`: код
-    /// после него в складку не попадает, а без продолжений складки нет вовсе.
+    /// Оборванный литерал складки не даёт ни со строками `|`, ни с кодом
+    /// после них, а складка метода вокруг него остаётся. Тот же литерал,
+    /// закрытый кавычкой, сворачивается — пустой ответ не означает, что
+    /// литералы не сворачиваются вовсе.
     #[test]
-    fn unclosed_literal_fold_stops_at_its_last_continuation_line() {
-        let code = "Процедура Тест()\n\
-                    \tТекст = \"ВЫБРАТЬ\n\
-                    \t|\t1 КАК Поле\n\
-                    \t|ГДЕ ИСТИНА\n\
-                    \tСообщить(Текст);\n\
-                    КонецПроцедуры";
-        assert_eq!(ranges_by_lines(code), vec![(0, 5, None), (1, 3, None)]);
+    fn unclosed_literal_with_continuation_lines_is_not_folded() {
+        let continued = "Процедура Тест()\n\
+                         \tТекст = \"ВЫБРАТЬ\n\
+                         \t|\t1 КАК Поле\n\
+                         \t|ГДЕ ИСТИНА\n\
+                         КонецПроцедуры";
+        assert_eq!(ranges_by_lines(continued), vec![(0, 4, None)]);
 
-        let code = "Процедура Тест()\n\tТекст = \"ВЫБРАТЬ\n\tСообщить(Текст);\nКонецПроцедуры";
-        assert_eq!(ranges_by_lines(code), vec![(0, 3, None)]);
+        let with_code_after = "Процедура Тест()\n\
+                               \tТекст = \"ВЫБРАТЬ\n\
+                               \t|\t1 КАК Поле\n\
+                               \t|ГДЕ ИСТИНА\n\
+                               \tСообщить(Текст);\n\
+                               КонецПроцедуры";
+        assert_eq!(ranges_by_lines(with_code_after), vec![(0, 5, None)]);
+
+        let without_continuation =
+            "Процедура Тест()\n\tТекст = \"ВЫБРАТЬ\n\tСообщить(Текст);\nКонецПроцедуры";
+        assert_eq!(ranges_by_lines(without_continuation), vec![(0, 3, None)]);
+
+        let closed = "Процедура Тест()\n\
+                      \tТекст = \"ВЫБРАТЬ\n\
+                      \t|\t1 КАК Поле\n\
+                      \t|ГДЕ ИСТИНА\";\n\
+                      \tСообщить(Текст);\n\
+                      КонецПроцедуры";
+        assert_eq!(ranges_by_lines(closed), vec![(0, 5, None), (1, 3, None)]);
     }
 
     #[test]
