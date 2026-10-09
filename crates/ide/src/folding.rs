@@ -96,6 +96,11 @@ fn is_foldable_syntax_node(kind: SyntaxKind) -> bool {
             | SyntaxKind::PRE_IF_DIR
             | SyntaxKind::PRE_DELETE_DIR
             | SyntaxKind::PRE_INSERT_DIR
+            // Узел литерала покрывает строку целиком — от открывающей кавычки
+            // до закрывающей, со всеми строками `|` между ними: так пишутся
+            // тексты запросов. Однострочные литералы отсеивает `folding_lines`,
+            // а оборванный литерал кончается на своей первой строке.
+            | SyntaxKind::LITERAL
     )
 }
 
@@ -284,6 +289,73 @@ mod tests {
         let mut ranges = ranges_by_lines(without_literal);
         ranges.sort_by_key(|&(start, end, _)| (start, end));
         assert_eq!(ranges, vec![(0, 3, None), (1, 2, Some(FoldingRangeKind::Comment))]);
+    }
+
+    /// Текст запроса — многострочный литерал: складка идёт от строки с
+    /// открывающей кавычкой до строки с закрывающей, как у остальных
+    /// конструкций — первая строка остаётся видимой.
+    #[test]
+    fn folds_multiline_query_literal() {
+        let code = "Процедура Тест()\n\
+                    \tЗапрос = Новый Запрос;\n\
+                    \tЗапрос.Текст =\n\
+                    \t\"ВЫБРАТЬ\n\
+                    \t|\tТовары.Ссылка КАК Ссылка\n\
+                    \t|ИЗ\n\
+                    \t|\tСправочник.Товары КАК Товары\";\n\
+                    \tВыборка = Запрос.Выполнить().Выбрать();\n\
+                    КонецПроцедуры";
+
+        let ranges = ranges_by_lines(code);
+
+        assert_eq!(ranges, vec![(0, 8, None), (3, 6, None)]);
+    }
+
+    #[test]
+    fn single_line_literal_is_not_folded() {
+        let code = "Процедура Тест()\n\tА = \"ВЫБРАТЬ 1\";\nКонецПроцедуры";
+
+        assert_eq!(ranges_by_lines(code), vec![(0, 2, None)]);
+        // Контрольный вход: тот же литерал, разбитый на две строки, складку
+        // даёт — пустой ответ выше не означает, что литералы не сворачиваются
+        // вовсе.
+        let code = "Процедура Тест()\n\tА = \"ВЫБРАТЬ\n\t| 1\";\nКонецПроцедуры";
+        assert_eq!(ranges_by_lines(code), vec![(0, 3, None), (1, 2, None)]);
+    }
+
+    /// Литерал во вложенной конструкции сворачивается сам по себе, а
+    /// складки самой конструкции и метода остаются прежними.
+    #[test]
+    fn multiline_literal_inside_nested_block_is_folded() {
+        let code = "Процедура Тест()\n\
+                    \tЕсли Истина Тогда\n\
+                    \t\tДля Каждого Стр Из Список Цикл\n\
+                    \t\t\tЗапрос.Текст = \"ВЫБРАТЬ\n\
+                    \t\t\t|\t1 КАК Поле\";\n\
+                    \t\tКонецЦикла;\n\
+                    \tКонецЕсли;\n\
+                    КонецПроцедуры";
+
+        let ranges = ranges_by_lines(code);
+
+        assert_eq!(ranges, vec![(0, 7, None), (1, 6, None), (2, 5, None), (3, 4, None)]);
+    }
+
+    /// Комментарий между строками литерала его не разрывает: литерал — одна
+    /// складка, и комментарной складки внутри нет.
+    #[test]
+    fn comment_between_literal_lines_stays_inside_the_literal_fold() {
+        let code = "Процедура Тест()\n\
+                    \tТекст = \"ВЫБРАТЬ\n\
+                    \t|\t1 КАК Поле\n\
+                    \t// пояснение\n\
+                    \t// ещё пояснение\n\
+                    \t|ГДЕ ИСТИНА\";\n\
+                    КонецПроцедуры";
+
+        let ranges = ranges_by_lines(code);
+
+        assert_eq!(ranges, vec![(0, 6, None), (1, 5, None)]);
     }
 
     #[test]
