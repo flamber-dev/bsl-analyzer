@@ -2,6 +2,7 @@ use super::*;
 
 /// Numbered parameter hints must survive UTF-16 conversion at every multiline argument.
 #[test]
+#[cfg_attr(not(corpus_contract), ignore = "corpus contract: needs the platform help corpus")]
 fn inlay_hints_expand_variadic_parameters_at_lsp_positions() {
     let mut state = create_test_state();
     state.init_empty_source_root();
@@ -40,6 +41,7 @@ fn inlay_hints_expand_variadic_parameters_at_lsp_positions() {
 }
 
 #[test]
+#[cfg_attr(not(corpus_contract), ignore = "corpus contract: needs the platform help corpus")]
 fn inlay_hints_preserve_repeated_nested_receiver_labels_at_lsp_positions() {
     let mut state = create_test_state();
     state.init_empty_source_root();

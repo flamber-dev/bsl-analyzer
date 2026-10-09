@@ -191,6 +191,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(corpus_contract), ignore = "corpus contract: needs the platform help corpus")]
     fn platform_object_fallback_attribute_lowers_to_platform_object() {
         use bsl_metadata::PlatformValueType;
         let db = InMemoryDb::new();

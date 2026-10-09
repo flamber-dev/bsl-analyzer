@@ -359,6 +359,21 @@ impl Analysis {
         let _ = self.db.configurations_inventory();
     }
 
+    /// Memoise the per-file halves of the workspace-wide name indexes for `files`:
+    /// the symbol tree `module_members` folds and the name set `name_usage_index`
+    /// folds. Each aggregate is one query over every file, so a cold one builds with
+    /// every file's syntax tree live until it answers; warmed in chunks with a trim
+    /// between them, the aggregates assemble from memos and no tree outlives its
+    /// chunk. The accessors are the ones the aggregates read, so the memos are theirs.
+    pub fn warm_name_indexes(&self, files: &[FileId]) {
+        use hir::{DefDatabase, ModuleId};
+        use ide_db::base_db::FileIdInput;
+        for &file_id in files {
+            let _ = self.db.symbol_tree_ref(ModuleId::new(file_id));
+            let _ = hir::file_name_usage_query(&self.db, FileIdInput::new(&self.db, file_id));
+        }
+    }
+
     /// Parallel variant of [`Self::workspace_diagnostics`] for the deferred whole-project
     /// batch. Each file's Salsa-memoised `file_diagnostics_query` runs on the caller's
     /// bounded `pool`, each rayon worker on its own `db` snapshot (`db.clone()` shares the

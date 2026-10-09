@@ -2853,7 +2853,10 @@ pub(super) fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> 
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{sample_workspace, wait_ready, wait_until, wait_until_within};
+    use super::super::test_support::{
+        drive_until, published_report, sample_workspace, wait_ready, wait_until,
+        wait_until_driving, wait_until_within,
+    };
     use super::*;
     use std::fs;
     use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
@@ -4547,12 +4550,12 @@ mod tests {
         graph.ensure_loading();
         wait_ready(&graph);
         wait_until(&graph, "the watcher's boot nudge to settle", || !graph.drift_pending());
-        assert_eq!(graph.status_report().stale, Some(false), "a fresh build is not stale");
+        assert_eq!(published_report(&graph).stale, Some(false), "a fresh build is not stale");
 
         graph.record_change_quietly(graph.observation() + 1);
 
         assert_eq!(
-            graph.status_report().stale,
+            published_report(&graph).stale,
             Some(true),
             "a graph with a catch-up owed reports itself fresh",
         );
@@ -6195,11 +6198,15 @@ mod tests {
         assert!(graph.owes_recovery(), "a probe that got no handle measured nothing");
         drop(held);
 
-        lock_recover(&graph.debt).probe_now(Instant::now());
-        graph.drive();
-        wait_until(&graph, "the readable module to be rebuilt", || {
-            graph.snapshot().is_some_and(|snapshot| snapshot.unread_files() == 0)
-        });
+        wait_until_driving(
+            &graph,
+            "the readable module to be rebuilt",
+            || {
+                lock_recover(&graph.debt).probe_now(Instant::now());
+                graph.drive();
+            },
+            || graph.snapshot().is_some_and(|snapshot| snapshot.unread_files() == 0),
+        );
         assert!(!graph.owes_recovery(), "the rebuild that read everything left the debt behind");
     }
 
@@ -6300,21 +6307,29 @@ mod tests {
 
         // The first one opens. Nothing is written, so nothing on the fact stream says so.
         fs::set_permissions(&first, restore.0[0].1.clone()).unwrap();
-        lock_recover(&graph.debt).probe_now(Instant::now());
-        graph.drive();
-        wait_until(&graph, "the first healing to be rebuilt", || {
-            graph.snapshot().is_some_and(|snapshot| snapshot.unread_files() == 1)
-        });
+        wait_until_driving(
+            &graph,
+            "the first healing to be rebuilt",
+            || {
+                lock_recover(&graph.debt).probe_now(Instant::now());
+                graph.drive();
+            },
+            || graph.snapshot().is_some_and(|snapshot| snapshot.unread_files() == 1),
+        );
         assert!(graph.owes_recovery(), "a publication still missing a module owes a probe");
 
         // And now the second, before the next probe — the case an aggregate cannot see,
         // because the level it reports was already true when the first one healed.
         fs::set_permissions(&second, restore.0[1].1.clone()).unwrap();
-        lock_recover(&graph.debt).probe_now(Instant::now());
-        graph.drive();
-        wait_until(&graph, "the second healing to be rebuilt", || {
-            graph.snapshot().is_some_and(|snapshot| snapshot.unread_files() == 0)
-        });
+        wait_until_driving(
+            &graph,
+            "the second healing to be rebuilt",
+            || {
+                lock_recover(&graph.debt).probe_now(Instant::now());
+                graph.drive();
+            },
+            || graph.snapshot().is_some_and(|snapshot| snapshot.unread_files() == 0),
+        );
         assert!(!graph.owes_recovery(), "the rebuild that read everything left the debt behind");
         assert_eq!(
             graph.observation(),
@@ -6768,8 +6783,7 @@ mod tests {
         // publication that follows is a different world.
         drop(restore);
         lock_recover(&graph.debt).record_forced(Instant::now(), graph.observation());
-        graph.drive();
-        wait_until(&graph, "the rebuild to publish", || {
+        drive_until(&graph, "the rebuild to publish", || {
             graph.snapshot().is_some_and(|snapshot| snapshot.unread_files() == 0)
         });
 
@@ -6852,8 +6866,7 @@ mod tests {
             "the measured healing owes the build that proves it",
         );
         // And the work it created runs without waiting for any event.
-        graph.drive();
-        wait_until(&graph, "the healed module to be rebuilt", || {
+        drive_until(&graph, "the healed module to be rebuilt", || {
             graph.snapshot().is_some_and(|snapshot| snapshot.unread_files() == 0)
         });
     }
@@ -7027,12 +7040,18 @@ mod tests {
 
         // The first heals, and the PASS itself runs the build it owes.
         fs::set_permissions(&first, fs::Permissions::from_mode(0o755)).unwrap();
-        lock_recover(&graph.debt).probe_now(Instant::now());
-        graph.probe_recovery();
-        wait_until(&graph, "the first healed module to be read", || {
-            !graph.build_in_flight()
-                && graph.snapshot().is_some_and(|snapshot| snapshot.unread_files() == 1)
-        });
+        wait_until_driving(
+            &graph,
+            "the first healed module to be read",
+            || {
+                lock_recover(&graph.debt).probe_now(Instant::now());
+                graph.probe_recovery();
+            },
+            || {
+                !graph.build_in_flight()
+                    && graph.snapshot().is_some_and(|snapshot| snapshot.unread_files() == 1)
+            },
+        );
         assert!(
             !lock_recover(&graph.debt).owes_recovery_build(),
             "the build that read the module left its credit unspent",
@@ -7041,12 +7060,18 @@ mod tests {
         // And the second, with the credit for the first already spent and nothing on the
         // fact stream to announce either.
         fs::set_permissions(&second, fs::Permissions::from_mode(0o755)).unwrap();
-        lock_recover(&graph.debt).probe_now(Instant::now());
-        graph.probe_recovery();
-        wait_until(&graph, "the second healed module to be read", || {
-            !graph.build_in_flight()
-                && graph.snapshot().is_some_and(|snapshot| snapshot.unread_files() == 0)
-        });
+        wait_until_driving(
+            &graph,
+            "the second healed module to be read",
+            || {
+                lock_recover(&graph.debt).probe_now(Instant::now());
+                graph.probe_recovery();
+            },
+            || {
+                !graph.build_in_flight()
+                    && graph.snapshot().is_some_and(|snapshot| snapshot.unread_files() == 0)
+            },
+        );
         assert_eq!(graph.observation(), observation, "the fact stream moved");
         drop(restore);
     }
@@ -7436,9 +7461,15 @@ mod tests {
         // The declaration narrows. No event announces it: the probe is the only owner.
         let before = generation(&graph);
         declare(only_a);
-        lock_recover(&graph.debt).probe_now(Instant::now());
-        graph.probe_recovery();
-        wait_until(&graph, "the narrowed declaration to be built", || generation(&graph) > before);
+        wait_until_driving(
+            &graph,
+            "the narrowed declaration to be built",
+            || {
+                lock_recover(&graph.debt).probe_now(Instant::now());
+                graph.probe_recovery();
+            },
+            || generation(&graph) > before,
+        );
         let after_narrowing = outstanding(&graph);
         assert_eq!(
             after_narrowing.len(),
@@ -7460,9 +7491,15 @@ mod tests {
 
         // And back. The returning root is a NEW obligation, not the old one resurrected.
         declare(both);
-        lock_recover(&graph.debt).probe_now(Instant::now());
-        graph.probe_recovery();
-        wait_until(&graph, "the restored declaration to be built", || generation(&graph) > quiet);
+        wait_until_driving(
+            &graph,
+            "the restored declaration to be built",
+            || {
+                lock_recover(&graph.debt).probe_now(Instant::now());
+                graph.probe_recovery();
+            },
+            || generation(&graph) > quiet,
+        );
         let after_return = outstanding(&graph);
         assert_eq!(
             after_return.len(),
@@ -7484,9 +7521,15 @@ mod tests {
         for round in 0..4 {
             let at = generation(&graph);
             declare(if round % 2 == 0 { only_a } else { both });
-            lock_recover(&graph.debt).probe_now(Instant::now());
-            graph.probe_recovery();
-            wait_until(&graph, "the churned declaration to be built", || generation(&graph) > at);
+            wait_until_driving(
+                &graph,
+                "the churned declaration to be built",
+                || {
+                    lock_recover(&graph.debt).probe_now(Instant::now());
+                    graph.probe_recovery();
+                },
+                || generation(&graph) > at,
+            );
             builds += 1;
             peak = peak.max(outstanding(&graph).len());
             // The same declaration again is not another transition.
@@ -7504,11 +7547,15 @@ mod tests {
         declare(only_a);
         drop(restore);
         let at = generation(&graph);
-        lock_recover(&graph.debt).probe_now(Instant::now());
-        graph.probe_recovery();
-        wait_until(&graph, "the healed anchor to be read", || {
-            generation(&graph) > at && outstanding(&graph).is_empty()
-        });
+        wait_until_driving(
+            &graph,
+            "the healed anchor to be read",
+            || {
+                lock_recover(&graph.debt).probe_now(Instant::now());
+                graph.probe_recovery();
+            },
+            || generation(&graph) > at && outstanding(&graph).is_empty(),
+        );
     }
 
     /// A module reached through a real symlink is required by the walk that listed it.
@@ -7792,8 +7839,7 @@ mod tests {
         }
         let generation =
             lock_recover(&graph.inner).published.as_ref().map(|p| p.generation).unwrap_or(0);
-        graph.drive();
-        wait_until(&graph, "the builder to report the operation error", || {
+        drive_until(&graph, "the builder to report the operation error", || {
             matches!(
                 lock_recover(&graph.inner).published.as_ref().map(|p| p.reload.clone()),
                 Some(ReloadState::Failed(_))
@@ -7850,8 +7896,7 @@ mod tests {
             lock_recover(&graph.inner).published.as_ref().map(|p| p.generation).unwrap_or(0);
         let started = graph.builders_started.load(Ordering::SeqCst);
         graph.refused_installs.store(1, Ordering::SeqCst);
-        graph.drive();
-        wait_until(&graph, "the builder to report the refused install", || {
+        drive_until(&graph, "the builder to report the refused install", || {
             matches!(
                 lock_recover(&graph.inner).published.as_ref().map(|p| p.reload.clone()),
                 Some(ReloadState::Failed(_))
@@ -8576,11 +8621,15 @@ mod tests {
 
         // They all heal, one real pass measures it, and the build that follows reads them.
         drop(restore);
-        lock_recover(&graph.debt).probe_now(Instant::now());
-        graph.probe_recovery();
-        wait_until(&graph, "the healed modules to be read", || {
-            graph.snapshot().is_some_and(|snapshot| snapshot.unread_files() == 0)
-        });
+        wait_until_driving(
+            &graph,
+            "the healed modules to be read",
+            || {
+                lock_recover(&graph.debt).probe_now(Instant::now());
+                graph.probe_recovery();
+            },
+            || graph.snapshot().is_some_and(|snapshot| snapshot.unread_files() == 0),
+        );
         wait_until(&graph, "the healing publication to return", || {
             lock_recover(&marks).contains_key("returned")
         });
@@ -9453,7 +9502,7 @@ mod tests {
         let freshness = graph.cached_freshness(&snapshot);
         assert_eq!(freshness.drift_watch, DriftWatch::Watching);
         assert!(!freshness.stale, "a watched, current graph reported stale");
-        assert_eq!(graph.status_report().drift_watch, Some("watching"));
+        assert_eq!(published_report(&graph).drift_watch, Some("watching"));
 
         graph.set_watch(super::super::watcher::WatchPhase::Starting, None);
         assert!(graph.cached_freshness(&snapshot).stale, "a graph still starting called fresh");

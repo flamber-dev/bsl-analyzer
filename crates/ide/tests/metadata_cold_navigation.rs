@@ -470,6 +470,7 @@ fn item<'a>(items: &'a [CompletionItem], label: &str) -> Option<&'a CompletionIt
 }
 
 #[test]
+#[cfg_attr(not(corpus_contract), ignore = "corpus contract: needs the platform help corpus")]
 fn cold_plurals_complete_under_metadata() {
     let items = complete(
         r#"//- /test.bsl
@@ -495,6 +496,7 @@ fn cold_plurals_complete_under_metadata() {
 }
 
 #[test]
+#[cfg_attr(not(corpus_contract), ignore = "corpus contract: needs the platform help corpus")]
 fn cold_collection_completes_existing_objects() {
     let items = complete(
         r#"//- /test.bsl
@@ -511,6 +513,7 @@ fn cold_collection_completes_existing_objects() {
 }
 
 #[test]
+#[cfg_attr(not(corpus_contract), ignore = "corpus contract: needs the platform help corpus")]
 fn manager_metadata_collection_still_completes_existing_objects() {
     let items = complete(
         r#"//- /test.bsl
@@ -527,6 +530,7 @@ fn manager_metadata_collection_still_completes_existing_objects() {
 }
 
 #[test]
+#[cfg_attr(not(corpus_contract), ignore = "corpus contract: needs the platform help corpus")]
 fn scheduled_job_cold_collection_completes_existing_objects_from_bootstrap() {
     let (analysis, file_id, offset) = setup_with_scheduled_job_xml(
         r#"//- /test.bsl
@@ -548,6 +552,7 @@ fn scheduled_job_cold_collection_completes_existing_objects_from_bootstrap() {
 }
 
 #[test]
+#[cfg_attr(not(corpus_contract), ignore = "corpus contract: needs the platform help corpus")]
 fn scheduled_job_cold_metadata_ref_hover_and_goto_target_xml_in_metadata_source_root() {
     let (analysis, file_id, offset) = setup_with_scheduled_job_xml(
         r#"//- /test.bsl
@@ -594,6 +599,7 @@ fn metadata_object_member_is_not_typed_as_a_manager() {
 }
 
 #[test]
+#[cfg_attr(not(corpus_contract), ignore = "corpus contract: needs the platform help corpus")]
 fn cold_metadata_ref_hover_and_goto_target_xml_in_metadata_source_root() {
     let (analysis, file_id, offset) = setup(
         r#"//- /test.bsl
@@ -626,6 +632,7 @@ fn cold_metadata_ref_hover_and_goto_target_xml_in_metadata_source_root() {
 }
 
 #[test]
+#[cfg_attr(not(corpus_contract), ignore = "corpus contract: needs the platform help corpus")]
 fn cold_metadata_role_substrate_completion_hover_and_goto() {
     let (analysis, file_id, offset) = setup_with_role_substrate(
         r#"//- /test.bsl
@@ -726,6 +733,7 @@ fn local_metadata_name_shadows_cold_plural_completion_without_blocking_receiver_
 // into ide_db::metadata and the cold navigation queries consume them.
 
 #[test]
+#[cfg_attr(not(corpus_contract), ignore = "corpus contract: needs the platform help corpus")]
 fn http_service_cold_collection_completes_existing_objects_from_bootstrap() {
     let (analysis, file_id, offset) = setup_with_http_service_substrate(
         r#"//- /test.bsl
@@ -746,6 +754,7 @@ fn http_service_cold_collection_completes_existing_objects_from_bootstrap() {
 }
 
 #[test]
+#[cfg_attr(not(corpus_contract), ignore = "corpus contract: needs the platform help corpus")]
 fn http_service_cold_metadata_ref_hover_and_goto_target_xml_in_metadata_source_root() {
     let (analysis, file_id, offset) = setup_with_http_service_substrate(
         r#"//- /test.bsl
@@ -775,6 +784,7 @@ fn http_service_cold_metadata_ref_hover_and_goto_target_xml_in_metadata_source_r
 }
 
 #[test]
+#[cfg_attr(not(corpus_contract), ignore = "corpus contract: needs the platform help corpus")]
 fn web_service_cold_collection_completes_existing_objects_from_bootstrap() {
     let (analysis, file_id, offset) = setup_with_web_service_substrate(
         r#"//- /test.bsl
@@ -795,6 +805,7 @@ fn web_service_cold_collection_completes_existing_objects_from_bootstrap() {
 }
 
 #[test]
+#[cfg_attr(not(corpus_contract), ignore = "corpus contract: needs the platform help corpus")]
 fn web_service_cold_metadata_ref_hover_and_goto_target_xml_in_metadata_source_root() {
     let (analysis, file_id, offset) = setup_with_web_service_substrate(
         r#"//- /test.bsl

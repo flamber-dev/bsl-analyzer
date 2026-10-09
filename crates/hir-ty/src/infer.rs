@@ -5171,6 +5171,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(corpus_contract), ignore = "corpus contract: needs the platform help corpus")]
     fn test_builtin_function_lookup() {
         let db = bsl_types::testing::InMemoryDb::new();
         let builtins = builtin::builtin_functions();
@@ -5188,6 +5189,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(corpus_contract), ignore = "corpus contract: needs the platform help corpus")]
     fn test_builtin_date_function() {
         let db = bsl_types::testing::InMemoryDb::new();
         let builtins = builtin::builtin_functions();
@@ -5203,6 +5205,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(corpus_contract), ignore = "corpus contract: needs the platform help corpus")]
     fn test_builtin_type_function() {
         let db = bsl_types::testing::InMemoryDb::new();
         let builtins = builtin::builtin_functions();

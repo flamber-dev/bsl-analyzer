@@ -19,11 +19,14 @@ use super::scan::workspace_fingerprint;
 use super::snapshot::{PreparedSnapshotPool, SnapshotInstallError, SnapshotPrepareError};
 use super::state::{lock_recover, GraphState, Published, ReloadState};
 use super::types::GraphStatus;
+use stdx::batch::BatchBudget;
 
-/// Modules whose edges are projected per batch when building the on-disk graph.
-/// 500 keeps peak RSS comfortably bounded on a 25k-module config (measured ~2.9 GB)
-/// while the resident method index resolves cross-batch calls.
-pub(super) const GRAPH_BUILD_BATCH: usize = 500;
+/// Modules whose edges are projected per batch when building the on-disk graph,
+/// capped by count and by source bytes: a batch's syntax trees, lowered bodies and
+/// inference scale with its bytes, and 500 modules of a large configuration range
+/// from under a megabyte to well over a hundred, so the byte cap is what bounds
+/// the build's peak while the resident method index resolves cross-batch calls.
+pub(super) const GRAPH_BUILD_BATCH: BatchBudget = BatchBudget::files(500).with_bytes(32 << 20);
 
 #[cfg(test)]
 fn graph_build_path(path: &Path) -> PathBuf {
@@ -2346,8 +2349,9 @@ mod tests {
         WorkspaceDiff,
     };
     use super::super::test_support::{
-        meta_string, sample_workspace, seed_cache, wait_ready, wait_until, wait_until_within,
-        write, write_common_module, write_extension_config, write_extension_workspace,
+        meta_string, published_report, sample_workspace, seed_cache, wait_ready, wait_until,
+        wait_until_within, write, write_common_module, write_extension_config,
+        write_extension_workspace,
     };
     use super::*;
     use crate::graph_db::{build_graph_database, update_graph_database_bodies};
@@ -3543,7 +3547,7 @@ mod tests {
             &universe,
             db,
             std::slice::from_ref(&module),
-            1,
+            stdx::batch::BatchBudget::files(1),
         )
         .unwrap();
         let meta = crate::graph_db::GraphMeta {
@@ -4036,7 +4040,7 @@ mod tests {
         graph.set_watch(super::super::watcher::WatchPhase::Running, None);
         graph.ensure_loading();
         wait_ready(&graph);
-        assert_eq!(graph.status_report().stale, Some(false));
+        assert_eq!(published_report(&graph).stale, Some(false));
         write(
             root,
             "CommonModules/Сервер/Ext/Module.bsl",
@@ -4050,7 +4054,7 @@ mod tests {
         graph.record_load_failure(true, refused());
 
         assert_eq!(
-            graph.status_report().stale,
+            published_report(&graph).stale,
             Some(true),
             "a graph whose reload failed read fresh"
         );
@@ -4254,7 +4258,15 @@ mod tests {
     ) -> anyhow::Result<ide::GraphBuildSummary> {
         let project = crate::graph::ProjectSnapshot::load(root);
         let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
-        update_graph_database_bodies(&project, &universe, src, out, changed, batch_size, meta)
+        update_graph_database_bodies(
+            &project,
+            &universe,
+            src,
+            out,
+            changed,
+            BatchBudget::files(batch_size),
+            meta,
+        )
     }
 
     /// Test shorthand for the production pairing: ONE loaded snapshot and ONE
@@ -4267,7 +4279,7 @@ mod tests {
     ) -> anyhow::Result<ide::GraphBuildSummary> {
         let project = crate::graph::ProjectSnapshot::load(root);
         let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
-        build_graph_database(&project, &universe, out, batch_size, meta)
+        build_graph_database(&project, &universe, out, BatchBudget::files(batch_size), meta)
     }
 
     /// The straddle verdict is more than a fingerprint comparison: either
@@ -4788,8 +4800,14 @@ mod tests {
         };
         let project = crate::graph::ProjectSnapshot::load(root);
         let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
-        crate::graph_db::build_graph_database(&project, &universe, &out, 1, &meta)
-            .expect("graph database builds");
+        crate::graph_db::build_graph_database(
+            &project,
+            &universe,
+            &out,
+            stdx::batch::BatchBudget::files(1),
+            &meta,
+        )
+        .expect("graph database builds");
 
         // The walk verdict cannot see this: `stat` needs no read permission.
         assert!(universe.clean(), "the tree walk is clean, which is exactly the trap");
@@ -4813,8 +4831,14 @@ mod tests {
         let project = crate::graph::ProjectSnapshot::load(root);
         let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
         let out2 = root.join(".build/bsl-graph2.db");
-        crate::graph_db::build_graph_database(&project, &universe, &out2, 1, &meta)
-            .expect("graph database builds");
+        crate::graph_db::build_graph_database(
+            &project,
+            &universe,
+            &out2,
+            stdx::batch::BatchBudget::files(1),
+            &meta,
+        )
+        .expect("graph database builds");
         let conn = Connection::open(&out2).unwrap();
         assert!(
             crate::graph_db::read_unread_paths(&conn).is_empty(),
@@ -5805,7 +5829,7 @@ mod tests {
             &fused_project,
             &fused_universe,
             &out,
-            1,
+            stdx::batch::BatchBudget::files(1),
             &crate::graph_db::GraphMeta {
                 revision: 1,
                 fingerprint: crate::graph_db::GraphFp::default(),

@@ -25,6 +25,7 @@ use ide::{GraphBuildSummary, GraphBuildTicker, MethodCallDigest, ModuleId, RootD
 use rusqlite::{params, Connection, OptionalExtension};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+use stdx::batch::BatchBudget;
 use vfs::FileId;
 
 #[cfg(test)]
@@ -842,6 +843,30 @@ pub(crate) fn read_unread_paths(conn: &rusqlite::Connection) -> Vec<bsl_search::
 /// never another batch's database. Peak memory is therefore bounded by the batch
 /// size plus that index, not by the whole config.
 ///
+/// Cut `modules` into the batches one streaming pass loads together, weighing each
+/// module by the byte length the universe's scan recorded for it (a module the scan
+/// did not stat weighs nothing and is bounded by the file cap alone).
+fn plan_batches<'a>(
+    universe: &crate::graph::universe::ScannedUniverse,
+    modules: &'a [ModuleId],
+    file_paths: &FxHashMap<FileId, PathBuf>,
+    budget: BatchBudget,
+) -> Vec<&'a [ModuleId]> {
+    let bytes_of: FxHashMap<&Path, u64> =
+        universe.stats.iter().map(|stat| (stat.canonical.as_path(), stat.len)).collect();
+    stdx::batch::chunks_by_budget(
+        modules,
+        |module| {
+            file_paths
+                .get(&module.file_id)
+                .and_then(|path| bytes_of.get(path.as_path()))
+                .copied()
+                .unwrap_or(0)
+        },
+        budget,
+    )
+}
+
 /// Returns the build tally; node/edge counts in the database are recorded in its
 /// `meta` table by [`GraphDbWriter::finalize`], and the paths whose bytes could not be
 /// read go beside them under `unread_paths` — the artefact carries its own gaps, so no
@@ -850,10 +875,10 @@ pub(crate) fn build_graph_database(
     project: &crate::graph::ProjectSnapshot,
     universe: &crate::graph::universe::ScannedUniverse,
     out_path: &Path,
-    batch_size: usize,
+    budget: BatchBudget,
     meta: &GraphMeta,
 ) -> anyhow::Result<GraphBuildSummary> {
-    build_graph_database_inner(project, universe, out_path, batch_size, meta, None)
+    build_graph_database_inner(project, universe, out_path, budget, meta, None)
 }
 
 /// As [`build_graph_database`], but also streams the search index's code chunks (with
@@ -863,11 +888,11 @@ pub(crate) fn build_graph_database_fused(
     project: &crate::graph::ProjectSnapshot,
     universe: &crate::graph::universe::ScannedUniverse,
     out_path: &Path,
-    batch_size: usize,
+    budget: BatchBudget,
     meta: &GraphMeta,
     chunk_sink: &mut dyn ide::FusedChunkSink,
 ) -> anyhow::Result<GraphBuildSummary> {
-    build_graph_database_inner(project, universe, out_path, batch_size, meta, Some(chunk_sink))
+    build_graph_database_inner(project, universe, out_path, budget, meta, Some(chunk_sink))
 }
 
 /// Default seconds without build progress before the watchdog reports a stall.
@@ -1054,7 +1079,7 @@ fn build_graph_database_inner(
     project: &crate::graph::ProjectSnapshot,
     universe: &crate::graph::universe::ScannedUniverse,
     out_path: &Path,
-    batch_size: usize,
+    budget: BatchBudget,
     meta: &GraphMeta,
     chunk_sink: Option<&mut dyn ide::FusedChunkSink>,
 ) -> anyhow::Result<GraphBuildSummary> {
@@ -1072,6 +1097,7 @@ fn build_graph_database_inner(
         .collect();
     let file_paths: FxHashMap<FileId, PathBuf> =
         files.iter().map(|(f, p)| (*f, p.clone())).collect();
+    let batches = plan_batches(universe, &modules, &file_paths, budget);
 
     // Where each metadata object is defined, read off the universe this build
     // already scanned rather than a fresh walk of the disk.
@@ -1137,7 +1163,7 @@ fn build_graph_database_inner(
             &paths,
             Some(&project.workspace_root),
             &mdo_files,
-            batch_size,
+            &batches,
             &mut open_batch,
             &mut sink,
             chunk_sink,
@@ -1442,7 +1468,7 @@ pub(crate) fn compute_body_patch(
     universe: &crate::graph::universe::ScannedUniverse,
     src_path: &Path,
     changed_paths: &[PathBuf],
-    batch_size: usize,
+    budget: BatchBudget,
 ) -> anyhow::Result<BodyPatch> {
     if !project.validated || project.search_roots.is_none() {
         anyhow::bail!("cannot patch a portable graph without validated workspace roots");
@@ -1453,6 +1479,7 @@ pub(crate) fn compute_body_patch(
         files.iter().map(|(f, p)| (*f, p.to_string_lossy().replace('\\', "/"))).collect();
     let file_paths: FxHashMap<FileId, PathBuf> =
         files.iter().map(|(f, p)| (*f, p.clone())).collect();
+    let batches = plan_batches(universe, &all_modules, &file_paths, budget);
 
     // Where each metadata object is defined, read off the universe this build
     // already scanned rather than a fresh walk of the disk.
@@ -1506,7 +1533,7 @@ pub(crate) fn compute_body_patch(
         &paths,
         Some(&project.workspace_root),
         &mdo_files,
-        batch_size,
+        &batches,
         &mut open_batch,
         Some(&ticker),
     )
@@ -1663,10 +1690,10 @@ pub(crate) fn update_graph_database_bodies(
     src_path: &Path,
     out_path: &Path,
     changed_paths: &[PathBuf],
-    batch_size: usize,
+    budget: BatchBudget,
     meta: &GraphMeta,
 ) -> anyhow::Result<GraphBuildSummary> {
-    let patch = compute_body_patch(project, universe, src_path, changed_paths, batch_size)?;
+    let patch = compute_body_patch(project, universe, src_path, changed_paths, budget)?;
     std::fs::copy(src_path, out_path)?;
     let transaction =
         begin_body_patch(out_path, project, universe, &patch, meta, false, PATCH_SQL_BUDGET)
@@ -2644,7 +2671,14 @@ mod tests {
         let db = root.join(".build/graph.db");
         std::fs::create_dir_all(db.parent().unwrap()).unwrap();
         let (project, universe) = scanned_project(root);
-        build_graph_database(&project, &universe, &db, 1, &build_meta()).unwrap();
+        build_graph_database(
+            &project,
+            &universe,
+            &db,
+            stdx::batch::BatchBudget::files(1),
+            &build_meta(),
+        )
+        .unwrap();
 
         assert_eq!(
             stored_file(&db, "mdo/Catalog/Товары"),
@@ -2666,7 +2700,14 @@ mod tests {
         let db_pre = root.join(".build/pre.db");
         std::fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
         let (project, universe) = scanned_project(root);
-        build_graph_database(&project, &universe, &db_pre, 1, &build_meta()).unwrap();
+        build_graph_database(
+            &project,
+            &universe,
+            &db_pre,
+            stdx::batch::BatchBudget::files(1),
+            &build_meta(),
+        )
+        .unwrap();
         assert_eq!(
             stored_file(&db_pre, "mdo/Catalog/Товары"),
             None,
@@ -2689,7 +2730,7 @@ mod tests {
             &db_pre,
             &db_incremental,
             &[module.canonicalize().unwrap()],
-            1,
+            stdx::batch::BatchBudget::files(1),
             &build_meta(),
         )
         .unwrap();
@@ -2745,8 +2786,14 @@ mod tests {
         let db_pre = root.join(".build/pre.db");
         std::fs::create_dir_all(db_pre.parent().expect("database path has a parent")).unwrap();
         let (project, universe) = scanned(root);
-        build_graph_database(&project, &universe, &db_pre, 1, &meta())
-            .expect("initial build succeeds");
+        build_graph_database(
+            &project,
+            &universe,
+            &db_pre,
+            stdx::batch::BatchBudget::files(1),
+            &meta(),
+        )
+        .expect("initial build succeeds");
 
         let changed = vec![module_path.canonicalize().expect("module file exists")];
         let path_key = changed[0].to_string_lossy().into_owned();
@@ -2780,14 +2827,20 @@ mod tests {
             &db_pre,
             &db_incremental,
             &changed,
-            1,
+            stdx::batch::BatchBudget::files(1),
             &meta(),
         )
         .expect("body-only incremental update succeeds");
         let db_full = root.join(".build/full.db");
         let (project, universe) = scanned(root);
-        build_graph_database(&project, &universe, &db_full, 1, &meta())
-            .expect("full rebuild succeeds");
+        build_graph_database(
+            &project,
+            &universe,
+            &db_full,
+            stdx::batch::BatchBudget::files(1),
+            &meta(),
+        )
+        .expect("full rebuild succeeds");
 
         let dump = |path: &Path| {
             let conn = Connection::open(path).unwrap();
@@ -2899,7 +2952,7 @@ mod tests {
             &project,
             &universe,
             &path,
-            1,
+            stdx::batch::BatchBudget::files(1),
             &GraphMeta {
                 revision: 1,
                 fingerprint: GraphFp::default(),

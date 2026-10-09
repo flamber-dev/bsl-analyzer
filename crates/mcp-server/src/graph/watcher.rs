@@ -473,7 +473,7 @@ mod tests {
             "a real delivery above the frontier must reopen the budget",
         );
     }
-    use super::super::test_support::{sample_workspace, wait_ready, wait_until};
+    use super::super::test_support::{published_report, sample_workspace, wait_ready, wait_until};
     use super::*;
     use crate::change_hub::test_support::eventually;
     use std::sync::{Arc, Mutex};
@@ -864,7 +864,7 @@ mod tests {
         let (graph, hub, stop) = super::super::test_support::watched_graph(root);
         graph.ensure_loading();
         wait_ready(&graph);
-        let before = graph.status_report().revision.unwrap();
+        let before = published_report(&graph).revision.unwrap();
         graph.refused_installs.store(1, std::sync::atomic::Ordering::SeqCst);
         super::super::test_support::write(
             root,
@@ -889,7 +889,7 @@ mod tests {
         assert!(start(&graph, &hub, None, stop.clone()));
         graph.ensure_loading();
         wait_ready(&graph);
-        let before = graph.status_report().revision.unwrap();
+        let before = published_report(&graph).revision.unwrap();
         super::super::test_support::write(
             root,
             "CommonModules/Сервер/Ext/Module.bsl",
@@ -938,7 +938,7 @@ mod tests {
         assert!(start(&graph, &hub, None, stop.clone()));
         graph.ensure_loading();
         wait_ready(&graph);
-        let before = graph.status_report().revision.unwrap();
+        let before = published_report(&graph).revision.unwrap();
 
         // Every reload this edit causes starts after the edit's first fact reached the hub.
         let first_fact = hub.seq() + 1;
@@ -975,7 +975,7 @@ mod tests {
         graph.ensure_loading();
         wait_ready(&graph);
         wait_until(&graph, "the boot nudge to settle", || !graph.drift_pending());
-        let before = graph.status_report().revision.unwrap();
+        let before = published_report(&graph).revision.unwrap();
 
         // A fact the published build did not observe, which changes no fingerprint input.
         let seq_before = hub.seq();
@@ -989,7 +989,7 @@ mod tests {
             !graph.marks_pending()
         });
         assert!(bounds.lock().unwrap().contains(&42));
-        assert!(graph.status_report().revision.unwrap() > before, "no rebuild ran");
+        assert!(published_report(&graph).revision.unwrap() > before, "no rebuild ran");
         stop.stop();
         hub.interrupt_waiters();
     }
