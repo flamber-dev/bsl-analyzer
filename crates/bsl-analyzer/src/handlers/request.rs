@@ -58,7 +58,15 @@ pub fn handle_goto_definition(
     let line_index = source_doc.line_index();
 
     let offset =
-        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+        match crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding) {
+            Ok(o) => o,
+            Err(_) => {
+                tracing::debug!(
+                    "Position out of bounds, likely race with didChange - returning empty"
+                );
+                return Ok(None);
+            }
+        };
 
     let target = ctx.analysis.goto_definition(file_id, offset.into());
 
@@ -127,7 +135,15 @@ pub fn handle_type_definition(
     let line_index = source_doc.line_index();
 
     let offset =
-        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+        match crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding) {
+            Ok(o) => o,
+            Err(_) => {
+                tracing::debug!(
+                    "Position out of bounds, likely race with didChange - returning empty"
+                );
+                return Ok(None);
+            }
+        };
 
     let Some(nav_target) = ctx.analysis.type_definition(file_id, offset.into()) else {
         return Ok(None);
@@ -176,7 +192,15 @@ pub fn handle_find_references(
     let line_index = doc.line_index();
 
     let offset =
-        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+        match crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding) {
+            Ok(o) => o,
+            Err(_) => {
+                tracing::debug!(
+                    "Position out of bounds, likely race with didChange - returning empty"
+                );
+                return Ok(None);
+            }
+        };
 
     let locations = ctx.analysis.find_references(file_id, offset.into());
 
@@ -215,7 +239,15 @@ pub fn handle_prepare_rename(
     let line_index = doc.line_index();
 
     let offset =
-        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+        match crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding) {
+            Ok(o) => o,
+            Err(_) => {
+                tracing::debug!(
+                    "Position out of bounds, likely race with didChange - returning empty"
+                );
+                return Ok(None);
+            }
+        };
 
     let Some(target) = ctx.analysis.prepare_rename(file_id, offset.into()) else {
         return Ok(None);
@@ -255,7 +287,15 @@ pub fn handle_rename(
     let line_index = doc.line_index();
 
     let offset =
-        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+        match crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding) {
+            Ok(o) => o,
+            Err(_) => {
+                tracing::debug!(
+                    "Position out of bounds, likely race with didChange - returning empty"
+                );
+                return Ok(None);
+            }
+        };
 
     let locations = match ctx.analysis.rename(file_id, offset.into(), &new_name) {
         Ok(locations) => locations,
@@ -324,7 +364,15 @@ pub fn handle_prepare_call_hierarchy(
     let line_index = doc.line_index();
 
     let offset =
-        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+        match crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding) {
+            Ok(o) => o,
+            Err(_) => {
+                tracing::debug!(
+                    "Position out of bounds, likely race with didChange - returning empty"
+                );
+                return Ok(None);
+            }
+        };
 
     let Some(ide_item) = ctx.analysis.prepare_call_hierarchy(file_id, offset.into()) else {
         return Ok(None);
@@ -755,7 +803,15 @@ pub fn handle_document_highlight(
     let line_index = doc.line_index();
 
     let offset =
-        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+        match crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding) {
+            Ok(o) => o,
+            Err(_) => {
+                tracing::debug!(
+                    "Position out of bounds, likely race with didChange - returning empty"
+                );
+                return Ok(None);
+            }
+        };
 
     let highlights = ctx.analysis.document_highlights(file_id, offset.into());
     if highlights.is_empty() {
@@ -905,7 +961,15 @@ pub fn handle_hover(ctx: &LatencyRequestContext, params: HoverParams) -> Result<
     let line_index = doc.line_index();
 
     let offset =
-        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+        match crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding) {
+            Ok(o) => o,
+            Err(_) => {
+                tracing::debug!(
+                    "Position out of bounds, likely race with didChange - returning empty"
+                );
+                return Ok(None);
+            }
+        };
 
     let hover_result = ctx.analysis.hover(file_id, offset.into(), ctx.diagnostics_config.locale);
 
@@ -2235,8 +2299,18 @@ pub fn handle_on_type_formatting(
 
     let line_index = LineIndex::new(&text);
 
-    let offset =
-        crate::lsp::offset_with_encoding(&line_index, &text, position, snap.position_encoding)?;
+    let offset = match crate::lsp::offset_with_encoding(
+        &line_index,
+        &text,
+        position,
+        snap.position_encoding,
+    ) {
+        Ok(o) => o,
+        Err(_) => {
+            tracing::debug!("Position out of bounds, likely race with didChange - returning empty");
+            return Ok(None);
+        }
+    };
 
     let char_typed = params.ch.chars().next().unwrap_or('\0');
 
@@ -2299,6 +2373,7 @@ mod tests {
 
     mod call_hierarchy_trace_tests;
     mod inlay_hint_tests;
+    mod position_race_tests;
 
     /// A symbol whose range does not project onto the open buffer is the one case where a
     /// map can lie without looking wrong: the answer stays well-formed while a method — or
