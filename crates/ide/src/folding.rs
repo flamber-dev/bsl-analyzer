@@ -52,10 +52,27 @@ fn collect_syntax_ranges(
     ranges: &mut Vec<FoldingRange>,
 ) {
     for node in root.descendants() {
-        if is_foldable_syntax_node(node.kind()) {
+        if node.kind() == SyntaxKind::LITERAL {
+            if let Some(range) = string_literal_range(&node) {
+                push_multiline_range(ranges, line_index, range, None);
+            }
+        } else if is_foldable_syntax_node(node.kind()) {
             push_multiline_range(ranges, line_index, node.text_range(), None);
         }
     }
+}
+
+/// Текст запроса — многострочный литерал: складка идёт от открывающей
+/// кавычки до последнего строкового токена. Оборванному литералу парсер
+/// при восстановлении отдаёт следующий за ним код, и складка по всему узлу
+/// захватила бы строку с этим кодом.
+fn string_literal_range(literal: &SyntaxNode) -> Option<TextRange> {
+    let last = literal
+        .children_with_tokens()
+        .filter_map(|element| element.into_token())
+        .filter(|token| token.kind().is_string_literal())
+        .last()?;
+    Some(TextRange::new(literal.text_range().start(), last.text_range().end()))
 }
 
 /// Серия комментариев сворачивается по частям, владеющим своей строкой:
@@ -96,11 +113,6 @@ fn is_foldable_syntax_node(kind: SyntaxKind) -> bool {
             | SyntaxKind::PRE_IF_DIR
             | SyntaxKind::PRE_DELETE_DIR
             | SyntaxKind::PRE_INSERT_DIR
-            // Узел литерала покрывает строку целиком — от открывающей кавычки
-            // до закрывающей, со всеми строками `|` между ними: так пишутся
-            // тексты запросов. Однострочные литералы отсеивает `folding_lines`,
-            // а оборванный литерал кончается на своей первой строке.
-            | SyntaxKind::LITERAL
     )
 }
 
@@ -356,6 +368,22 @@ mod tests {
         let ranges = ranges_by_lines(code);
 
         assert_eq!(ranges, vec![(0, 6, None), (1, 5, None)]);
+    }
+
+    /// Оборванный литерал сворачивается только по своим строкам `|`: код
+    /// после него в складку не попадает, а без продолжений складки нет вовсе.
+    #[test]
+    fn unclosed_literal_fold_stops_at_its_last_continuation_line() {
+        let code = "Процедура Тест()\n\
+                    \tТекст = \"ВЫБРАТЬ\n\
+                    \t|\t1 КАК Поле\n\
+                    \t|ГДЕ ИСТИНА\n\
+                    \tСообщить(Текст);\n\
+                    КонецПроцедуры";
+        assert_eq!(ranges_by_lines(code), vec![(0, 5, None), (1, 3, None)]);
+
+        let code = "Процедура Тест()\n\tТекст = \"ВЫБРАТЬ\n\tСообщить(Текст);\nКонецПроцедуры";
+        assert_eq!(ranges_by_lines(code), vec![(0, 3, None)]);
     }
 
     #[test]
