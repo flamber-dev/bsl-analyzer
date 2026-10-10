@@ -58,7 +58,15 @@ pub fn handle_goto_definition(
     let line_index = source_doc.line_index();
 
     let offset =
-        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+        match crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding) {
+            Ok(o) => o,
+            Err(_) => {
+                tracing::debug!(
+                    "Position out of bounds, likely race with didChange - returning empty"
+                );
+                return Ok(None);
+            }
+        };
 
     let target = ctx.analysis.goto_definition(file_id, offset.into());
 
@@ -127,7 +135,15 @@ pub fn handle_type_definition(
     let line_index = source_doc.line_index();
 
     let offset =
-        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+        match crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding) {
+            Ok(o) => o,
+            Err(_) => {
+                tracing::debug!(
+                    "Position out of bounds, likely race with didChange - returning empty"
+                );
+                return Ok(None);
+            }
+        };
 
     let Some(nav_target) = ctx.analysis.type_definition(file_id, offset.into()) else {
         return Ok(None);
@@ -176,7 +192,15 @@ pub fn handle_find_references(
     let line_index = doc.line_index();
 
     let offset =
-        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+        match crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding) {
+            Ok(o) => o,
+            Err(_) => {
+                tracing::debug!(
+                    "Position out of bounds, likely race with didChange - returning empty"
+                );
+                return Ok(None);
+            }
+        };
 
     let locations = ctx.analysis.find_references(file_id, offset.into());
 
@@ -215,7 +239,15 @@ pub fn handle_prepare_rename(
     let line_index = doc.line_index();
 
     let offset =
-        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+        match crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding) {
+            Ok(o) => o,
+            Err(_) => {
+                tracing::debug!(
+                    "Position out of bounds, likely race with didChange - returning empty"
+                );
+                return Ok(None);
+            }
+        };
 
     let Some(target) = ctx.analysis.prepare_rename(file_id, offset.into()) else {
         return Ok(None);
@@ -255,7 +287,15 @@ pub fn handle_rename(
     let line_index = doc.line_index();
 
     let offset =
-        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+        match crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding) {
+            Ok(o) => o,
+            Err(_) => {
+                tracing::debug!(
+                    "Position out of bounds, likely race with didChange - returning empty"
+                );
+                return Ok(None);
+            }
+        };
 
     let locations = match ctx.analysis.rename(file_id, offset.into(), &new_name) {
         Ok(locations) => locations,
@@ -324,7 +364,15 @@ pub fn handle_prepare_call_hierarchy(
     let line_index = doc.line_index();
 
     let offset =
-        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+        match crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding) {
+            Ok(o) => o,
+            Err(_) => {
+                tracing::debug!(
+                    "Position out of bounds, likely race with didChange - returning empty"
+                );
+                return Ok(None);
+            }
+        };
 
     let Some(ide_item) = ctx.analysis.prepare_call_hierarchy(file_id, offset.into()) else {
         return Ok(None);
@@ -755,7 +803,15 @@ pub fn handle_document_highlight(
     let line_index = doc.line_index();
 
     let offset =
-        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+        match crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding) {
+            Ok(o) => o,
+            Err(_) => {
+                tracing::debug!(
+                    "Position out of bounds, likely race with didChange - returning empty"
+                );
+                return Ok(None);
+            }
+        };
 
     let highlights = ctx.analysis.document_highlights(file_id, offset.into());
     if highlights.is_empty() {
@@ -905,7 +961,15 @@ pub fn handle_hover(ctx: &LatencyRequestContext, params: HoverParams) -> Result<
     let line_index = doc.line_index();
 
     let offset =
-        crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding)?;
+        match crate::lsp::offset_with_encoding(line_index, text, position, ctx.position_encoding) {
+            Ok(o) => o,
+            Err(_) => {
+                tracing::debug!(
+                    "Position out of bounds, likely race with didChange - returning empty"
+                );
+                return Ok(None);
+            }
+        };
 
     let hover_result = ctx.analysis.hover(file_id, offset.into(), ctx.diagnostics_config.locale);
 
@@ -2235,8 +2299,18 @@ pub fn handle_on_type_formatting(
 
     let line_index = LineIndex::new(&text);
 
-    let offset =
-        crate::lsp::offset_with_encoding(&line_index, &text, position, snap.position_encoding)?;
+    let offset = match crate::lsp::offset_with_encoding(
+        &line_index,
+        &text,
+        position,
+        snap.position_encoding,
+    ) {
+        Ok(o) => o,
+        Err(_) => {
+            tracing::debug!("Position out of bounds, likely race with didChange - returning empty");
+            return Ok(None);
+        }
+    };
 
     let char_typed = params.ch.chars().next().unwrap_or('\0');
 
@@ -2299,6 +2373,12 @@ mod tests {
 
     mod call_hierarchy_trace_tests;
     mod inlay_hint_tests;
+    mod position_race_tests;
+
+    /// How long a stand waits for a thread to reach a parked or published state before
+    /// calling the test hung. Scheduling latency on a loaded machine is the only thing
+    /// it absorbs, so it is generous and nothing is measured against it.
+    const PARK_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(30);
 
     /// A symbol whose range does not project onto the open buffer is the one case where a
     /// map can lie without looking wrong: the answer stays well-formed while a method — or
@@ -3043,7 +3123,9 @@ mod tests {
         ));
         let lifecycle = state.call_hierarchy_index.clone();
         let publisher = std::thread::spawn(move || {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+            // A hang guard, not a measurement: the request parks as soon as it is
+            // scheduled, which a loaded machine may put off for a long time.
+            let deadline = std::time::Instant::now() + PARK_HANG_GUARD;
             while !lifecycle.has_waiter(source_root, 1) {
                 assert!(std::time::Instant::now() < deadline, "incoming request did not park");
                 std::thread::yield_now();
@@ -3051,7 +3133,9 @@ mod tests {
             assert!(lifecycle.publish(source_root, 1, index));
         });
         let mut ctx = latency_ctx(&state);
-        ctx.call_hierarchy_wait_policy.timeout = std::time::Duration::from_millis(100);
+        // The wait only has to outlast the publisher's scheduling; a waiter that gives
+        // up first answers `None` and fails below, so the bound stays a bound.
+        ctx.call_hierarchy_wait_policy.timeout = PARK_HANG_GUARD;
 
         // When: incoming calls arrive before the build publishes.
         let result = handle_call_hierarchy_incoming(
@@ -3193,12 +3277,16 @@ mod tests {
             1,
             crate::call_hierarchy_index_state::CallHierarchyIndexSnapshotId(1),
         ));
+        // One bound for every request: a follower that parked would answer no sooner
+        // than this, so "answered sooner" below is what tells a follower that did not
+        // park from one that did — whatever the machine's speed.
+        let wait_bound = PARK_HANG_GUARD;
         let mut waiting_ctx = latency_ctx(&state);
-        waiting_ctx.call_hierarchy_wait_policy.timeout = std::time::Duration::from_millis(200);
+        waiting_ctx.call_hierarchy_wait_policy.timeout = wait_bound;
         let follower_contexts: Vec<_> = (0..4)
             .map(|_| {
                 let mut ctx = latency_ctx(&state);
-                ctx.call_hierarchy_wait_policy.timeout = std::time::Duration::from_millis(200);
+                ctx.call_hierarchy_wait_policy.timeout = wait_bound;
                 ctx
             })
             .collect();
@@ -3209,7 +3297,7 @@ mod tests {
             let waiting_request = scope.spawn(move || {
                 handle_call_hierarchy_incoming(&waiting_ctx, incoming_params(waiting_item))
             });
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+            let deadline = std::time::Instant::now() + PARK_HANG_GUARD;
             while !state.call_hierarchy_index.has_waiter(source_root, 1) {
                 assert!(
                     std::time::Instant::now() < deadline,
@@ -3246,7 +3334,11 @@ mod tests {
                     "only the first Building request may wait"
                 );
             }
-            assert!(followers_started.elapsed() < std::time::Duration::from_millis(100));
+            let followers_took = followers_started.elapsed();
+            assert!(
+                followers_took < wait_bound,
+                "a follower waited out the bound instead of answering at once: {followers_took:?}",
+            );
             assert!(hover.join().expect("hover request must finish").unwrap().is_some());
             assert!(state.call_hierarchy_index.publish(source_root, 1, index));
 
@@ -3836,6 +3928,10 @@ mod tests {
     /// answer that is simply empty.
     #[test]
     fn workspace_symbol_skips_a_candidate_whose_file_is_gone() {
+        // The panic below is real and runs under an attached database, so it stamps the
+        // process-wide panic watch like any other: a test asserting the watch is clean
+        // must not run beside it.
+        let _guard = crate::panic_watch::panic_test_guard();
         let tmp = tempfile::tempdir().expect("tempdir");
         let module_path = tmp.path().join("Ровный.bsl");
         let module_text = "Процедура ДрейфТестМетод() Экспорт\nКонецПроцедуры\n";

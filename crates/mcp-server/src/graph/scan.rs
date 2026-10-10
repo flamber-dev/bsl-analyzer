@@ -22,7 +22,7 @@ pub(crate) struct FileStat {
     /// the file under the declared root that actually walked to it.
     pub(crate) walked: PathBuf,
     pub(super) mtime: u128,
-    pub(super) len: u64,
+    pub(crate) len: u64,
     /// The hash read during the owning scan. Keeping it with the stat means
     /// the verdict and the persisted fingerprint describe the same bytes.
     pub(crate) content_hash: Option<[u8; 32]>,

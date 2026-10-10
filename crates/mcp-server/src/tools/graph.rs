@@ -619,6 +619,7 @@ mod tests {
     /// is. `СтрНайти` is a platform member, which needs no index at all, so the answer is
     /// non-empty while the graph is absent.
     #[test]
+    #[cfg_attr(not(corpus_contract), ignore = "corpus contract: needs the platform help corpus")]
     fn an_unconsulted_source_is_named_not_merely_missing() {
         let dir = tempfile::tempdir().unwrap();
         crate::graph::test_support::sample_workspace(dir.path());

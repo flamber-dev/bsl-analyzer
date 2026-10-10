@@ -1448,6 +1448,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(corpus_contract), ignore = "corpus contract: needs the platform help corpus")]
     fn test_standard_form_property_not_flagged_in_form_module() {
         use crate::test_utils::check_metadata_diagnostic;
 
@@ -1471,6 +1472,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(corpus_contract), ignore = "corpus contract: needs the platform help corpus")]
     fn test_writable_form_property_not_flagged_in_form_module() {
         use crate::test_utils::check_metadata_diagnostic;
 
@@ -1498,6 +1500,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(corpus_contract), ignore = "corpus contract: needs the platform help corpus")]
     fn test_window_opening_mode_not_flagged_in_form_module() {
         use crate::test_utils::check_metadata_diagnostic;
 
@@ -1525,6 +1528,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(corpus_contract), ignore = "corpus contract: needs the platform help corpus")]
     fn test_form_extension_property_not_flagged_in_form_module() {
         use crate::test_utils::check_metadata_diagnostic;
 
@@ -1741,6 +1745,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(corpus_contract), ignore = "corpus contract: needs the platform help corpus")]
     fn test_record_set_platform_property_not_flagged_with_salsa() {
         use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
         use ide_db::RootDatabaseImpl;

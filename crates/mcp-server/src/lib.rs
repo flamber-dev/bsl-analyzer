@@ -2430,6 +2430,11 @@ impl McpServer {
             "references",
             ct,
             move |session| {
+                // Before the read that folds them: the name indexes' per-file halves,
+                // warmed in chunks with a trim between, so a cold index is built from
+                // memos instead of holding every workspace file's syntax tree at once.
+                let warm_cancel = std::sync::Arc::clone(session.cancel());
+                let _ = session.read_fanout(|resident, _| resident.warm_name_indexes(&warm_cancel));
                 graph.read_optional(|snapshot| {
                     let graph_source = graph_name_source(&graph, snapshot);
 
@@ -2704,8 +2709,10 @@ impl McpServer {
             move |session| {
                 let sweep_cancel = std::sync::Arc::clone(session.cancel());
                 let outcome = session.read_fanout(|resident, generation| {
-                    let sweep =
-                        resident.workspace_aggregates(resident.config(), &opts, &sweep_cancel);
+                    // Cloned, not borrowed: the sweep trims the resident's caches as it
+                    // goes, so it needs the resident mutably for its whole duration.
+                    let config = resident.config().clone();
+                    let sweep = resident.workspace_aggregates(&config, &opts, &sweep_cancel);
                     if sweep.cancelled {
                         tracing::info!(
                             tool = "diagnostics",
