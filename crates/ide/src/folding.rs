@@ -62,16 +62,34 @@ fn collect_syntax_ranges(
     }
 }
 
-/// Текст запроса — многострочный литерал: складка идёт от открывающей
-/// кавычки до закрывающей. Оборванный литерал не сворачивается вовсе: пока
-/// строка не закрыта, её границу задаёт восстановление парсера, которое
-/// отдаёт литералу и следующий за ним код.
+/// Текст запроса — многострочный литерал: складка идёт от первой кавычки
+/// узла до последней закрывающей. Соседние строки без оператора парсер
+/// склеивает в один узел, и сворачивается он только целиком закрытый:
+/// границу оборванной части задаёт восстановление парсера, которое
+/// закрывает её чужой строкой или отдаёт литералу следующий за ним код.
 fn string_literal_range(literal: &SyntaxNode) -> Option<TextRange> {
-    let tail = literal
-        .children_with_tokens()
-        .filter_map(|element| element.into_token())
-        .find(|token| token.kind() == SyntaxKind::STRING_TAIL)?;
-    Some(TextRange::new(literal.text_range().start(), tail.text_range().end()))
+    let mut open = false;
+    let mut end = None;
+    for token in literal.children_with_tokens().filter_map(|element| element.into_token()) {
+        match token.kind() {
+            SyntaxKind::STRING_START if !open => open = true,
+            SyntaxKind::STRING_PART if open => {}
+            SyntaxKind::STRING_TAIL if open => {
+                open = false;
+                end = Some(token.text_range().end());
+            }
+            SyntaxKind::STRING if !open => end = Some(token.text_range().end()),
+            SyntaxKind::STRING_START
+            | SyntaxKind::STRING_PART
+            | SyntaxKind::STRING_TAIL
+            | SyntaxKind::STRING => return None,
+            _ => {}
+        }
+    }
+    if open {
+        return None;
+    }
+    Some(TextRange::new(literal.text_range().start(), end?))
 }
 
 /// Серия комментариев сворачивается по частям, владеющим своей строкой:
@@ -401,6 +419,61 @@ mod tests {
                       \tСообщить(Текст);\n\
                       КонецПроцедуры";
         assert_eq!(ranges_by_lines(closed), vec![(0, 5, None), (1, 3, None)]);
+    }
+
+    /// Оборванная строка, за которой стоит закрытая, парсер склеивает с ней
+    /// в один литерал; закрывающая кавычка чужой строки не делает литерал
+    /// закрытым, и складки нет — ни через комментарий, ни вплотную.
+    #[test]
+    fn unclosed_literal_followed_by_a_closed_string_is_not_folded() {
+        let through_comment = "Процедура Тест()\n\
+                               \tТекст = \"ВЫБРАТЬ\n\
+                               \t// пояснение\n\
+                               \t\"ИЗ\n\
+                               \t|Т\";\n\
+                               КонецПроцедуры";
+        assert_eq!(ranges_by_lines(through_comment), vec![(0, 5, None)]);
+
+        let adjacent = "Процедура Тест()\n\
+                        \tТекст = \"ВЫБРАТЬ\n\
+                        \t\"ИЗ\n\
+                        \t|Т\";\n\
+                        КонецПроцедуры";
+        assert_eq!(ranges_by_lines(adjacent), vec![(0, 4, None)]);
+
+        let closed_by_a_single_line_string = "Процедура Тест()\n\
+                                              \tТекст = \"ВЫБРАТЬ\n\
+                                              \t// пояснение\n\
+                                              \t\"ИЗ Т\";\n\
+                                              КонецПроцедуры";
+        assert_eq!(ranges_by_lines(closed_by_a_single_line_string), vec![(0, 4, None)]);
+    }
+
+    /// Соседние строки без оператора — одно значение, склеенное из частей:
+    /// складка идёт от первой кавычки до последней закрывающей, какая бы из
+    /// частей ни была многострочной.
+    #[test]
+    fn adjacent_string_literals_fold_as_one_literal() {
+        let two_multiline = "Процедура Тест()\n\
+                             \tТекст = \"ВЫБРАТЬ\n\
+                             \t|1\" \"ИЗ\n\
+                             \t|Т\";\n\
+                             КонецПроцедуры";
+        assert_eq!(ranges_by_lines(two_multiline), vec![(0, 4, None), (1, 3, None)]);
+
+        let multiline_then_single_line = "Процедура Тест()\n\
+                                          \tТекст = \"ВЫБРАТЬ\n\
+                                          \t|1\"\n\
+                                          \t\" ГДЕ ИСТИНА\";\n\
+                                          КонецПроцедуры";
+        assert_eq!(ranges_by_lines(multiline_then_single_line), vec![(0, 4, None), (1, 3, None)]);
+
+        let single_line_then_multiline = "Процедура Тест()\n\
+                                          \tТекст = \"ВЫБРАТЬ 1\"\n\
+                                          \t\"ГДЕ\n\
+                                          \t|ИСТИНА\";\n\
+                                          КонецПроцедуры";
+        assert_eq!(ranges_by_lines(single_line_then_multiline), vec![(0, 4, None), (1, 3, None)]);
     }
 
     #[test]
