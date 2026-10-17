@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/) in the `0
 
 ## [Unreleased]
 
+### Changed
+
+- config: `[diagnostics] ordinaryAppSupport`, если он не задан, берётся из
+  `<DefaultRunMode>` основной конфигурации: `OrdinaryApplication` — `true`, иначе
+  (и без основной конфигурации) — `false`. Явное значение по-прежнему главнее.
+  Это же значение теперь получает модель сред исполнения
+  (`EnvOptions::ordinary_app_support`), которую раньше включал только
+  `ТолстыйКлиентОбычноеПриложение` в `[features].checked_environments`, — правила
+  диагностик и модель сред больше не расходятся. Действует в LSP, `analyze`,
+  `check-config` (показывает источник значения) и в настройках диагностик
+  MCP-сервера; в LSP правка `Configuration.xml` подхватывается без перезапуска.
+
 ### Fixed
 
 - diagnostics: модуль обычной формы больше не проверяется относительно толстого
