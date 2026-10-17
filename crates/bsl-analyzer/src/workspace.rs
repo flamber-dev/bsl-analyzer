@@ -399,6 +399,7 @@ impl GlobalState {
                         db,
                         self.project.as_ref(),
                     );
+                    crate::features_state::apply_default_run_mode_to_db(db, self.project.as_ref());
                 }
             }
         }
