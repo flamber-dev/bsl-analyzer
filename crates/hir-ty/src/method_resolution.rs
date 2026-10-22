@@ -478,7 +478,80 @@ pub(crate) fn materialise_signature_enriched(
         }
     }
 
+    if !unknown {
+        sig.ret = reconcile_documented_metadata_return(db, method_id, sig.ret);
+    }
+
     sig
+}
+
+/// Keeps a documented metadata type from closing the result against what the body returns.
+///
+/// A metadata type is a closed receiver: a field it lacks is reported at every read made
+/// through the call. That is right only while the type describes the value. A copied
+/// `Возвращаемое значение` naming `СправочникСсылка.X` over a body that returns a structure,
+/// or a type naming an object the configuration does not have, would accuse every caller of
+/// code the platform runs. Such a slot widens to also hold what the body returns, and an arm
+/// naming a missing object is dropped. A body whose returns all fit the documentation, or say
+/// nothing, leaves the slot as documented.
+fn reconcile_documented_metadata_return(
+    db: &dyn HirDatabase,
+    method_id: hir_def::MethodId,
+    documented: TypeId,
+) -> TypeId {
+    use bsl_types::kind::TypeKind;
+
+    let arms_of = |ty: TypeId| -> Vec<TypeId> {
+        match db.lookup_type(ty) {
+            TypeKind::Union(parts) => parts.to_vec(),
+            _ => vec![ty],
+        }
+    };
+    let documented_arms = arms_of(documented);
+    if !documented_arms.iter().any(|arm| matches!(db.lookup_type(*arm), TypeKind::MetadataRef(_))) {
+        return documented;
+    }
+
+    let file_id = method_id.module.file_id;
+    let resolver = crate::object_resolver::DbObjectResolver::new(db, file_id);
+    let config_visible = db.file_has_visible_config(file_id);
+    let kept: Vec<TypeId> = documented_arms
+        .iter()
+        .copied()
+        .filter(|arm| {
+            !(config_visible && crate::field_enum::metadata_object_missing(&resolver, db, *arm))
+        })
+        .collect();
+    let dropped = kept.len() != documented_arms.len();
+
+    let inferred = crate::method_graph::method_return_type_query(
+        db,
+        hir_def::MethodIdInput::new(db, method_id),
+    );
+    let returned: Vec<TypeId> = arms_of(inferred)
+        .into_iter()
+        .filter(|arm| {
+            !matches!(
+                db.lookup_type(*arm),
+                TypeKind::Unknown | TypeKind::Any | TypeKind::Undefined | TypeKind::Null
+            )
+        })
+        .collect();
+    let contradicts =
+        returned.iter().any(|arm| !crate::subtype::is_assignable(db, *arm, documented));
+    if !dropped && !contradicts {
+        return documented;
+    }
+
+    let mut arms = kept;
+    arms.extend(returned);
+    let mut seen = rustc_hash::FxHashSet::default();
+    arms.retain(|arm| seen.insert(*arm));
+    match arms.len() {
+        0 => db.unknown(),
+        1 => arms[0],
+        _ => db.union(arms),
+    }
 }
 
 #[cfg(test)]

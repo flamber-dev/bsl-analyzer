@@ -46,6 +46,7 @@ mod infer_call_candidates;
 mod infer_common_attributes;
 mod infer_common_module;
 mod infer_constant_types;
+mod infer_documented_metadata_return;
 mod infer_field_lookup;
 mod infer_for_each_element;
 mod infer_form_attribute_to_value;

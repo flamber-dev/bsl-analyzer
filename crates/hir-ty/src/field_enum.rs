@@ -862,6 +862,31 @@ pub(crate) fn metadata_fields_open(
     false
 }
 
+/// Whether a metadata reference names an object or register the configuration does not have.
+/// Kinds below an object (tabular sections, register dimensions) are not judged here.
+pub(crate) fn metadata_object_missing(
+    resolver: &dyn ObjectResolver,
+    db: &dyn TypeKernelDb,
+    ty: TypeId,
+) -> bool {
+    let TypeKind::MetadataRef(facet) = db.lookup_type(ty) else {
+        return false;
+    };
+    if matches!(
+        facet.kind,
+        MetadataKind::ExternalDataProcessorObject | MetadataKind::ExternalReportObject
+    ) {
+        return false;
+    }
+    if let Some(mdo_type) = mdo_type_for_kind(facet.kind) {
+        return resolver.resolve_metadata_object(mdo_type, facet.name.as_str()).is_none();
+    }
+    if let Some(parent) = register_parent_for_kind(facet.kind) {
+        return resolver.resolve_register(parent, facet.name.as_str()).is_none();
+    }
+    false
+}
+
 pub(crate) fn split_parent_section(name: &str) -> Option<(&str, &str)> {
     let (parent, section) = name.split_once('.')?;
     if parent.is_empty() || section.is_empty() {
