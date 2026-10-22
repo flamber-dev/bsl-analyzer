@@ -228,6 +228,8 @@ impl PlatformDataInner {
         }
 
         apply_docs_gap_method_overlay(&mut methods, &global_functions);
+        apply_docs_gap_cloned_method_overlay(&mut methods);
+        apply_docs_gap_predefined_item_name_overlay(&mut methods);
         apply_docs_gap_method_variant_overlay(&mut methods);
         apply_docs_gap_member_context_overlay(&mut methods, &mut global_functions, &types);
         apply_docs_gap_property_context_overlay(&mut properties);
@@ -848,7 +850,121 @@ const DOCS_GAP_MANAGER_METHODS: &[(&str, &str)] = &[
 /// member availability rather than the member list, so a member-surface
 /// attestation is not disqualified by them.
 pub fn docs_gap_synthesized_member_types() -> Vec<&'static str> {
-    DOCS_GAP_MANAGER_METHODS.iter().map(|(type_name, _)| *type_name).collect()
+    DOCS_GAP_MANAGER_METHODS
+        .iter()
+        .map(|(type_name, _)| *type_name)
+        .chain(DOCS_GAP_CLONED_METHODS.iter().map(|(type_name, _, _)| *type_name))
+        .chain(DOCS_GAP_PREDEFINED_ITEM_NAME_MANAGERS.iter().copied())
+        .collect()
+}
+
+/// Methods the platform runs on a type whose help page does not list them,
+/// while the same methods are documented on a sibling type. Each entry is
+/// (owner type, sibling type the signatures are taken from, Russian method
+/// names). `ОбъектМетаданныхКонфигурация` documents only `НайтиПоПолномуИмени`,
+/// `НайтиПоТипу` and `ЕстьИзмененияРасширениямиКонфигурации`, yet on 8.3.17 and
+/// 8.3.27 `Метаданные.Представление()` returns "Конфигурация",
+/// `Метаданные.ПолноеИмя()` "Конфигурация.Конфигурация", and `Родитель()` and
+/// `РасширениеКонфигурации()` return `Неопределено` — the methods every
+/// metadata object has; a misspelled name fails with "Метод объекта не
+/// обнаружен". A method the owner already documents is left as it is.
+const DOCS_GAP_CLONED_METHODS: &[(&str, &str, &[&str])] = &[(
+    "ConfigurationMetadataObject",
+    "MetadataObject: Constant",
+    &["Родитель", "ПолноеИмя", "Представление", "РасширениеКонфигурации"],
+)];
+
+fn apply_docs_gap_cloned_method_overlay(methods: &mut Vec<PlatformMethod>) {
+    for (type_name, source_type, method_names) in DOCS_GAP_CLONED_METHODS {
+        for method_name in *method_names {
+            let folded = method_name.fold_lower();
+            if methods.iter().any(|m| m.type_name == *type_name && m.name.fold_lower() == folded) {
+                continue;
+            }
+            let Some(source) = methods
+                .iter()
+                .find(|m| m.type_name == *source_type && m.name.fold_lower() == folded)
+                .cloned()
+            else {
+                continue;
+            };
+            let Some(next_id) = methods.iter().map(|m| m.id).max().unwrap_or(0).checked_add(1)
+            else {
+                continue;
+            };
+            methods.push(PlatformMethod {
+                id: next_id,
+                type_name: SmolStr::new(*type_name),
+                ..source
+            });
+        }
+    }
+}
+
+/// Managers whose objects have predefined items. Their
+/// `ПолучитьИмяПредопределенного(Ссылка)` (`GetPredefinedItemName`) has no page
+/// in the help archive, yet on 8.3.17 and 8.3.27 it returns the predefined
+/// name of the ref, and an empty string for an empty ref, on the managers of a
+/// catalog, a chart of characteristic types, a chart of accounts and a chart of
+/// calculation types; a document manager fails with "Метод объекта не
+/// обнаружен (ПолучитьИмяПредопределенного)". The parameter type and the
+/// availability are taken from the manager's documented `НайтиПоКоду`, the
+/// return type is a string.
+const DOCS_GAP_PREDEFINED_ITEM_NAME_MANAGERS: &[&str] = &[
+    "CatalogManager.&lt;Catalog name&gt;",
+    "ChartOfCharacteristicTypesManager.&lt;Chart of characteristic types name&gt;",
+    "ChartOfAccountsManager.&lt;Chart of accounts name&gt;",
+    "ChartOfCalculationTypesManager.&lt;Chart of calculation types name&gt;",
+];
+
+fn apply_docs_gap_predefined_item_name_overlay(methods: &mut Vec<PlatformMethod>) {
+    use crate::types::MethodParam;
+
+    const RUSSIAN: &str = "ПолучитьИмяПредопределенного";
+    const ENGLISH: &str = "GetPredefinedItemName";
+
+    for type_name in DOCS_GAP_PREDEFINED_ITEM_NAME_MANAGERS {
+        let exists = methods.iter().any(|m| {
+            m.type_name == *type_name
+                && (m.name.fold_lower() == RUSSIAN.fold_lower()
+                    || m.english_name.rsplit_once('.').is_some_and(|(_, n)| n == ENGLISH))
+        });
+        if exists {
+            continue;
+        }
+        let Some(find_by_code) = methods.iter().find(|m| {
+            m.type_name == *type_name
+                && m.english_name.rsplit_once('.').is_some_and(|(_, n)| n == "FindByCode")
+        }) else {
+            continue;
+        };
+        let template = find_by_code
+            .english_name
+            .rsplit_once('.')
+            .map_or(find_by_code.english_name.as_str(), |(owner, _)| owner);
+        let english_name = SmolStr::new(format!("{template}.{ENGLISH}"));
+        let ref_type = find_by_code.return_type.clone();
+        let context = find_by_code.context;
+        let Some(next_id) = methods.iter().map(|m| m.id).max().unwrap_or(0).checked_add(1) else {
+            continue;
+        };
+        methods.push(PlatformMethod {
+            id: next_id,
+            type_name: SmolStr::new(*type_name),
+            name: SmolStr::new(RUSSIAN),
+            english_name,
+            return_type: Some(SmolStr::new("Строка")),
+            parameters: vec![MethodParam {
+                name: SmolStr::new("Ссылка"),
+                param_type: ref_type,
+                is_optional: false,
+                is_variadic: false,
+            }],
+            variants: Vec::new(),
+            min_version: None,
+            context,
+        });
+    }
 }
 
 fn apply_docs_gap_method_overlay(
@@ -1263,6 +1379,11 @@ pub fn find_prefixed_methods(prefix: &str, method_name: &str) -> Vec<PlatformMet
                 .and_then(|d| d.syntax.split('(').next())
                 .is_some_and(|ru| ru.fold_lower() == method_lower);
             if ru_match {
+                return true;
+            }
+            // A method synthesized by a docs-gap overlay has no docs page and
+            // carries its real Russian name instead of the truncated template.
+            if method.name.fold_lower() == method_lower {
                 return true;
             }
             let en_name = method
