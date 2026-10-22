@@ -75,7 +75,7 @@ pub fn from_hir(
         if !has_error_log_level {
             return Some(Diagnostic {
                 code,
-                message: "Нужно указывать уровень \"Ошибка\" при записи в журнал регистрации внутри блока Исключение-КонецПопытки".to_string(),
+                message: "Нужно указывать уровень \"Ошибка\" или \"Предупреждение\" при записи в журнал регистрации внутри блока Исключение-КонецПопытки".to_string(),
                 severity: ctx.severity(code),
                 range,
                 tags: ctx.tags(code),
@@ -283,7 +283,76 @@ EndProcedure
             &code,
             expect![[r#"
             UsageWriteLogEvent @ 5:3..6:55
-              message: Нужно указывать уровень "Ошибка" при записи в журнал регистрации внутри блока Исключение-КонецПопытки
+              message: Нужно указывать уровень "Ошибка" или "Предупреждение" при записи в журнал регистрации внутри блока Исключение-КонецПопытки
+              severity: Hint"#]],
+        );
+    }
+
+    // std498 п. 2.2: не фатальная ошибка пишется с уровнем «Предупреждение».
+    #[test]
+    fn test_warning_level_with_detail_in_except() {
+        let code = in_except(
+            "		ЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Предупреждение, , Ссылка,
+			ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
+",
+        );
+        check(&code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_warning_level_with_detail_variable_in_except() {
+        let code = in_except(
+            "		Подробно = ОбработкаОшибок.ПодробноеПредставлениеОшибки(ИнформацияОбОшибке());
+		ЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Предупреждение, , Ссылка,
+			\"Пакет будет отправлен повторно:\" + Символы.ПС + Подробно);
+",
+        );
+        check(&code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_warning_level_english_in_except() {
+        let code = "Procedure SendToBank(Package, Ref)
+	Try
+		Package.Send();
+	Except
+		WriteLogEvent(\"Bank.Upload\", EventLogLevel.Warning, , Ref,
+			DetailErrorDescription(ErrorInfo()));
+	EndTry;
+EndProcedure
+";
+        check(code, expect![[r#""#]]);
+    }
+
+    // std498 п. 2.3, std499 п. 2.2: подробное представление нужно и при уровне «Предупреждение».
+    #[test]
+    fn test_warning_level_without_detail_in_except() {
+        let code = in_except(
+            "		ЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Предупреждение, , Ссылка,
+			ОписаниеОшибки());
+",
+        );
+        check(
+            &code,
+            expect![[r#"
+            UsageWriteLogEvent @ 5:3..6:21
+              message: В тексте комментария нет вызова "ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())"
+              severity: Hint"#]],
+        );
+    }
+
+    #[test]
+    fn test_note_level_in_except() {
+        let code = in_except(
+            "		ЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", УровеньЖурналаРегистрации.Примечание, , Ссылка,
+			ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
+",
+        );
+        check(
+            &code,
+            expect![[r#"
+            UsageWriteLogEvent @ 5:3..6:55
+              message: Нужно указывать уровень "Ошибка" или "Предупреждение" при записи в журнал регистрации внутри блока Исключение-КонецПопытки
               severity: Hint"#]],
         );
     }
