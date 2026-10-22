@@ -9,8 +9,9 @@
 //! Membership follows the platform rule (ITS, «Общие реквизиты»): an object listed in `Content`
 //! with `Use` or `DontUse` is in or out regardless of anything else; an object not listed, or
 //! listed with `Auto`, follows the attribute's `AutoUse`. Only the kinds that have fields are
-//! ever reported as members; everything else (constants, scheduled jobs, ...) may sit in
-//! `Content` but contributes no field this model could expose.
+//! ever reported as members; everything else (scheduled jobs, ...) may sit in `Content` but
+//! contributes no field this model could expose. A constant is a member like an object: its
+//! value manager (`КонстантаМенеджерЗначения.<Имя>`) carries the separator as a field.
 
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -127,12 +128,18 @@ impl ObjectCommonAttributes {
 /// Whether the platform lets a common attribute add a field to an object of this kind.
 ///
 /// The set is the ITS list of kinds a common attribute may include, narrowed to the kinds this
-/// model gives fields to. Constants, scheduled jobs and the like may sit in `Content` (a
-/// separator divides their data too) but expose no field to code or queries.
+/// model gives fields to. Scheduled jobs and the like may sit in `Content` (a separator divides
+/// their data too) but expose no field to code or queries. A constant does expose one: on
+/// 8.3.17 and 8.3.27 the value manager of a constant in a separator's composition (an explicit
+/// `Use`, or `AutoUse = Use` without a `DontUse`) reads and writes `МенеджерЗначения.<Разделитель>`,
+/// its value-manager module sees the bare name, and a query reads `Константа.<Имя>.<Разделитель>`;
+/// a constant outside the composition fails with "Поле объекта не обнаружено". The constant
+/// manager (`Константы.<Имя>`) has no such field — that type takes no metadata fields at all.
 pub fn kind_takes_common_attributes(mdo_type: MdoType) -> bool {
     matches!(
         mdo_type,
-        MdoType::Catalog
+        MdoType::Constant
+            | MdoType::Catalog
             | MdoType::Document
             | MdoType::ChartOfCharacteristicTypes
             | MdoType::ChartOfAccounts
@@ -266,7 +273,9 @@ impl CommonAttributeSet {
         mdo_type: MdoType,
         object_name: &str,
     ) -> ObjectCommonAttributes {
-        if !kind_takes_common_attributes(mdo_type) {
+        // Constants of an extension stay out: how an extension's separators reach its own or
+        // adopted constants was not checked against the platform.
+        if !kind_takes_common_attributes(mdo_type) || mdo_type == MdoType::Constant {
             return ObjectCommonAttributes::default();
         }
         let mut out = ObjectCommonAttributes { fields: Vec::new(), open: self.unreadable };
@@ -514,9 +523,27 @@ mod tests {
 
     #[test]
     fn kinds_without_fields_never_take_the_attribute() {
-        let attr = attribute(true, &[(MdoType::Constant, "К", CommonAttributeUse::Use)]);
-        assert_eq!(attr.includes(MdoType::Constant, "К"), Some(false));
+        let attr = attribute(true, &[(MdoType::Enum, "П", CommonAttributeUse::Use)]);
         assert_eq!(attr.includes(MdoType::Enum, "П"), Some(false));
+        assert_eq!(attr.includes(MdoType::DataProcessor, "О"), Some(false));
+    }
+
+    #[test]
+    fn constant_membership_follows_content_and_auto_use() {
+        let explicit = attribute(
+            false,
+            &[
+                (MdoType::Constant, "Входит", CommonAttributeUse::Use),
+                (MdoType::Constant, "НеВходит", CommonAttributeUse::DontUse),
+            ],
+        );
+        assert_eq!(explicit.includes(MdoType::Constant, "Входит"), Some(true));
+        assert_eq!(explicit.includes(MdoType::Constant, "НеВходит"), Some(false));
+        assert_eq!(explicit.includes(MdoType::Constant, "НеУказана"), Some(false));
+
+        let auto = attribute(true, &[(MdoType::Constant, "НеВходит", CommonAttributeUse::DontUse)]);
+        assert_eq!(auto.includes(MdoType::Constant, "НеУказана"), Some(true));
+        assert_eq!(auto.includes(MdoType::Constant, "НеВходит"), Some(false));
     }
 
     #[test]

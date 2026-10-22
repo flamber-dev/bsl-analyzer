@@ -33,6 +33,18 @@ pub fn module_implicit_fields(db: &dyn HirDatabase, file_id: FileId) -> Vec<Fiel
             let receiver = db.metadata_ref(kind, name.as_str().to_string(), &RootConfigCtx);
             enumerate_fields_inner(db, &obj_resolver, receiver)
         }
+        ModuleType::ValueManagerModule => {
+            let Some(mdo) = metadata.mdo.as_ref().filter(|mdo| mdo.mdo_type == MdoType::Constant)
+            else {
+                return Vec::new();
+            };
+            let receiver = db.metadata_ref(
+                MetadataKind::ConstantValueManager,
+                mdo.name.clone(),
+                &RootConfigCtx,
+            );
+            enumerate_fields_inner(db, &obj_resolver, receiver)
+        }
         ModuleType::ManagerModule => Vec::new(),
         ModuleType::FormModule => {
             let Some(form) = metadata.form.as_ref().filter(|form| form.is_managed()) else {
