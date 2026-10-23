@@ -164,70 +164,6 @@ fn field_of_a_closed_structure_written_beside_an_object_is_not_reported() {
 }
 
 #[test]
-fn field_of_a_local_another_write_may_rewrite_unseen_is_not_reported() {
-    let found = unresolved_fields(
-        r#"Процедура Заполнить(Объект)
-	Объект = Справочники.Справочник1.СоздатьЭлемент();
-КонецПроцедуры
-
-Процедура Тест() Экспорт
-	Приемник = Документы.Документ1.СоздатьДокумент();
-	Заполнить(Приемник);
-	Приемник.Реквизит3 = 1;
-
-	Источник = Документы.Документ1.СоздатьДокумент();
-	Выполнить("Источник = Справочники.Справочник1.СоздатьЭлемент();");
-	Источник.Реквизит3 = 1;
-КонецПроцедуры
-"#,
-    );
-    assert!(found.is_empty(), "a call or `Выполнить` may write the catalog: {found:?}");
-}
-
-#[test]
-fn field_of_a_local_no_unseen_write_may_reach_is_still_reported() {
-    let found = unresolved_fields(
-        r#"Процедура Заполнить(Объект)
-	Объект = Справочники.Справочник1.СоздатьЭлемент();
-КонецПроцедуры
-
-Процедура Тест(Данные) Экспорт
-	Объект = Документы.Документ1.СоздатьДокумент();
-	ЗаполнитьЗначенияСвойств(Объект, Данные);
-	Сообщить(Объект);
-	Объект.НетТакогоРеквизита = 1;
-
-	Приемник = Документы.Документ1.СоздатьДокумент();
-	Приемник.ИТакогоНет = 1;
-	Заполнить(Приемник);
-	Выполнить("Приемник = Справочники.Справочник1.СоздатьЭлемент();");
-КонецПроцедуры
-"#,
-    );
-    assert_eq!(found, vec!["НетТакогоРеквизита".to_string(), "ИТакогоНет".to_string()]);
-}
-
-#[test]
-fn field_of_a_local_a_later_call_in_the_loop_may_rewrite_is_not_reported() {
-    let found = unresolved_fields(
-        r#"Процедура Заполнить(Объект)
-	Объект = Справочники.Справочник1.СоздатьЭлемент();
-КонецПроцедуры
-
-Процедура Тест(Вид) Экспорт
-	Приемник = Документы.Документ1.СоздатьДокумент();
-	Пока Вид > 0 Цикл
-		Приемник.Реквизит3 = 1;
-		Заполнить(Приемник);
-		Вид = Вид - 1;
-	КонецЦикла;
-КонецПроцедуры
-"#,
-    );
-    assert!(found.is_empty(), "the call comes round the loop before the read: {found:?}");
-}
-
-#[test]
 fn field_through_a_chain_from_a_branch_written_local_is_not_reported() {
     let found = unresolved_fields(
         r#"Процедура Тест(Вид) Экспорт
@@ -260,21 +196,24 @@ fn field_through_a_chain_from_a_local_written_once_is_still_reported() {
     assert_eq!(found, vec!["НетТакогоРеквизита".to_string(), "ИТакогоНет".to_string()]);
 }
 
+/// Only assignments are judged: a value a configuration method writes through a by-reference
+/// parameter or `Выполнить` assigns is not seen, and the miss is reported by the assignments.
 #[test]
-fn field_read_in_a_handler_after_an_unseen_write_in_the_try_is_not_reported() {
+fn field_of_a_local_written_outside_its_assignments_is_judged_by_the_assignments() {
     let found = unresolved_fields(
         r#"Процедура Заполнить(Объект)
 	Объект = Справочники.Справочник1.СоздатьЭлемент();
 КонецПроцедуры
 
-Процедура Тест() Экспорт
+Процедура Тест(Данные) Экспорт
+	Объект = Документы.Документ1.СоздатьДокумент();
+	ЗаполнитьЗначенияСвойств(Объект, Данные);
+	Сообщить(Объект);
+	Объект.НетТакогоРеквизита = 1;
+
 	Приемник = Документы.Документ1.СоздатьДокумент();
-	Попытка
-		Заполнить(Приемник);
-		Х = 1 / 0;
-	Исключение
-		Х = Приемник.Реквизит3;
-	КонецПопытки;
+	Заполнить(Приемник);
+	Приемник.Реквизит3 = 1;
 
 	Источник = Документы.Документ1.СоздатьДокумент();
 	Попытка
@@ -285,5 +224,8 @@ fn field_read_in_a_handler_after_an_unseen_write_in_the_try_is_not_reported() {
 КонецПроцедуры
 "#,
     );
-    assert!(found.is_empty(), "the protected call may have written the catalog: {found:?}");
+    assert_eq!(
+        found,
+        vec!["НетТакогоРеквизита".to_string(), "Реквизит3".to_string(), "Реквизит3".to_string()]
+    );
 }
