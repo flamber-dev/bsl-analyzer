@@ -19,6 +19,7 @@ mod completion_type_string;
 mod completion_value_collections;
 mod configurations_cfe_dependencies;
 mod configurations_cfe_visibility;
+mod constant_value_manager_context;
 mod diagnostics_collection_row_methods;
 mod diagnostics_extension_merge;
 mod diagnostics_form_attribute_call;
