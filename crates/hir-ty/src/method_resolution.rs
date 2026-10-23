@@ -478,7 +478,128 @@ pub(crate) fn materialise_signature_enriched(
         }
     }
 
+    if !unknown {
+        sig.ret = reconcile_documented_metadata_return(db, method_id, sig.ret);
+    }
+
     sig
+}
+
+/// Keeps a documented metadata type from closing the result against what the body returns.
+///
+/// A metadata type is a closed receiver: a field it lacks is reported at every read made
+/// through the call. That is right only while the type describes the value. A copied
+/// `Возвращаемое значение` naming `СправочникСсылка.X` over a body that returns a structure,
+/// or a type naming an object the configuration does not have, would accuse every caller of
+/// code the platform runs. Such a slot widens to also hold what the body returns, and a
+/// reference to a missing object is dropped. A body whose returns all fit the documentation, or
+/// say nothing, leaves the slot as documented. The reference may stand as the element of a
+/// documented `Массив из`, where it closes every element read through the result the same way.
+fn reconcile_documented_metadata_return(
+    db: &dyn HirDatabase,
+    method_id: hir_def::MethodId,
+    documented: TypeId,
+) -> TypeId {
+    use bsl_types::kind::TypeKind;
+
+    if !mentions_metadata_ref(db, documented) {
+        return documented;
+    }
+
+    let file_id = method_id.module.file_id;
+    let kept = if db.file_has_visible_config(file_id) {
+        let resolver = crate::object_resolver::DbObjectResolver::new(db, file_id);
+        without_missing_objects(db, &resolver, documented)
+    } else {
+        Some(documented)
+    };
+    let dropped = kept != Some(documented);
+
+    let arms_of = |ty: TypeId| -> Vec<TypeId> {
+        match db.lookup_type(ty) {
+            TypeKind::Union(parts) => parts.to_vec(),
+            _ => vec![ty],
+        }
+    };
+    let inferred = crate::method_graph::method_return_type_query(
+        db,
+        hir_def::MethodIdInput::new(db, method_id),
+    );
+    let returned: Vec<TypeId> = arms_of(inferred)
+        .into_iter()
+        .filter(|arm| {
+            !matches!(
+                db.lookup_type(*arm),
+                TypeKind::Unknown | TypeKind::Any | TypeKind::Undefined | TypeKind::Null
+            )
+        })
+        .collect();
+    let contradicts =
+        returned.iter().any(|arm| !crate::subtype::is_assignable(db, *arm, documented));
+    if !dropped && !contradicts {
+        return documented;
+    }
+
+    let mut arms = kept.map(arms_of).unwrap_or_default();
+    arms.extend(returned);
+    let mut seen = rustc_hash::FxHashSet::default();
+    arms.retain(|arm| seen.insert(*arm));
+    match arms.len() {
+        0 => db.unknown(),
+        1 => arms[0],
+        _ => db.union(arms),
+    }
+}
+
+/// Documentation gives an element type only to `Массив из`; a documented `Соответствие` or
+/// `СписокЗначений` lowers without one, so arrays and union arms are the only places a
+/// documented reference can stand.
+fn mentions_metadata_ref(db: &dyn HirDatabase, ty: TypeId) -> bool {
+    use bsl_types::kind::TypeKind;
+    match db.lookup_type(ty) {
+        TypeKind::MetadataRef(_) => true,
+        TypeKind::Union(parts) => parts.iter().any(|part| mentions_metadata_ref(db, *part)),
+        TypeKind::Array(facet) => facet.element.is_some_and(|elem| mentions_metadata_ref(db, elem)),
+        _ => false,
+    }
+}
+
+/// `ty` without its references to objects the configuration does not have; `None` when nothing
+/// is left. An array whose element named only a missing object stays an array of anything.
+fn without_missing_objects(
+    db: &dyn HirDatabase,
+    resolver: &dyn crate::object_resolver::ObjectResolver,
+    ty: TypeId,
+) -> Option<TypeId> {
+    use bsl_types::kind::TypeKind;
+    match db.lookup_type(ty) {
+        TypeKind::MetadataRef(_) => {
+            (!crate::field_enum::metadata_object_missing(resolver, db, ty)).then_some(ty)
+        }
+        TypeKind::Union(parts) => {
+            let parts = parts.to_vec();
+            let kept: Vec<TypeId> = parts
+                .iter()
+                .filter_map(|part| without_missing_objects(db, resolver, *part))
+                .collect();
+            if kept == parts {
+                return Some(ty);
+            }
+            match kept.len() {
+                0 => None,
+                1 => Some(kept[0]),
+                _ => Some(db.union(kept)),
+            }
+        }
+        TypeKind::Array(facet) => {
+            let Some(elem) = facet.element else {
+                return Some(ty);
+            };
+            let kept = without_missing_objects(db, resolver, elem);
+            Some(if kept == Some(elem) { ty } else { db.array(kept) })
+        }
+        _ => Some(ty),
+    }
 }
 
 #[cfg(test)]

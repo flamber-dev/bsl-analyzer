@@ -15,6 +15,12 @@ const CONFIGURATION_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
             <Catalog>Товары</Catalog>
             <Document>Заказ</Document>
             <Enum>Статусы</Enum>
+            <ExchangePlan>Обмен</ExchangePlan>
+            <ChartOfAccounts>Основной</ChartOfAccounts>
+            <ChartOfCharacteristicTypes>Виды</ChartOfCharacteristicTypes>
+            <ChartOfCalculationTypes>Начисления</ChartOfCalculationTypes>
+            <BusinessProcess>Процесс</BusinessProcess>
+            <Task>Поручение</Task>
             <CommonModule>Проба</CommonModule>
             <CommonModule>МойМодуль</CommonModule>
         </ChildObjects>
@@ -1103,7 +1109,31 @@ fn implicit_database_read_in_cycle_every_object_reference_kind_is_a_candidate() 
     Возврат Новый Массив;
 КонецФункции
 "#;
-    let selected = assert_count(source, DiagnosticCode::ImplicitDatabaseReadInCycle, 8);
+    let objects = [
+        ("ExchangePlans/Обмен.xml", "ExchangePlan", "Обмен"),
+        ("ChartsOfAccounts/Основной.xml", "ChartOfAccounts", "Основной"),
+        ("ChartsOfCharacteristicTypes/Виды.xml", "ChartOfCharacteristicTypes", "Виды"),
+        ("ChartsOfCalculationTypes/Начисления.xml", "ChartOfCalculationTypes", "Начисления"),
+        ("BusinessProcesses/Процесс.xml", "BusinessProcess", "Процесс"),
+        ("Tasks/Поручение.xml", "Task", "Поручение"),
+    ]
+    .map(|(path, tag, name)| {
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.20">
+    <{tag} uuid="00000000-0000-0000-0000-0000000000f0">
+        <Properties><Name>{name}</Name></Properties>
+    </{tag}>
+</MetaDataObject>"#
+        );
+        (path, xml)
+    });
+    let bodies: Vec<(&str, &str)> =
+        objects.iter().map(|(path, xml)| (*path, xml.as_str())).collect();
+    let selected: Vec<_> = diagnostics_with_bodies(source, &bodies, &[])
+        .into_iter()
+        .filter(|diag| diag.code == DiagnosticCode::ImplicitDatabaseReadInCycle)
+        .collect();
     let expressions: Vec<_> = selected.iter().map(|diag| range_text(source, diag)).collect();
     assert_eq!(
         expressions,
