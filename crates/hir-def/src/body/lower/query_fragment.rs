@@ -5,10 +5,12 @@
 //! is substituted before execution. The platform executes the assembled text, never the
 //! literal alone, so the literal's own parse errors say nothing about the query.
 
+use parser_error::ParseError;
 use stdx::case::CaseExt;
 use syntax::ast_utils::active_children;
 use syntax::sdbl_query::ConcatPiece;
 use syntax::{SyntaxKind, SyntaxNode};
+use text_size::TextRange;
 
 /// The place of a string literal in a concatenation.
 pub(super) enum ConcatRole {
@@ -72,6 +74,46 @@ pub(super) fn concat_role(literal: &SyntaxNode) -> ConcatRole {
 /// substitution.
 pub(super) fn is_completed_elsewhere(literal: &SyntaxNode, query_text: &str) -> bool {
     has_foreign_markers(query_text) || is_substitution_source(literal)
+}
+
+/// Whether the text fails only at markers the module substitutes before execution: a
+/// parameter `&Имя` where the query language takes none (after `ПОМЕСТИТЬ`, `УНИЧТОЖИТЬ`,
+/// `КАК`, in a table name, in a type length, as a subquery) or a brace placeholder `{Имя}` /
+/// `{0}`. Every error stands at such a marker or is the leftover the parser skipped after one;
+/// any other error is a fault no substitution repairs and keeps the literal checked. A
+/// parameter where one is allowed parses, and the language's own `{ГДЕ ...}` blocks never
+/// close right after one word, so neither is taken for a marker.
+pub(super) fn fails_only_at_markers(query_text: &str, errors: &[(TextRange, ParseError)]) -> bool {
+    let at_marker = |range: &TextRange| {
+        query_text
+            .get(usize::from(range.start())..)
+            .is_some_and(|rest| starts_with_marker(rest.trim_start()))
+    };
+    let Some(first_at_marker) =
+        errors.iter().filter(|(range, _)| at_marker(range)).map(|(range, _)| range.start()).min()
+    else {
+        return false;
+    };
+    errors.iter().all(|(range, err)| {
+        at_marker(range) || (is_leftover(err) && range.start() >= first_at_marker)
+    })
+}
+
+fn is_leftover(err: &ParseError) -> bool {
+    matches!(err, ParseError::Custom { message, .. } if *message == parser::grammar::sdbl::LEFTOVER_MESSAGE)
+}
+
+fn starts_with_marker(text: &str) -> bool {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some('&') => chars.next().is_some_and(|c| c.is_alphabetic() || c == '_'),
+        Some('{') => {
+            let name: String =
+                chars.by_ref().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            !name.is_empty() && text[1 + name.len()..].starts_with('}')
+        }
+        _ => false,
+    }
 }
 
 fn is_substitution_source(literal: &SyntaxNode) -> bool {
