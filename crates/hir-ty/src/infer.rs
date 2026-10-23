@@ -3834,21 +3834,7 @@ impl<'db> InferenceContext<'db> {
             && !body_binding_shadows
             && !self.assigned_var_names.contains(&NormName::intern(name.as_str()))
         {
-            let source_root_id =
-                self.db.file_source_root_input(self.context_file_id).source_root_id(self.db);
-            // A module declared without `Module.bsl` is absent from the path index;
-            // its declaration still carries the canonical spelling.
-            let canonical = self
-                .db
-                .module_index(source_root_id)
-                .canonical_common_module_name(name)
-                .map(str::to_string)
-                .or_else(|| {
-                    self.db
-                        .resolve_common_module(self.context_file_id, name.as_str())
-                        .map(|cm| bsl_metadata::MdObject::name(cm.as_ref()).to_string())
-                });
-            if let Some(canonical) = canonical {
+            if let Some(canonical) = self.canonical_common_module_name(name) {
                 trace!("resolved {} as common module type", name);
                 return found(
                     self.db.common_module(canonical, ConfigId::Root),
@@ -5369,11 +5355,24 @@ impl<'db> InferenceContext<'db> {
         if !self.get_resolver().user_common_module_exists(self.db, &name) {
             return None;
         }
+        let canonical = self.canonical_common_module_name(&name)?;
+        Some(self.db.common_module(canonical, ConfigId::Root))
+    }
+
+    /// The declared spelling of the common module `name`. A module declared without
+    /// `Module.bsl` is absent from the path index; its declaration still carries it.
+    fn canonical_common_module_name(&self, name: &Name) -> Option<String> {
         let source_root_id =
             self.db.file_source_root_input(self.context_file_id).source_root_id(self.db);
-        let module_index = self.db.module_index(source_root_id);
-        let canonical = module_index.canonical_common_module_name(&name)?;
-        Some(self.db.common_module(canonical.to_string(), ConfigId::Root))
+        self.db
+            .module_index(source_root_id)
+            .canonical_common_module_name(name)
+            .map(str::to_string)
+            .or_else(|| {
+                self.db
+                    .resolve_common_module(self.context_file_id, name.as_str())
+                    .map(|cm| bsl_metadata::MdObject::name(cm.as_ref()).to_string())
+            })
     }
 
     fn dispatch_bare_ident_field_call(
