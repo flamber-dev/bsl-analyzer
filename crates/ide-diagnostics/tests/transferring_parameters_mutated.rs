@@ -111,3 +111,52 @@ fn reassigned_parameter_still_has_no_finding() {
     let source = module(&["    П = Новый Структура;\n    П.Вставить(\"Ключ\", 1);"]);
     assert_eq!(findings(&source), "");
 }
+
+#[test]
+fn mutation_through_local_alias_marks_parameter_mutated() {
+    let source = module(&[
+        "    Х = П;\n    Х.Добавить(1);",
+        "    Х = П.Товары;\n    Х.Очистить();",
+        "    Х = П[\"Ключ\"];\n    Х.Сумма = 1;",
+        "    Х = П.Товары;\n    Н = Х.Количество();",
+        "    Х = П;\n    Ю = Х;\n    Ю.Вставить(\"Ключ\", 1);",
+    ]);
+    assert_each(&source, &[true, true, true, false, true]);
+}
+
+#[test]
+fn mutation_through_for_each_variable_marks_parameter_mutated() {
+    let source = module(&[
+        "    Для Каждого Стр Из П.Товары Цикл\n        Стр.Сумма = 0;\n    КонецЦикла;",
+        "    Для Каждого Стр Из П.Товары Цикл\n        Х = Стр.Сумма;\n    КонецЦикла;",
+    ]);
+    assert_each(&source, &[true, false]);
+}
+
+#[test]
+fn mutation_through_call_result_marks_parameter_mutated() {
+    let source = module(&[
+        "    П.Строки.Найти(1).Сумма = 5;",
+        "    П.Получить(\"Товары\").Добавить(1);",
+        "    Стр = П.Товары.Найти(1);\n    Стр.Сумма = 1;",
+        "    Х = П.Скопировать();\n    Х.Добавить(1);",
+        "    Х = П.Товары.Выгрузить();\n    Х.Очистить();",
+    ]);
+    assert_each(&source, &[true, true, true, false, false]);
+}
+
+#[test]
+fn mutation_in_called_module_method_marks_parameter_mutated() {
+    let mut source = module(&[
+        "    Заполнить(П);",
+        "    Прочитать(П);",
+        "    Заполнить(П.Товары);",
+        "    Сервер4(П);",
+    ]);
+    source.push_str(
+        "\n&НаСервереБезКонтекста\nПроцедура Заполнить(Знач Т)\n    Вложенно(Т);\nКонецПроцедуры\n\
+         \n&НаСервереБезКонтекста\nПроцедура Вложенно(Т)\n    Т.Вставить(\"Ключ\", 1);\nКонецПроцедуры\n\
+         \n&НаСервереБезКонтекста\nПроцедура Прочитать(Т)\n    Х = Т.Количество();\nКонецПроцедуры\n",
+    );
+    assert_each(&source, &[true, false, true, false]);
+}

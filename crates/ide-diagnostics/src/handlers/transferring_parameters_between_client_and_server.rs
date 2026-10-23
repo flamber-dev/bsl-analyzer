@@ -4,7 +4,7 @@ use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
 use hir::call_graph::{CallTarget, CallerId, EdgeKind};
 use hir::{AnnotationKind, Expr, IdConversion, Stmt};
 use ide_db::TextRange;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -37,6 +37,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let symbol_tree = ctx.symbol_tree();
     let module_bodies = ctx.module_bodies();
     let summary = ctx.call_summary(hir::ModuleId::new(ctx.file_id));
+    let mut mutation_scan = MutationScan::new(&module_bodies, &symbol_tree);
     let mut diagnostics = Vec::new();
 
     let client_method_ids: FxHashSet<hir::MethodKey> = symbol_tree
@@ -78,7 +79,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
         let body = lower_result.body();
         let assigned_params = collect_assigned_params(body);
-        let mutated_params = collect_mutated_params(body);
+        let mutated_params = mutation_scan.mutated(local_id);
 
         for (param_idx, param) in by_ref_params {
             let param_name_lower = param.name.as_str().fold_lower();
@@ -181,49 +182,186 @@ const MUTATING_METHODS: &[&str] = &[
     "move",
 ];
 
-/// Parameters whose value is changed in place: a field or element is assigned
-/// (`П.X = ...`, `П[...] = ...`, also deeper `П.X.Y = ...`) or a mutating collection method is
-/// called on it (`П.Добавить(...)`, `П.Товары.Очистить()`).
-fn collect_mutated_params(body: &hir::Body) -> FxHashSet<String> {
-    let mut mutated = FxHashSet::default();
+/// Methods that return a new collection: changing their result leaves the source untouched.
+const COPYING_METHODS: &[&str] = &[
+    "скопировать",
+    "copy",
+    "скопироватьколонки",
+    "copycolumns",
+    "выгрузить",
+    "unload",
+    "выгрузитьзначения",
+    "unloadvalues",
+    "выгрузитьколонку",
+    "unloadcolumn",
+];
 
-    for (_stmt_id, stmt) in body.stmts_iter() {
-        if let Stmt::Assign { target, .. } = stmt {
-            let target_id = hir::ExprId::from_idx(*target);
-            if matches!(body.expr(target_id), Expr::Field { .. } | Expr::Index { .. }) {
-                mutated.extend(access_chain_root(body, target_id));
-            }
-        }
-    }
-
-    for (_expr_id, expr) in body.exprs_iter() {
-        // `П.Добавить(...)` is lowered as a call of the field `Добавить` of `П`.
-        let (receiver, method) = match expr {
-            Expr::MethodCall { receiver, method, .. } => (*receiver, method),
-            Expr::Call { callee, .. } => match body.expr(hir::ExprId::from_idx(*callee)) {
-                Expr::Field { base, field } => (*base, field),
-                _ => continue,
-            },
-            _ => continue,
-        };
-        if MUTATING_METHODS.contains(&method.as_str().fold_lower().as_str()) {
-            mutated.extend(access_chain_root(body, hir::ExprId::from_idx(receiver)));
-        }
-    }
-
-    mutated
+/// Names each method of the module changes in place. A name is changed when a field or element
+/// reached from it is assigned (`П.X = ...`, `П[...] = ...`, `П.Строки.Найти(1).Сумма = ...`),
+/// when a mutating collection method is called on something reached from it
+/// (`П.Добавить(...)`, `П.Товары.Очистить()`), when it is passed to a method of the module that
+/// changes the matching parameter, or when a local alias of it (`Х = П.Товары`,
+/// `Для Каждого Х Из П`) is changed. Names the method reassigns are excluded: changing a new
+/// value does not reach the caller's one.
+struct MutationScan<'a> {
+    module_bodies: &'a hir::ModuleBodies,
+    /// Lower-case method name -> its key and lower-case parameter names.
+    methods: FxHashMap<String, (hir::MethodKey, Vec<String>)>,
+    done: FxHashMap<hir::MethodKey, FxHashSet<String>>,
+    in_progress: FxHashSet<hir::MethodKey>,
 }
 
-/// Name at the root of a `П.X[...]...` chain of field and index accesses.
+impl<'a> MutationScan<'a> {
+    fn new(module_bodies: &'a hir::ModuleBodies, symbol_tree: &hir::SymbolTree) -> Self {
+        let methods = symbol_tree
+            .methods()
+            .map(|method| {
+                let params = method.params.iter().map(|p| p.name.as_str().fold_lower()).collect();
+                (method.name.as_str().fold_lower(), (method.id.local_id, params))
+            })
+            .collect();
+        Self {
+            module_bodies,
+            methods,
+            done: FxHashMap::default(),
+            in_progress: FxHashSet::default(),
+        }
+    }
+
+    fn mutated(&mut self, key: hir::MethodKey) -> FxHashSet<String> {
+        if let Some(mutated) = self.done.get(&key) {
+            return mutated.clone();
+        }
+        // A recursive call adds nothing the outer scan of the same method does not already see.
+        if !self.in_progress.insert(key) {
+            return FxHashSet::default();
+        }
+        let module_bodies = self.module_bodies;
+        let mutated = match module_bodies.lower_result(key) {
+            Some(lower_result) => {
+                let body = lower_result.body();
+                let assigned = collect_assigned_params(body);
+                let mut mutated = self.scan_body(body);
+                mutated.retain(|name| !assigned.contains(name));
+                mutated
+            }
+            None => FxHashSet::default(),
+        };
+        self.in_progress.remove(&key);
+        self.done.insert(key, mutated.clone());
+        mutated
+    }
+
+    fn scan_body(&mut self, body: &hir::Body) -> FxHashSet<String> {
+        let mut changed = FxHashSet::default();
+        // (alias, name it was taken from): changing the alias changes that name's value.
+        let mut aliases = Vec::new();
+
+        for (_stmt_id, stmt) in body.stmts_iter() {
+            match stmt {
+                Stmt::Assign { target, value } => {
+                    let target_id = hir::ExprId::from_idx(*target);
+                    match body.expr(target_id) {
+                        Expr::Path(name) => {
+                            if let Some(source) =
+                                access_chain_root(body, hir::ExprId::from_idx(*value))
+                            {
+                                aliases.push((name.as_str().fold_lower(), source));
+                            }
+                        }
+                        Expr::Field { .. } | Expr::Index { .. } => {
+                            changed.extend(access_chain_root(body, target_id));
+                        }
+                        _ => {}
+                    }
+                }
+                Stmt::ForEach { var, collection, .. } => {
+                    if let Some(source) =
+                        access_chain_root(body, hir::ExprId::from_idx(*collection))
+                    {
+                        aliases.push((body.binding_idx(*var).name.as_str().fold_lower(), source));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for (_expr_id, expr) in body.exprs_iter() {
+            // `П.Добавить(...)` is lowered as a call of the field `Добавить` of `П`.
+            let (receiver, method) = match expr {
+                Expr::MethodCall { receiver, method, .. } => (*receiver, method),
+                Expr::Call { callee, args } => match body.expr(hir::ExprId::from_idx(*callee)) {
+                    Expr::Field { base, field } => (*base, field),
+                    Expr::Path(name) => {
+                        self.mark_passed_args(body, name.as_str(), args, &mut changed);
+                        continue;
+                    }
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            if MUTATING_METHODS.contains(&method.as_str().fold_lower().as_str()) {
+                changed.extend(access_chain_root(body, hir::ExprId::from_idx(receiver)));
+            }
+        }
+
+        loop {
+            let before = changed.len();
+            for (alias, source) in &aliases {
+                if changed.contains(alias) {
+                    changed.insert(source.clone());
+                }
+            }
+            if changed.len() == before {
+                return changed;
+            }
+        }
+    }
+
+    /// Marks the arguments of a call to a module method that changes the matching parameter.
+    fn mark_passed_args(
+        &mut self,
+        body: &hir::Body,
+        callee: &str,
+        args: &[hir::ExprIdx],
+        changed: &mut FxHashSet<String>,
+    ) {
+        let Some((key, params)) = self.methods.get(&callee.fold_lower()).cloned() else {
+            return;
+        };
+        let callee_mutated = self.mutated(key);
+        for (arg, param) in args.iter().zip(&params) {
+            if callee_mutated.contains(param) {
+                changed.extend(access_chain_root(body, hir::ExprId::from_idx(*arg)));
+            }
+        }
+    }
+}
+
+/// Name at the root of a `П.X[...].Метод()...` chain of field, index and method-call accesses.
+/// A copying method (`П.Скопировать()`) ends the chain: its result is not the root's value.
 fn access_chain_root(body: &hir::Body, mut expr_id: hir::ExprId) -> Option<String> {
     loop {
-        match body.expr(expr_id) {
+        let base = match body.expr(expr_id) {
             Expr::Path(name) => return Some(name.as_str().fold_lower()),
-            Expr::Field { base, .. } | Expr::Index { base, .. } => {
-                expr_id = hir::ExprId::from_idx(*base);
+            Expr::Field { base, .. } | Expr::Index { base, .. } => *base,
+            Expr::MethodCall { receiver, method, .. } => {
+                if COPYING_METHODS.contains(&method.as_str().fold_lower().as_str()) {
+                    return None;
+                }
+                *receiver
             }
+            Expr::Call { callee, .. } => match body.expr(hir::ExprId::from_idx(*callee)) {
+                Expr::Field { base, field }
+                    if !COPYING_METHODS.contains(&field.as_str().fold_lower().as_str()) =>
+                {
+                    *base
+                }
+                _ => return None,
+            },
             _ => return None,
-        }
+        };
+        expr_id = hir::ExprId::from_idx(base);
     }
 }
 
