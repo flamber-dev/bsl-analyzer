@@ -97,6 +97,40 @@ impl ResidentSession {
         })
     }
 
+    /// One read that analyses a text which is not on disk, in the place of one resident file.
+    ///
+    /// `plan` runs first, on a request handle, and either answers outright (`Err`) or names
+    /// the file and the text that stands in for it. That handle is dropped before the
+    /// overlay is written: a live clone would park the write. `f` then runs on a fresh
+    /// request handle over the overlaid database, and the file is restored before the
+    /// resident lock is released — see [`DiagnosticsResident::with_text_overlay`]. Both
+    /// handles register in this request's cancellation registry, like [`Self::read`].
+    pub(crate) fn read_overlaid<P, T>(
+        &self,
+        plan: impl FnOnce(&DiagnosticsResident, &ide::Analysis) -> Result<(vfs::FileId, String, P), T>,
+        f: impl FnOnce(&DiagnosticsResident, &ide::Analysis, u64, P) -> T,
+    ) -> ResidentOutcome<T> {
+        if self.cancel.is_cancelled() {
+            std::panic::resume_unwind(Box::new(salsa::Cancelled::Local));
+        }
+        self.diag.read_mut(|resident, generation| {
+            let planned = {
+                let analysis = resident.analysis();
+                self.cancel.register(salsa::Database::cancellation_token(analysis.database()));
+                analysis.attached(|analysis| plan(resident, analysis))
+            };
+            let (file_id, text, prepared) = match planned {
+                Ok(planned) => planned,
+                Err(answer) => return answer,
+            };
+            resident.with_text_overlay(file_id, &text, |resident| {
+                let analysis = resident.analysis();
+                self.cancel.register(salsa::Database::cancellation_token(analysis.database()));
+                analysis.attached(|analysis| f(resident, analysis, generation, prepared))
+            })
+        })
+    }
+
     /// One read of the resident for work that fans out to database handles of its own.
     ///
     /// Same door as [`read`](Self::read) — same lock, same cancellation registry — but

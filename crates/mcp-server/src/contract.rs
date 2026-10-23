@@ -132,6 +132,7 @@ const DIAGNOSTICS_ACTIONS: &[ActionDecl] = &[
     action("schema", &[]),
     action("status", &[]),
     action("file", &["path"]),
+    action("snippet", &["code"]),
     action("workspace", &[]),
 ];
 
@@ -194,7 +195,7 @@ const WORKSPACE_TOOLS: &[ToolDecl] = &[
         name: "diagnostics",
         actions: DIAGNOSTICS_ACTIONS,
         note: None,
-        output_schema_version: Some("16"),
+        output_schema_version: Some("17"),
         default_enabled: true,
     },
     tool("outline", &[]),
@@ -1883,17 +1884,35 @@ mod tests {
                             ]
                           },
                           {
+                            "name": "snippet",
+                            "required": [
+                              "code"
+                            ]
+                          },
+                          {
                             "name": "workspace",
                             "required": []
                           }
                         ],
                         "name": "diagnostics",
                         "output_schema_fingerprint": "blake3:2de7d4aa984c1a12c46e892e51dd64097a7087221b705850d7ebd90b609e1031",
-                        "output_schema_version": "16",
+                        "output_schema_version": "17",
                         "params": [
                           {
                             "name": "action",
                             "required": true,
+                            "type": "string"
+                          },
+                          {
+                            "name": "code",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "code_kind",
+                            "nullable": true,
+                            "required": false,
                             "type": "string"
                           },
                           {
@@ -1906,6 +1925,17 @@ mod tests {
                             "nullable": true,
                             "required": false,
                             "type": "string"
+                          },
+                          {
+                            "name": "environment",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "known_variables",
+                            "required": false,
+                            "type": "array<string>"
                           },
                           {
                             "name": "locale",

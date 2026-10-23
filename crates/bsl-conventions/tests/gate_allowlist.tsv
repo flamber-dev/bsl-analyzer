@@ -76,6 +76,7 @@ crates/mcp-server/src/contract.rs	form	1	вне-класса: вид узла г
 crates/mcp-server/src/graph_query.rs	form	5	вне-класса: вид узла графа
 crates/mcp-server/src/lib.rs	form	2	вне-класса: вид узла графа
 crates/mcp-server/src/tools/graph.rs	form	2	вне-класса: вид узла графа
+crates/mcp-server/src/tools/diagnostics/snippet.rs	form	1	вне-класса: вид модуля-хоста в ответе snippet
 crates/mcp-server/src/tools/metadata.rs	commonmodule	1	вне-класса: двуязычное имя вида MDO
 crates/hir-def/src/graph_index.rs	module	1	вне-класса: вид узла графа
 crates/ide/src/graph.rs	module	3	вне-класса: вид узла графа
@@ -86,5 +87,6 @@ crates/mcp-server/src/graph_query.rs	module	10	вне-класса: вид уз�
 crates/mcp-server/src/lib.rs	module	2	вне-класса: вид узла графа
 crates/mcp-server/src/tools/graph.rs	module	2	вне-класса: вид узла графа
 crates/mcp-server/src/tools/location.rs	module	1	вне-класса: вид узла графа
+crates/mcp-server/src/tools/diagnostics/snippet.rs	module	3	вне-класса: значение параметра code_kind и ключ вида модуля-хоста в ответе snippet
 crates/mcp-server/src/tools/symbol_info.rs	module	2	вне-класса: вид символа
 crates/platform-help/src/installed.rs	bin	1	вне-класса: подкаталог установки платформы с архивами справки
