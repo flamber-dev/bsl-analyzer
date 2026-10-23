@@ -357,6 +357,54 @@ EndProcedure
         );
     }
 
+    // Each level a conditional can pass is judged: an accepted branch does not
+    // hide `Информация` in the other one.
+    #[test]
+    fn test_conditional_warning_or_information_level_in_except() {
+        let code = in_except(
+            "		ЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", ?(Пакет.Повтор, УровеньЖурналаРегистрации.Предупреждение, УровеньЖурналаРегистрации.Информация), , Ссылка,
+			ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
+",
+        );
+        check(
+            &code,
+            expect![[r#"
+            UsageWriteLogEvent @ 5:3..6:55
+              message: Нужно указывать уровень "Ошибка" или "Предупреждение" при записи в журнал регистрации внутри блока Исключение-КонецПопытки
+              severity: Hint"#]],
+        );
+    }
+
+    #[test]
+    fn test_conditional_error_or_information_level_english_in_except() {
+        let code = "Procedure SendToBank(Package, Ref)
+	Try
+		Package.Send();
+	Except
+		WriteLogEvent(\"Bank.Upload\", ?(Package.Retry, EventLogLevel.Error, EventLogLevel.Information), , Ref,
+			DetailErrorDescription(ErrorInfo()));
+	EndTry;
+EndProcedure
+";
+        check(
+            code,
+            expect![[r#"
+            UsageWriteLogEvent @ 5:3..6:40
+              message: Нужно указывать уровень "Ошибка" или "Предупреждение" при записи в журнал регистрации внутри блока Исключение-КонецПопытки
+              severity: Hint"#]],
+        );
+    }
+
+    #[test]
+    fn test_conditional_error_or_warning_level_in_except() {
+        let code = in_except(
+            "		ЗаписьЖурналаРегистрации(\"Банк.Выгрузка\", ?(Пакет.Повтор, УровеньЖурналаРегистрации.Предупреждение, УровеньЖурналаРегистрации.Ошибка), , Ссылка,
+			ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()));
+",
+        );
+        check(&code, expect![[r#""#]]);
+    }
+
     #[test]
     fn test_dynamic_log_level_in_except() {
         let code = in_except(

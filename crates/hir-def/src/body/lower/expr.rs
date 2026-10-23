@@ -1331,16 +1331,37 @@ fn collect_arguments(arg_list: &SyntaxNode) -> Vec<Option<SyntaxNode>> {
 /// potential problems and non-fatal errors as `Предупреждение`, so both pass.
 /// `Информация` and `Примечание` do not. Only an argument whose text mentions
 /// `УровеньЖурналаРегистрации` / `EventLogLevel` is judged; a variable passes.
+/// Every enum member the argument names must be accepted, so a conditional
+/// with an `Информация` branch is reported whatever its other branch is.
 fn has_except_log_level_value(arg: &SyntaxNode) -> bool {
     let text = arg.text().to_string().fold_lower();
-    if text.contains("уровеньжурналарегистрации") || text.contains("eventloglevel")
+    if !text.contains("уровеньжурналарегистрации") && !text.contains("eventloglevel")
     {
+        return true;
+    }
+    let members: Vec<String> = arg
+        .descendants()
+        .filter(|n| n.kind() == SyntaxKind::FIELD_EXPR)
+        .filter(|field| {
+            active_children(field).next().is_some_and(|base| {
+                matches!(
+                    normalized_code_text(&base).as_str(),
+                    "уровеньжурналарегистрации" | "eventloglevel"
+                )
+            })
+        })
+        .filter_map(|field| field_name_token(&field).map(|tok| tok.text().fold_lower()))
+        .collect();
+    if members.is_empty() {
+        // The enum is only part of another name, e.g. a function computing the level.
         return text.contains("ошибка")
             || text.contains("error")
             || text.contains("предупреждение")
             || text.contains("warning");
     }
-    true
+    members
+        .iter()
+        .all(|member| matches!(member.as_str(), "ошибка" | "error" | "предупреждение" | "warning"))
 }
 
 fn has_detail_error_description(arg: &SyntaxNode) -> bool {
