@@ -471,23 +471,26 @@ fn enumerate_register_fields(
             push_unique(&mut out, &mut seen, info);
         }
 
+        let correspondence =
+            (parent == MdoType::AccountingRegister).then(|| register.correspondence());
+
         for dim in register.dimensions() {
-            let info = FieldInfo {
-                name: Name::new(dim.name()),
-                name_en: None,
-                ty: register_part_typeid(
-                    db,
-                    dim.attr_type(),
-                    MetadataKind::RegisterDimension { parent },
-                    register_name,
-                    dim.name(),
-                    resolver,
-                ),
-                value_ty: None,
-                is_readonly: false,
-                origin: FieldOrigin::RegisterDimension,
-            };
-            push_unique(&mut out, &mut seen, info);
+            let ty = register_part_typeid(
+                db,
+                dim.attr_type(),
+                MetadataKind::RegisterDimension { parent },
+                register_name,
+                dim.name(),
+                resolver,
+            );
+            push_register_member(
+                &mut out,
+                &mut seen,
+                (dim.name(), None),
+                ty,
+                FieldOrigin::RegisterDimension,
+                record_sides(correspondence, dim.balance()),
+            );
         }
 
         // A separator is part of the record key like a dimension; a plain common attribute
@@ -509,22 +512,22 @@ fn enumerate_register_fields(
         }
 
         for res in register.resources() {
-            let info = FieldInfo {
-                name: Name::new(res.name()),
-                name_en: res.name_en().filter(|s| !s.is_empty()).map(Name::new),
-                ty: register_part_typeid(
-                    db,
-                    res.attr_type(),
-                    MetadataKind::RegisterResource { parent },
-                    register_name,
-                    res.name(),
-                    resolver,
-                ),
-                value_ty: None,
-                is_readonly: false,
-                origin: FieldOrigin::RegisterResource,
-            };
-            push_unique(&mut out, &mut seen, info);
+            let ty = register_part_typeid(
+                db,
+                res.attr_type(),
+                MetadataKind::RegisterResource { parent },
+                register_name,
+                res.name(),
+                resolver,
+            );
+            push_register_member(
+                &mut out,
+                &mut seen,
+                (res.name(), res.name_en().filter(|s| !s.is_empty())),
+                ty,
+                FieldOrigin::RegisterResource,
+                record_sides(correspondence, res.balance()),
+            );
         }
 
         for attr in register.attributes() {
@@ -570,6 +573,70 @@ fn enumerate_register_fields(
         );
 
         out
+    }
+}
+
+/// How a dimension or resource shows on a register record.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RecordSides {
+    /// One field under the member's own name.
+    Single,
+    /// A correspondence accounting register keeps a non-balance member per side:
+    /// `<Имя>Дт` / `<Имя>Кт` (`<Name>Dr` / `<Name>Cr`), and the bare name does not
+    /// exist on the record.
+    Split,
+    /// The metadata does not say which; both spellings are offered so neither is
+    /// reported.
+    Unknown,
+}
+
+/// `correspondence` is `None` outside an accounting register and the register's
+/// own `Correspondence` flag inside one. On 8.3.17 and 8.3.27 a record of a
+/// correspondence register accepts `Измерение1Дт`, `Измерение1Кт`, `КоличествоДт`
+/// and `Измерение1Dr` for a non-balance dimension or resource and rejects the bare
+/// `Измерение1` with "Поле объекта не обнаружено"; a balance member stays bare
+/// (`СуммаДт` is rejected), and a non-correspondence register keeps every member
+/// bare (`Измерение1Дт` is rejected). The query side splits the same way
+/// (`sdbl-hir`, register tables).
+fn record_sides(correspondence: Option<Option<bool>>, balance: Option<bool>) -> RecordSides {
+    match correspondence {
+        None => RecordSides::Single,
+        Some(correspondence) => match (correspondence, balance) {
+            (Some(false), _) | (_, Some(true)) => RecordSides::Single,
+            (Some(true), Some(false)) => RecordSides::Split,
+            _ => RecordSides::Unknown,
+        },
+    }
+}
+
+fn push_register_member(
+    out: &mut Vec<FieldInfo>,
+    seen: &mut std::collections::HashSet<Name>,
+    (name, name_en): (&str, Option<&str>),
+    ty: TypeId,
+    origin: FieldOrigin,
+    sides: RecordSides,
+) {
+    let field = |name: String, name_en: Option<String>| FieldInfo {
+        name: Name::new(&name),
+        name_en: name_en.as_deref().map(Name::new),
+        ty,
+        value_ty: None,
+        is_readonly: false,
+        origin,
+    };
+    if sides != RecordSides::Split {
+        push_unique(out, seen, field(name.to_owned(), name_en.map(str::to_owned)));
+    }
+    if sides != RecordSides::Single {
+        let base_en = name_en.unwrap_or(name);
+        for (suffix_ru, suffix_en) in [("Дт", "Dr"), ("Кт", "Cr")] {
+            push_unique(
+                out,
+                seen,
+                field(format!("{name}{suffix_ru}"), Some(format!("{base_en}{suffix_en}"))),
+            );
+        }
     }
 }
 
