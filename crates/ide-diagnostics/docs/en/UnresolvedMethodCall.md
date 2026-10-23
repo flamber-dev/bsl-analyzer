@@ -27,6 +27,13 @@ Writer = New JSONWriter;
 Writer.WriteTableBegin(); // <-- JSON writing has no such method
 ```
 
+A value table counts as the platform type `ValueTable`: its columns are members of its rows, so the table's own members are the attested ones whatever columns it has. The check applies where the table is built by `New ValueTable` on every path reaching the call.
+
+```bsl
+Table = New ValueTable;
+Table.Read(); // <-- a value table has no such method
+```
+
 ## Examples
 
 Incorrect:

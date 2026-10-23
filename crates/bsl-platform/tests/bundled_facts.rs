@@ -258,7 +258,7 @@ fn the_curated_overlays_reach_the_built_in_facts() {
             "{name} is attested and the built-in facts are of the attested release"
         );
     }
-    for name in ["ЗаписьJSON", "JSONWriter"] {
+    for name in ["ЗаписьJSON", "JSONWriter", "ТаблицаЗначений", "ValueTable"] {
         assert!(data.platform_type_member_surface_verified(name), "{name} is attested");
     }
     // ...and the types nobody attested stay open, however complete they look.
@@ -276,6 +276,9 @@ fn the_curated_overlays_reach_the_built_in_facts() {
     assert_eq!(data.get_type_properties("SpreadsheetDocumentRange").len(), 63);
     assert!(data.get_property("SpreadsheetDocumentRange", "ТекущаяОбласть").is_none());
     assert!(data.get_method("JSONWriter", "ЗаписатьНачалоТаблицы").is_none());
+    assert_eq!(data.get_type_methods("ValueTable").len(), 19);
+    assert_eq!(data.get_type_properties("ValueTable").len(), 2);
+    assert!(data.get_method("ТаблицаЗначений", "Прочитать").is_none());
 }
 
 /// The curated return-type correction reaches the built-in facts under both
