@@ -104,6 +104,19 @@ fn members_some_record_set_has_and_unknown_documents_stay_silent() {
     assert!(found.is_empty(), "{found:?}");
 }
 
+#[test]
+fn a_shadowed_movements_name_does_not_borrow_the_current_document_s_registers() {
+    for name in ["Движения", "rEgIsTeRrEcOrDs"] {
+        let found = method_misses(
+            "Documents/Документ2/Ext/ObjectModule.bsl",
+            &format!(
+                "Процедура Тест()\n    ЧужойДокумент = Документы.Документ1.СоздатьДокумент();\n    {name} = ЧужойДокумент.Движения;\n    Для Каждого Набор Из {name} Цикл\n        Набор.Пересчитать();\n    КонецЦикла;\nКонецПроцедуры\n"
+            ),
+        );
+        assert!(found.is_empty(), "{name}: {found:?}");
+    }
+}
+
 fn method_misses(relative: &str, source: &str) -> Vec<String> {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("cf");

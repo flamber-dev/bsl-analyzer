@@ -2354,7 +2354,11 @@ impl<'db> InferenceContext<'db> {
     /// cannot see, one an extension adopts (the extension may add registers), one that
     /// writes to no register, or a listed register the configuration does not have leaves
     /// the element unknown.
-    fn register_records_element_ty(&self, collection: ExprId, coll_ty: TypeId) -> Option<TypeId> {
+    fn register_records_element_ty(
+        &mut self,
+        collection: ExprId,
+        coll_ty: TypeId,
+    ) -> Option<TypeId> {
         let TypeKind::PlatformObject(facet) = self.db.lookup_type(coll_ty) else {
             return None;
         };
@@ -2379,6 +2383,13 @@ impl<'db> InferenceContext<'db> {
                 }
             }
             Expr::Path(name) if is_register_records_name(name.as_str()) => {
+                let name = name.clone();
+                if !matches!(
+                    self.resolve_bare_name(&name, collection, BareNameUse::ReadValue),
+                    BareNameResolution::Resolved { origin: BareNameOrigin::ObjectMember, .. }
+                ) {
+                    return None;
+                }
                 let resolver = self.get_resolver();
                 let (mdo_type, owner) =
                     crate::this_object::resolve_this_object_owner(self.db, &resolver)?;
