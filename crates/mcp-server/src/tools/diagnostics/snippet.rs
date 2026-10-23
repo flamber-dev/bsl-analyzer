@@ -458,10 +458,20 @@ enum HostKind {
 
 impl HostKind {
     fn of(path: &Path) -> Self {
-        let path = path.to_string_lossy().replace('\\', "/").to_lowercase();
-        if path.ends_with("/ext/form/module.bsl") {
+        use bsl_conventions::{conventional_of, path_ends_with_ext_child, ConventionalName};
+        let path = path.to_string_lossy().replace('\\', "/");
+        // `…/Ext/Form/Module.bsl`, with at least one segment above `Ext`.
+        let mut tail = path.rsplit('/');
+        let (module, form, ext) = (tail.next(), tail.next(), tail.next());
+        let is_form_module = tail.next().is_some()
+            && module.and_then(conventional_of) == Some(ConventionalName::Module)
+            && form.and_then(conventional_of) == Some(ConventionalName::Form)
+            && ext.and_then(conventional_of) == Some(ConventionalName::Ext);
+        if is_form_module {
             Self::Form
-        } else if path.contains("/commonmodules/") && path.ends_with("/ext/module.bsl") {
+        } else if path.to_lowercase().contains("/commonmodules/")
+            && path_ends_with_ext_child(&path, ConventionalName::Module)
+        {
             Self::CommonModule
         } else {
             Self::Other
@@ -633,5 +643,17 @@ mod tests {
         let ok = request("\u{feff}Результат = 1;", vec!["Результат"]).unwrap();
         assert_eq!(ok.code, "Результат = 1;");
         assert_eq!(ok.code_kind, CodeKind::Statements);
+    }
+
+    #[test]
+    fn host_kind_ignores_the_case_of_conventional_segments_only() {
+        let kind = |p: &str| HostKind::of(Path::new(p));
+        assert_eq!(kind("src/Catalogs/A/Forms/F/Ext/Form/Module.bsl"), HostKind::Form);
+        assert_eq!(kind("src\\Catalogs\\A\\Forms\\F\\EXT\\form\\module.BSL"), HostKind::Form);
+        assert_eq!(kind("src/CommonModules/A/Ext/Module.bsl"), HostKind::CommonModule);
+        assert_eq!(kind("src/commonmodules/A/ext/MODULE.bsl"), HostKind::CommonModule);
+        assert_eq!(kind("src/Catalogs/A/Ext/ObjectModule.bsl"), HostKind::Other);
+        assert_eq!(kind("src/Catalogs/A/Ext/Module.bsl"), HostKind::Other);
+        assert_eq!(kind("Ext/Form/Module.bsl"), HostKind::Other);
     }
 }
