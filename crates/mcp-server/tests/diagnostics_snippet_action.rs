@@ -249,3 +249,28 @@ async fn a_parse_error_of_the_host_tail_is_not_the_snippets() {
     assert_eq!(codes(&body), Vec::<String>::new(), "{body}");
     client.cancel().await.expect("session closed");
 }
+
+// A host tail with its own parse error does not hide the snippet's: only the errors the host
+// has by itself there are the host's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unclosed_method_is_reported_in_a_host_whose_tail_does_not_parse() {
+    let _guard = TEST_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    project(dir.path());
+    let broken = "CommonModules/Сосед/Ext/Module.bsl";
+    write(dir.path(), broken, "Процедура Пусто() Экспорт\nКонецПроцедуры\n\nА = ;\n");
+    let client = client(dir.path()).await;
+
+    let body = diagnostics(
+        &client,
+        json!({
+            "action": "snippet",
+            "code": "Процедура Незакрытая()\n    А = 1;",
+            "path": broken,
+            "codes": ["ParseError"],
+        }),
+    )
+    .await;
+    assert!(codes(&body).contains(&"ParseError".to_owned()), "{body}");
+    client.cancel().await.expect("session closed");
+}

@@ -140,7 +140,7 @@ impl SnippetRequest {
             ));
         }
         let code_kind = code_kind.unwrap_or_else(|| {
-            if crate::tools::check_executor::has_module_syntax(&code) {
+            if crate::tools::check_executor::has_module_syntax(&code) || declares_variables(&code) {
                 CodeKind::Module
             } else {
                 CodeKind::Statements
@@ -178,10 +178,9 @@ pub(crate) struct SnippetFilters {
 pub(crate) struct Prepared {
     /// Byte span of the snippet in the overlaid host text.
     snippet: TextRange,
-    /// Last offset at which a parse error past the snippet is still the snippet's (an
-    /// unclosed block): the end of the overlaid text when the host parses cleanly after the
-    /// insertion point, else the end of the wrapper's closing line.
-    parse_errors_end: TextSize,
+    /// Where the host's own parse errors after the insertion point land in the overlaid
+    /// text: any other parse error past the snippet is the snippet's (an unclosed block).
+    host_parse_errors: Vec<TextSize>,
     context: Value,
 }
 
@@ -313,13 +312,17 @@ pub(crate) fn plan(
     text.push_str(&suffix);
     let wrapper_end = text.len();
     text.push_str(&host_text[insert_at..]);
-    // Module text has no wrapper line, so its missing closer surfaces in the host tail or at
-    // the end of the text; only the host's own errors there are not the snippet's.
-    let host_tail_parses = parser::parse(&host_text)
+    // An unclosed block surfaces its missing closer anywhere up to the end of the text,
+    // module code having no wrapper line to stop it. The text after the snippet is the host
+    // tail shifted by the insertion, so the host's own errors there move by the same amount.
+    let shift = offset(wrapper_end - insert_at);
+    let host_parse_errors = parser::parse(&host_text)
         .errors()
         .iter()
-        .all(|error| usize::from(error.range().start()) < insert_at);
-    let parse_errors_end = if host_tail_parses { text.len() } else { wrapper_end };
+        .map(|error| error.range().start())
+        .filter(|start| usize::from(*start) >= insert_at)
+        .map(|start| start + shift)
+        .collect();
 
     let relative = host_path
         .strip_prefix(resident.workspace_root())
@@ -338,7 +341,7 @@ pub(crate) fn plan(
         text,
         Prepared {
             snippet: TextRange::new(offset(snippet_start), offset(snippet_end)),
-            parse_errors_end: offset(parse_errors_end),
+            host_parse_errors,
             context,
         },
     ))
@@ -367,7 +370,7 @@ pub(crate) fn findings(
     let mut structure_omitted = 0usize;
 
     for diag in diagnostics {
-        let Some(range) = snippet_range(&diag, snippet, prepared.parse_errors_end) else {
+        let Some(range) = snippet_range(&diag, snippet, &prepared.host_parse_errors) else {
             continue;
         };
         if MODULE_STRUCTURE_CODES.contains(&diag.code) && !explicitly_asked(diag.code) {
@@ -437,12 +440,12 @@ fn invalid(detail: &str, max_output_tokens: Option<usize>) -> Refusal {
 }
 
 /// The snippet-relative range of a finding, or `None` when it belongs to the host or the
-/// wrapper. A parse error past the snippet, up to `parse_errors_end`, is the snippet's own
-/// unclosed block, and is pinned to the snippet's end.
+/// wrapper. A parse error past the snippet that the host does not have by itself is the
+/// snippet's own unclosed block, and is pinned to the snippet's end.
 fn snippet_range(
     diag: &ide::Diagnostic,
     snippet: TextRange,
-    parse_errors_end: TextSize,
+    host_parse_errors: &[TextSize],
 ) -> Option<TextRange> {
     let start = diag.range.start();
     let end = diag.range.end();
@@ -450,7 +453,7 @@ fn snippet_range(
         (start, end.min(snippet.end()).max(start))
     } else if diag.code == DiagnosticCode::ParseError
         && start > snippet.end()
-        && start <= parse_errors_end
+        && !host_parse_errors.contains(&start)
     {
         (snippet.end(), snippet.end())
     } else {
@@ -571,6 +574,12 @@ fn insertion_offset(host: &str) -> usize {
     last_method.or_else(last_variable).map(usize::from).unwrap_or(0)
 }
 
+/// Whether the text declares module variables: `has_module_syntax` sees methods and
+/// directives only, and a variable section is module code too.
+fn declares_variables(code: &str) -> bool {
+    parser::parse(code).syntax_node().descendants().any(|n| n.kind() == SyntaxKind::VAR_DEF)
+}
+
 /// Whether the statements return a value, which a procedure cannot.
 fn returns_value(code: &str) -> bool {
     parser::parse(code)
@@ -653,6 +662,8 @@ mod tests {
         let ok = request("\u{feff}Результат = 1;", vec!["Результат"]).unwrap();
         assert_eq!(ok.code, "Результат = 1;");
         assert_eq!(ok.code_kind, CodeKind::Statements);
+        let variables = request("Перем Кэш Экспорт;\nКэш = 0;", vec![]).unwrap();
+        assert_eq!(variables.code_kind, CodeKind::Module);
     }
 
     #[test]
