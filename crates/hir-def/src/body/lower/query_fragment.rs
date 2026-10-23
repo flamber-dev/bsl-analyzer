@@ -74,6 +74,35 @@ pub(super) fn is_completed_elsewhere(literal: &SyntaxNode, query_text: &str) -> 
     has_foreign_markers(query_text) || is_substitution_source(literal)
 }
 
+/// Whether a parse error of the text stands at a marker the module substitutes before
+/// execution: a parameter `&Имя` where the query language takes none (after `ПОМЕСТИТЬ`,
+/// `УНИЧТОЖИТЬ`, `КАК`, in a table name, in a type length, as a subquery) or a brace
+/// placeholder `{Имя}` / `{0}`. A parameter where one is allowed parses, and the language's
+/// own `{ГДЕ ...}` blocks never close right after one word, so neither is taken for a marker;
+/// an error away from a marker keeps the literal checked.
+pub(super) fn has_error_at_marker(
+    query_text: &str,
+    error_starts: impl IntoIterator<Item = text_size::TextSize>,
+) -> bool {
+    error_starts.into_iter().any(|start| {
+        let start = usize::from(start);
+        query_text.get(start..).is_some_and(|rest| starts_with_marker(rest.trim_start()))
+    })
+}
+
+fn starts_with_marker(text: &str) -> bool {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some('&') => chars.next().is_some_and(|c| c.is_alphabetic() || c == '_'),
+        Some('{') => {
+            let name: String =
+                chars.by_ref().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            !name.is_empty() && text[1 + name.len()..].starts_with('}')
+        }
+        _ => false,
+    }
+}
+
 fn is_substitution_source(literal: &SyntaxNode) -> bool {
     let mut top = unwrap_up(literal);
     while let Some(parent) = top.parent() {

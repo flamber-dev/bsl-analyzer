@@ -173,22 +173,27 @@ fn lower_literal(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             if let Some((sdbl_text, quote_corrections, literal_map, dynamic)) = query_source {
                 let sdbl_ast = parser::parse_sdbl_with_shared_cache(&sdbl_text);
                 let literal_text = node.text().to_string();
-                let error_ranges_in_bsl: Vec<_> =
-                    syntax::sdbl_query::collect_query_parse_errors(&sdbl_ast)
-                        .into_iter()
-                        .map(|(query_range, err)| {
-                            let bsl_range = match &literal_map {
-                                Some(map) => map.map_range_to_literal(query_range),
-                                None => syntax::sdbl_query::map_range_query_to_literal(
-                                    &literal_text,
-                                    query_range,
-                                ),
-                            };
-                            (bsl_range, err)
-                        })
-                        .collect();
+                let query_errors = syntax::sdbl_query::collect_query_parse_errors(&sdbl_ast);
+                let at_marker = query_fragment::has_error_at_marker(
+                    &sdbl_text,
+                    query_errors.iter().map(|(range, _)| range.start()),
+                );
+                let error_ranges_in_bsl: Vec<_> = query_errors
+                    .into_iter()
+                    .map(|(query_range, err)| {
+                        let bsl_range = match &literal_map {
+                            Some(map) => map.map_range_to_literal(query_range),
+                            None => syntax::sdbl_query::map_range_query_to_literal(
+                                &literal_text,
+                                query_range,
+                            ),
+                        };
+                        (bsl_range, err)
+                    })
+                    .collect();
                 // Asked only of a text that fails to parse: a clean one has nothing to hide.
                 let incomplete = dynamic
+                    || at_marker
                     || (!error_ranges_in_bsl.is_empty()
                         && query_fragment::is_completed_elsewhere(node, &sdbl_text));
 
