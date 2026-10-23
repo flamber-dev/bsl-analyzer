@@ -76,3 +76,10 @@ fn an_error_away_from_a_marker_is_reported() {
     // A name without the marker character is a table name the text misses, not a marker.
     assert_reported("ВЫБРАТЬ Т.Ссылка ИЗ Справочник. КАК Т");
 }
+
+/// A marker error does not cover a fault the substitution leaves in place.
+#[test]
+fn an_error_away_from_a_marker_is_reported_beside_a_marker_error() {
+    assert_reported("ВЫБРАТЬ Т.Ссылка ПОМЕСТИТЬ &Результат ИЗ Справочник.Валюты КАК Т ГДЕ Т.Код =");
+    assert_reported("ВЫБРАТЬ Т.Ссылка, ИЗ Справочник.&Имя КАК Т");
+}

@@ -174,10 +174,7 @@ fn lower_literal(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                 let sdbl_ast = parser::parse_sdbl_with_shared_cache(&sdbl_text);
                 let literal_text = node.text().to_string();
                 let query_errors = syntax::sdbl_query::collect_query_parse_errors(&sdbl_ast);
-                let at_marker = query_fragment::has_error_at_marker(
-                    &sdbl_text,
-                    query_errors.iter().map(|(range, _)| range.start()),
-                );
+                let at_marker = query_fragment::fails_only_at_markers(&sdbl_text, &query_errors);
                 let error_ranges_in_bsl: Vec<_> = query_errors
                     .into_iter()
                     .map(|(query_range, err)| {
