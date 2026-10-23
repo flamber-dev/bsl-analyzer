@@ -160,3 +160,31 @@ fn mutation_in_called_module_method_marks_parameter_mutated() {
     );
     assert_each(&source, &[true, false, true, false]);
 }
+
+#[test]
+fn alias_stops_after_it_is_assigned_another_value() {
+    let source = module(&[
+        "    Х = П.Товары;\n    Х = Новый Массив;\n    Х.Добавить(1);",
+        "    Для Каждого Х Из П.Товары Цикл\n    КонецЦикла;\n    Х = Новый Структура;\n    Х.Вставить(\"А\", 1);",
+        "    Х = П.Товары;\n    Х.Очистить();\n    Х = Новый Массив;",
+        "    Х = Новый Массив;\n    Если Истина Тогда\n        Х = П.Товары;\n    КонецЕсли;\n    Х.Очистить();",
+        "    Х = Новый Массив;\n    Пока Истина Цикл\n        Х.Очистить();\n        Х = П.Товары;\n    КонецЦикла;",
+    ]);
+    assert_each(&source, &[false, false, true, true, true]);
+}
+
+#[test]
+fn called_method_changes_parameter_before_reassigning_it() {
+    let mut source = module(&["    Заполнить(П);", "    Заменить(П);"]);
+    source.push_str(
+        "\n&НаСервереБезКонтекста\nПроцедура Заполнить(Т)\n    Т.Добавить(1);\n    Т = Новый Массив;\nКонецПроцедуры\n\
+         \n&НаСервереБезКонтекста\nПроцедура Заменить(Т)\n    Т = Новый Массив;\n    Т.Добавить(1);\nКонецПроцедуры\n",
+    );
+    assert_each(&source, &[true, false]);
+}
+
+#[test]
+fn mutually_recursive_methods_share_the_change() {
+    let source = module(&["    Сервер2(П);\n    П.Добавить(1);", "    Сервер1(П);"]);
+    assert_each(&source, &[true, true]);
+}
