@@ -273,11 +273,30 @@ impl CommonAttributeSet {
         mdo_type: MdoType,
         object_name: &str,
     ) -> ObjectCommonAttributes {
-        // Constants of an extension stay out: how an extension's separators reach its own or
-        // adopted constants was not checked against the platform.
-        if !kind_takes_common_attributes(mdo_type) || mdo_type == MdoType::Constant {
+        if !kind_takes_common_attributes(mdo_type) {
             return ObjectCommonAttributes::default();
         }
+        let projected = self.project_extension_object(base, scope, mdo_type, object_name);
+        if mdo_type == MdoType::Constant {
+            // How an extension's separators reach its own or adopted constants was not checked
+            // against the platform: wherever an object of another kind would get a field or
+            // stay open, a constant's value manager asserts no field but stays open, so a miss
+            // on it is not reported as a defect.
+            return ObjectCommonAttributes {
+                fields: Vec::new(),
+                open: projected.open || !projected.fields.is_empty(),
+            };
+        }
+        projected
+    }
+
+    fn project_extension_object(
+        &self,
+        base: Option<&CommonAttributeSet>,
+        scope: ExtensionScope,
+        mdo_type: MdoType,
+        object_name: &str,
+    ) -> ObjectCommonAttributes {
         let mut out = ObjectCommonAttributes { fields: Vec::new(), open: self.unreadable };
 
         for local in &self.attributes {
@@ -831,17 +850,50 @@ mod tests {
     }
 
     #[test]
-    fn constants_and_enums_never_acquire_extension_common_fields_or_open() {
+    fn enums_never_acquire_extension_common_fields_or_open() {
         let base = fixture_set("fixtures/extension_common_attributes/base");
         let mut local = fixture_set("fixtures/extension_common_attributes/extensions/explicit-use");
         local.unreadable = true;
         for scope in [ExtensionScope::InfoBase, ExtensionScope::DataSeparation] {
-            for kind in [MdoType::Constant, MdoType::Enum] {
-                let applied = local.for_extension_object(Some(&base), scope, kind, "NativeCatalog");
-                assert!(applied.fields.is_empty());
-                assert!(!applied.open);
-            }
+            let applied =
+                local.for_extension_object(Some(&base), scope, MdoType::Enum, "NativeCatalog");
+            assert!(applied.fields.is_empty());
+            assert!(!applied.open);
         }
+    }
+
+    #[test]
+    fn an_extension_constant_a_separator_may_reach_is_open_without_fields() {
+        let base = fixture_set("fixtures/extension_common_attributes/base");
+        let mut unreadable =
+            fixture_set("fixtures/extension_common_attributes/extensions/explicit-use");
+        unreadable.unreadable = true;
+        for scope in [ExtensionScope::InfoBase, ExtensionScope::DataSeparation] {
+            let applied =
+                unreadable.for_extension_object(Some(&base), scope, MdoType::Constant, "К");
+            assert!(applied.fields.is_empty());
+            assert!(applied.open);
+        }
+
+        let local = CommonAttributeSet {
+            attributes: vec![attribute(
+                false,
+                &[(MdoType::Constant, "Входит", CommonAttributeUse::Use)],
+            )],
+            unreadable: false,
+        };
+        let reached =
+            local.for_extension_object(None, ExtensionScope::InfoBase, MdoType::Constant, "Входит");
+        assert!(reached.fields.is_empty());
+        assert!(reached.open);
+        let unreached = local.for_extension_object(
+            None,
+            ExtensionScope::InfoBase,
+            MdoType::Constant,
+            "НеВходит",
+        );
+        assert!(unreached.fields.is_empty());
+        assert!(!unreached.open);
     }
 
     #[test]
