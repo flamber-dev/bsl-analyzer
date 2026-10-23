@@ -1257,6 +1257,11 @@ fn is_auto_style_constructor(node: &SyntaxNode, type_name: &str, type_is_ident: 
     let Some(arg_list) = active_children(node).find(|n| n.kind() == SyntaxKind::ARG_LIST) else {
         return type_is_ident;
     };
+    // Разрезанная `#Если` внутри скобок: в другом варианте сборки у
+    // конструктора могут быть параметры, а дерево показывает лишь один.
+    if arg_list.descendants().any(|n| n.kind() == SyntaxKind::PRE_TORN_IF_PART) {
+        return false;
+    }
     let has_comma = active_children_with_tokens(&arg_list)
         .filter_map(|el| el.into_token())
         .any(|tok| tok.kind() == SyntaxKind::COMMA);
@@ -1267,11 +1272,18 @@ fn is_auto_style_constructor(node: &SyntaxNode, type_name: &str, type_is_ident: 
 
 /// Конструктор — операнд `=` или `<>`: значение сравнивают (например, цвет
 /// ячейки табличного документа как метку данных), а не назначают оформлению.
+/// Ветвь `?(…)` отдаёт своё значение наружу, поэтому сквозь неё подъём
+/// продолжается; условие `?(…)` — нет.
 fn is_comparison_operand(node: &SyntaxNode) -> bool {
     let mut current = node.clone();
     while let Some(parent) = current.parent() {
         match parent.kind() {
             SyntaxKind::EXPR | SyntaxKind::PAREN_EXPR => current = parent,
+            SyntaxKind::TERNARY_EXPR
+                if active_children(&parent).next().as_ref() != Some(&current) =>
+            {
+                current = parent
+            }
             SyntaxKind::BINARY_EXPR => {
                 return active_children_with_tokens(&parent)
                     .filter_map(|el| el.into_token())

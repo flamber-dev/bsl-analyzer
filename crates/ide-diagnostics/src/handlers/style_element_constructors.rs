@@ -183,6 +183,45 @@ EndFunction
     }
 
     #[test]
+    fn test_ternary_branch_compared_is_silent_but_condition_is_reported() {
+        let code = r#"Функция ЯчейкаОтмечена(Ячейка, Выделить, А, Б)
+	Если ?(Выделить, Новый Цвет(1, 2, 3), Новый Цвет(4, 5, 6)) = Ячейка.ЦветФона Тогда
+		Возврат Истина;
+	КонецЕсли;
+	Возврат Ячейка.Шрифт <> ?(Выделить, (Новый Шрифт("Arial", 10)), Ячейка.Шрифт)
+		Или ?(Новый Цвет(7, 8, 9), А, Б) = А;
+КонецФункции
+"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::StyleElementConstructors,
+            expect![[r#"
+                StyleElementConstructors @ 6:9..6:28
+                  message: Замените конструктор Цвет на получение элемента стиля
+                  severity: Error"#]],
+        );
+    }
+
+    #[test]
+    fn test_torn_if_inside_arguments_is_reported() {
+        let code = r#"Процедура Оформить(Надпись)
+	Надпись.ЦветТекста = Новый Цвет(#Если Сервер Тогда
+#Иначе
+255, 0, 0
+#КонецЕсли);
+КонецПроцедуры
+"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::StyleElementConstructors,
+            expect![[r#"
+                StyleElementConstructors @ 2:23..5:12
+                  message: Замените конструктор Цвет на получение элемента стиля
+                  severity: Error"#]],
+        );
+    }
+
+    #[test]
     fn test_constructors_with_values_are_still_reported() {
         let code = r#"Функция ОформитьЯчейку(Надпись, Ячейка, Выделить)
 	Надпись.ЦветТекста = Новый Цвет(130, 0, 70);
