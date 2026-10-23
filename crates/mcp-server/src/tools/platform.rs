@@ -1142,10 +1142,78 @@ fn search_member_of_type(
     if let Some(property) = platform.get_property(type_name, member_name) {
         return Ok(property_card(platform, property));
     }
+    if let Some(card) = search_member_of_template(platform, type_name, member_name) {
+        return Ok(card);
+    }
     Err(McpError::invalid_params(
         format!("'{member_name}' не найдено среди методов и свойств типа '{type_name}'"),
         None,
     ))
+}
+
+/// A member of a type the catalog records only as a pattern over an application
+/// object's name: `РегистрБухгалтерииНаборЗаписей.<Имя регистра бухгалтерии>`,
+/// `СправочникОбъект.<Имя справочника>`. Nobody types the pattern, so the owner is
+/// asked for by its head in either language (`РегистрБухгалтерииНаборЗаписей`,
+/// `AccountingRegisterRecordSet`) or with a concrete object name in place of the
+/// placeholder (`РегистрБухгалтерииНаборЗаписей.Хозрасчетный`). The member is then
+/// looked up the way the analyzer resolves it on such a receiver, by its displayed
+/// name: the catalog keeps a pattern's method names truncated to `<Имя`.
+///
+/// Only a head that names exactly one pattern answers, and never a name that is a type
+/// of its own: that type's members were already asked for and are the answer. The one
+/// exception is the pattern's XDTO name (`AccountingRegisterRecordSet`), which the type
+/// index already maps to the pattern itself.
+fn search_member_of_template(
+    platform: &PlatformDataInner,
+    type_name: &str,
+    member_name: &str,
+) -> Option<(String, SyntaxHelpItem)> {
+    let owner = match platform.get_type(type_name) {
+        Some(named) if is_name_pattern(&named.name) => named,
+        Some(_) => return None,
+        None => template_owner(platform, type_name)?,
+    };
+    let prefix = name_head(&owner.english_name);
+    if let Some(method) =
+        bsl_platform::find_prefixed_methods(&prefix, member_name).into_iter().next()
+    {
+        return Some(method_card(platform, &method));
+    }
+    let member = member_name.to_lowercase();
+    platform
+        .get_manager_properties(&prefix)
+        .into_iter()
+        .find(|property| {
+            property.name.to_lowercase() == member || property.english_name.to_lowercase() == member
+        })
+        .map(|property| property_card(platform, property))
+}
+
+/// The one pattern type whose head (in either language) is the head of `type_name`.
+fn template_owner<'a>(
+    platform: &'a PlatformDataInner,
+    type_name: &str,
+) -> Option<&'a bsl_platform::PlatformType> {
+    let head = name_head(type_name);
+    if head.is_empty() {
+        return None;
+    }
+    let mut owners = platform.all_types().iter().filter(|candidate| {
+        is_name_pattern(&candidate.name)
+            && (name_head(&candidate.name) == head || name_head(&candidate.english_name) == head)
+    });
+    let owner = owners.next()?;
+    owners.next().is_none().then_some(owner)
+}
+
+/// The catalog writes a pattern's placeholder HTML-escaped (`&lt;Имя ...&gt;`).
+fn is_name_pattern(name: &str) -> bool {
+    name.contains("&lt;") || name.contains('<')
+}
+
+fn name_head(name: &str) -> String {
+    name.split('.').next().unwrap_or_default().trim().to_lowercase()
 }
 
 fn property_card(
@@ -1153,7 +1221,7 @@ fn property_card(
     property: &bsl_platform::PlatformProperty,
 ) -> (String, SyntaxHelpItem) {
     let docs = platform.get_property_docs(property.id);
-    let owner = (!property.type_name.is_empty()).then(|| property.type_name.to_string());
+    let owner = (!property.type_name.is_empty()).then(|| display_type_name(&property.type_name));
 
     let mut out = match &owner {
         Some(owner) => {
@@ -1212,20 +1280,20 @@ fn method_card(
     platform: &PlatformDataInner,
     method: &bsl_platform::PlatformMethod,
 ) -> (String, SyntaxHelpItem) {
-    let mut out = format!(
-        "# {}.{} / {}.{}\n\n",
-        method.type_name, method.name, method.type_name, method.english_name
-    );
-    format_method_signature(
-        &mut out,
-        &method.name,
-        &method.parameters,
-        method.return_type.as_deref(),
-    );
+    let (name, english_name) = bsl_platform::method_display_names(method);
+    let owner = display_type_name(&method.type_name);
+    let mut out = format!("# {owner}.{name} / {owner}.{english_name}\n\n");
+    format_method_signature(&mut out, &name, &method.parameters, method.return_type.as_deref());
     if let Some(docs) = platform.get_method_docs(method.id) {
         format_docs(&mut out, &docs);
     }
     (out, SyntaxHelpItem::Method { matches: vec![callable_from_method(platform, method)] })
+}
+
+/// A pattern owner as a reader writes it: the catalog keeps the placeholder
+/// HTML-escaped (`AccountingRegisterRecordSet.&lt;Accounting register name&gt;`).
+fn display_type_name(type_name: &str) -> String {
+    type_name.replace("&lt;", "<").replace("&gt;", ">")
 }
 
 fn constructor_card(
@@ -1251,10 +1319,11 @@ fn callable_from_method(
     platform: &PlatformDataInner,
     method: &bsl_platform::PlatformMethod,
 ) -> SyntaxCallable {
+    let (name, english_name) = bsl_platform::method_display_names(method);
     SyntaxCallable {
-        name: method.name.to_string(),
-        english_name: Some(method.english_name.to_string()),
-        owner_type: Some(method.type_name.to_string()),
+        name,
+        english_name: Some(english_name),
+        owner_type: Some(display_type_name(&method.type_name)),
         variant_name: None,
         return_type: method.return_type.as_ref().map(ToString::to_string),
         parameters: method.parameters.iter().map(parameter).collect(),
@@ -2136,5 +2205,65 @@ mod tests {
 
         let result = bsl_syntax_help("НесуществующийМетод", Some("Массив"), 6000).unwrap();
         assert_eq!(structured(&result)["status"], "not_found");
+    }
+
+    /// A record set, an object, a manager of an application object: the catalog keeps such
+    /// a type only as a pattern over the object's name, and nobody asks for the pattern.
+    /// The head in either language and a concrete object name in place of the placeholder
+    /// all reach it, and the card names the member as the analyzer resolves it, not by the
+    /// truncated `<Имя` the catalog keeps.
+    #[test]
+    fn a_member_of_a_pattern_type_is_found_by_the_pattern_s_head() {
+        let platform = PlatformDataInner::instance();
+        if platform.all_types().is_empty() {
+            return;
+        }
+        for owner in [
+            "РегистрБухгалтерииНаборЗаписей",
+            "AccountingRegisterRecordSet",
+            "РегистрБухгалтерииНаборЗаписей.РегистрБухгалтерии1",
+        ] {
+            for member in ["Прочитать", "Read"] {
+                let (text, item) = syntax_help_card(member, Some(owner))
+                    .unwrap_or_else(|error| panic!("{member} on {owner}: {error}"));
+                let SyntaxHelpItem::Method { matches } = item else {
+                    panic!("{member} on {owner} must be a method card")
+                };
+                assert_eq!(matches.len(), 1);
+                assert_eq!(matches[0].name, "Прочитать");
+                assert_eq!(matches[0].english_name.as_deref(), Some("Read"));
+                assert_eq!(
+                    matches[0].owner_type.as_deref(),
+                    Some("AccountingRegisterRecordSet.<Accounting register name>")
+                );
+                assert!(
+                    !text.contains("&lt;"),
+                    "the card shows the placeholder as written: {text}"
+                );
+            }
+        }
+        let (text, property) = syntax_help_card("Отбор", Some("РегистрБухгалтерииНаборЗаписей"))
+            .expect("a property of the pattern answers too");
+        let SyntaxHelpItem::Property { owner_type, .. } = property else {
+            panic!("Отбор must be a property card")
+        };
+        assert_eq!(
+            owner_type.as_deref(),
+            Some("AccountingRegisterRecordSet.<Accounting register name>")
+        );
+        assert!(!text.contains("&lt;"), "the card shows the placeholder as written: {text}");
+    }
+
+    /// The pattern is no licence to answer anything: a member the record set does not
+    /// have, and a head that is not a pattern's, are still refused.
+    #[test]
+    fn a_pattern_type_still_refuses_a_member_it_does_not_have() {
+        let platform = PlatformDataInner::instance();
+        if platform.all_types().is_empty() {
+            return;
+        }
+        assert!(syntax_help_card("Читать", Some("РегистрБухгалтерииНаборЗаписей")).is_err());
+        assert!(syntax_help_card("Прочитать", Some("НетТакогоТипа.Имя")).is_err());
+        assert!(syntax_help_card("Прочитать", Some("Массив")).is_err());
     }
 }
