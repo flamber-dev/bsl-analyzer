@@ -723,6 +723,21 @@ mod tests {
         assert!(catalog[0].contains("НетТакогоМетода"), "got: {catalog:?}");
     }
 
+    /// The extension answers only for a name the module does not declare: a module's
+    /// own exported `Записать` is still the method the self call reaches, so the call
+    /// is checked against that declaration's signature.
+    #[test]
+    fn form_self_call_to_own_method_named_like_an_extension_method_keeps_its_declaration() {
+        let arg_count: Vec<_> = crate::test_utils::check_form_with_form_xml(
+            "&НаКлиенте\nПроцедура Записать(Параметр) Экспорт\nКонецПроцедуры\n\n&НаКлиенте\nПроцедура Обновить()\n    ЭтаФорма.Записать(1, 2);\nКонецПроцедуры\n",
+            &form_xml_with_main_attribute("cfg:CatalogObject.Товары"),
+        )
+        .into_iter()
+        .filter(|d| d.code == DiagnosticCode::MismatchedArgCount)
+        .collect();
+        assert_eq!(arg_count.len(), 1, "the local signature takes one argument: {arg_count:?}");
+    }
+
     fn platform_umc(code: &str) -> Vec<String> {
         check_hir_diagnostic(code)
             .into_iter()
