@@ -133,6 +133,135 @@ EndProcedure
     }
 
     #[test]
+    fn test_auto_value_constructors_are_silent() {
+        let code = r#"Процедура СброситьОформление(Надпись, Ячейка)
+	Надпись.ЦветТекста = Новый Цвет;
+	Надпись.ЦветФона = Новый Цвет();
+	Надпись.Шрифт = Новый Шрифт;
+	Ячейка.Шрифт = Новый Шрифт();
+	Ячейка.ЦветРамки = Новый("Цвет");
+	Ячейка.Шрифт = Новый("Шрифт");
+	ЗапомнитьОформление(Новый Цвет, Новый Шрифт);
+КонецПроцедуры
+
+Procedure ResetLook(Caption)
+	Caption.TextColor = New Color;
+	Caption.BackColor = New Color();
+	Caption.Font = New Font;
+	Caption.Font = New("Font");
+EndProcedure
+"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::StyleElementConstructors,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn test_comparison_operands_are_silent() {
+        let code = r#"Функция ЯчейкаОтмечена(Ячейка)
+	Если Ячейка.ЦветФона = Новый Цвет(250, 230, 10) Тогда
+		Возврат Истина;
+	ИначеЕсли Ячейка.ЦветТекста <> Новый Цвет(120, 120, 120) Тогда
+		Возврат Ложь;
+	КонецЕсли;
+	Отметка = (Ячейка.ЦветФона = Новый Цвет(5, 15, 25));
+	Возврат Отметка Или Новый Шрифт("Courier New", 11) = Ячейка.Шрифт
+		Или Ячейка.ЦветРамки = (Новый("Цвет", 40, 50, 60));
+КонецФункции
+
+Function IsMarked(Cell)
+	Return Cell.BackColor = New Color(1, 99, 199);
+EndFunction
+"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::StyleElementConstructors,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn test_ternary_branch_compared_is_silent_but_condition_is_reported() {
+        let code = r#"Функция ЯчейкаОтмечена(Ячейка, Выделить, А, Б)
+	Если ?(Выделить, Новый Цвет(1, 2, 3), Новый Цвет(4, 5, 6)) = Ячейка.ЦветФона Тогда
+		Возврат Истина;
+	КонецЕсли;
+	Возврат Ячейка.Шрифт <> ?(Выделить, (Новый Шрифт("Arial", 10)), Ячейка.Шрифт)
+		Или ?(Новый Цвет(7, 8, 9), А, Б) = А;
+КонецФункции
+"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::StyleElementConstructors,
+            expect![[r#"
+                StyleElementConstructors @ 6:9..6:28
+                  message: Замените конструктор Цвет на получение элемента стиля
+                  severity: Error"#]],
+        );
+    }
+
+    #[test]
+    fn test_torn_if_inside_arguments_is_reported() {
+        let code = r#"Процедура Оформить(Надпись)
+	Надпись.ЦветТекста = Новый Цвет(#Если Сервер Тогда
+#Иначе
+255, 0, 0
+#КонецЕсли);
+КонецПроцедуры
+"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::StyleElementConstructors,
+            expect![[r#"
+                StyleElementConstructors @ 2:23..5:12
+                  message: Замените конструктор Цвет на получение элемента стиля
+                  severity: Error"#]],
+        );
+    }
+
+    #[test]
+    fn test_constructors_with_values_are_still_reported() {
+        let code = r#"Функция ОформитьЯчейку(Надпись, Ячейка, Выделить)
+	Надпись.ЦветТекста = Новый Цвет(130, 0, 70);
+	Ячейка.Шрифт = Новый Шрифт(, , Истина);
+	Ячейка.Шрифт = Новый Шрифт(,);
+	Надпись.Рамка = Новый Рамка;
+	ЗапомнитьОформление(Новый Цвет(1, 2, 3));
+	Ячейка.ЦветФона = ?(Выделить, Новый Цвет(7, 8, 9), Новый Цвет);
+	Возврат Новый Color(64, 64, 64);
+КонецФункции
+"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::StyleElementConstructors,
+            expect![[r#"
+                StyleElementConstructors @ 2:23..2:45
+                  message: Замените конструктор Цвет на получение элемента стиля
+                  severity: Error
+                StyleElementConstructors @ 3:17..3:40
+                  message: Замените конструктор Шрифт на получение элемента стиля
+                  severity: Error
+                StyleElementConstructors @ 4:17..4:31
+                  message: Замените конструктор Шрифт на получение элемента стиля
+                  severity: Error
+                StyleElementConstructors @ 5:18..5:29
+                  message: Замените конструктор Рамка на получение элемента стиля
+                  severity: Error
+                StyleElementConstructors @ 6:22..6:41
+                  message: Замените конструктор Цвет на получение элемента стиля
+                  severity: Error
+                StyleElementConstructors @ 7:32..7:51
+                  message: Замените конструктор Цвет на получение элемента стиля
+                  severity: Error
+                StyleElementConstructors @ 8:10..8:33
+                  message: Замените конструктор Color на получение элемента стиля
+                  severity: Error"#]],
+        );
+    }
+
+    #[test]
     fn test_nested_constructors() {
         let code = r#"Настройки = Новый Соответствие;
 Настройки.Вставить("Акцент", Новый ХранилищеЗначения(Новый Цвет(0, 90, 160)));

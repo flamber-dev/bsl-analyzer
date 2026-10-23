@@ -1161,6 +1161,10 @@ fn lower_new_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         extract_type_name_from_first_arg(node).filter(|name| is_style_element_type(name))
     };
 
+    let style_type_name = style_type_name.filter(|name| {
+        !(is_auto_style_constructor(node, name, type_name.is_some()) || is_comparison_operand(node))
+    });
+
     if let Some(style_name) = style_type_name {
         ctx.emit(BodyDiagnostic::StyleElementConstructors {
             type_name: style_name,
@@ -1239,6 +1243,56 @@ fn is_file_system_type(name: &str) -> bool {
 fn is_style_element_type(name: &str) -> bool {
     let lower = name.fold_lower();
     matches!(lower.as_str(), "цвет" | "color" | "шрифт" | "font" | "рамка" | "border")
+}
+
+/// `Новый Цвет` и `Новый Шрифт` без параметров дают значения вида «Авто»
+/// (`ВидЦвета.АвтоЦвет`, `ВидШрифта.АвтоШрифт`): присвоить их — значит
+/// вернуть оформление по умолчанию, а не задать своё, и элемент стиля тут
+/// не нужен. У `Рамка` конструктора без параметров нет вовсе — платформа
+/// отвечает «Конструктор не найден», поэтому рамка сюда не входит.
+fn is_auto_style_constructor(node: &SyntaxNode, type_name: &str, type_is_ident: bool) -> bool {
+    if !matches!(type_name.fold_lower().as_str(), "цвет" | "color" | "шрифт" | "font") {
+        return false;
+    }
+    let Some(arg_list) = active_children(node).find(|n| n.kind() == SyntaxKind::ARG_LIST) else {
+        return type_is_ident;
+    };
+    // Разрезанная `#Если` внутри скобок: в другом варианте сборки у
+    // конструктора могут быть параметры, а дерево показывает лишь один.
+    if arg_list.descendants().any(|n| n.kind() == SyntaxKind::PRE_TORN_IF_PART) {
+        return false;
+    }
+    let has_comma = active_children_with_tokens(&arg_list)
+        .filter_map(|el| el.into_token())
+        .any(|tok| tok.kind() == SyntaxKind::COMMA);
+    // В строковой форме `Новый("Цвет")` единственный аргумент — имя типа.
+    let expected_args = if type_is_ident { 0 } else { 1 };
+    !has_comma && active_children(&arg_list).count() == expected_args
+}
+
+/// Конструктор — операнд `=` или `<>`: значение сравнивают (например, цвет
+/// ячейки табличного документа как метку данных), а не назначают оформлению.
+/// Ветвь `?(…)` отдаёт своё значение наружу, поэтому сквозь неё подъём
+/// продолжается; условие `?(…)` — нет.
+fn is_comparison_operand(node: &SyntaxNode) -> bool {
+    let mut current = node.clone();
+    while let Some(parent) = current.parent() {
+        match parent.kind() {
+            SyntaxKind::EXPR | SyntaxKind::PAREN_EXPR => current = parent,
+            SyntaxKind::TERNARY_EXPR
+                if active_children(&parent).next().as_ref() != Some(&current) =>
+            {
+                current = parent
+            }
+            SyntaxKind::BINARY_EXPR => {
+                return active_children_with_tokens(&parent)
+                    .filter_map(|el| el.into_token())
+                    .any(|tok| matches!(tok.kind(), SyntaxKind::EQ | SyntaxKind::NEQ));
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 fn is_system_information_type(name: &str) -> bool {
