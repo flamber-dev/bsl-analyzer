@@ -81,6 +81,15 @@ mod tests {
     }
 
     #[test]
+    fn conditional_begin_before_preproc_try() {
+        check_diagnostics_snapshot_for(
+            include_str!("fixtures/conditional_begin_before_preproc_try.bsl"),
+            DiagnosticCode::BeginTransactionBeforeTryCatch,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
     fn conditional_begin_in_else_and_nested_if_before_try() {
         let code = r#"Процедура Тест(ВнешняяТранзакция, Режим) Экспорт
     Если ВнешняяТранзакция Тогда

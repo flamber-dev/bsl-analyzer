@@ -387,7 +387,11 @@ fn branch_end_is_followed_by_try(stmt_list: &SyntaxNode) -> bool {
             next = node.next_sibling();
         }
         match next {
-            Some(node) => return node.kind() == SyntaxKind::TRY_STMT,
+            Some(node) => {
+                return node.kind() == SyntaxKind::TRY_STMT
+                    || (node.kind() == SyntaxKind::PRE_IF_DIR
+                        && pre_if_all_branches_open_with_try(&node));
+            }
             None => match if_stmt.parent() {
                 Some(outer) if outer.kind() == SyntaxKind::STMT_LIST => list = outer,
                 _ => return false,
