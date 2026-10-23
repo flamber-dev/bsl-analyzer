@@ -373,6 +373,48 @@ impl DiagnosticsResident {
         self.db.analysis()
     }
 
+    /// Run `f` while `file_id` reads as `text`, and put the file back afterwards.
+    ///
+    /// The text is an in-memory overlay on the master handle: nothing touches the disk,
+    /// the generation is not bumped and no change is published, so neither the drift
+    /// fingerprint nor a subscriber ever sees it. The caller holds the resident lock for
+    /// the whole call, which is what keeps every other reader away from the overlaid
+    /// state; the restore runs on unwind too, so a cancelled or panicking `f` cannot
+    /// leave the overlay behind.
+    ///
+    /// A disk-backed file goes back to its disk revision. Its overlay input is emptied
+    /// first: the input outlives its removal from the file table, and without that it
+    /// would keep the whole overlaid text alive for the life of the database.
+    pub(crate) fn with_text_overlay<R>(
+        &mut self,
+        file_id: FileId,
+        text: &str,
+        f: impl FnOnce(&Self) -> R,
+    ) -> R {
+        use base_db::SourceDatabase;
+
+        let db = self.db.database_mut();
+        let original_overlay = db.try_file_text(file_id).map(|input| input.text(db).to_string());
+        let original_revision =
+            db.try_file_revision_input(file_id).map(|revision| revision.revision(db));
+        db.set_file_text(file_id, text);
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&*self)));
+
+        let db = self.db.database_mut();
+        match (original_overlay, original_revision) {
+            (Some(original), _) => db.set_file_text(file_id, &original),
+            (None, Some(revision)) => {
+                db.set_file_text(file_id, "");
+                db.set_file_revision_from_disk(file_id, revision);
+            }
+            // Every served file has a revision; a file without one was never registered,
+            // and an empty overlay is what an unregistered file reads as anyway.
+            (None, None) => db.set_file_text(file_id, ""),
+        }
+        outcome.unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+    }
+
     /// Test-only access for root-scoped metadata and cancellation cases. Borrowed under
     /// the state lock, so the borrow cannot outlive the read and a reload cannot alias it.
     #[cfg(test)]

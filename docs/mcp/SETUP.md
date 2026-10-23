@@ -340,6 +340,7 @@ complexityThreshold = 30
 | граф вызовов | `graph` (action=`overview`) | workspace |
 | каталог диагностик | `diagnostics` (action=`catalog`) | workspace |
 | диагностики файла | `diagnostics` (action=`file`, path=…) | workspace |
+| диагностики фрагмента кода | `diagnostics` (action=`snippet`, code=…) | workspace |
 | справка платформы | `syntax_help` | reference |
 | справка ИТС | `its_help` | reference (нужен `NAPARNIK_TOKEN`) |
 | live-запрос | `query` (action=`execute`) | workspace + расширение 1С |

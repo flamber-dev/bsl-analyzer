@@ -898,32 +898,45 @@ struct ReferencesParams {
 
 #[derive(Deserialize, JsonSchema)]
 struct DiagnosticsParams {
-    /// catalog | schema | status | file | workspace.
+    /// catalog | schema | status | file | snippet | workspace.
     action: String,
     /// `file`: absolute or workspace-relative `.bsl` path, or a path relative to `root_id`.
+    /// `snippet`: the host module whose context `code` is analysed in (optional).
     path: Option<String>,
-    /// `file`: the source root `path` is spelled against, as carried by every `search` code
-    /// hit. Omit for a path already spelled against the workspace; `""` names the
-    /// configuration.
+    /// `file`/`snippet`: the source root `path` is spelled against, as carried by every
+    /// `search` code hit. Omit for a path already spelled against the workspace; `""` names
+    /// the configuration.
     root_id: Option<String>,
-    /// `catalog`: narrow to these codes. `file`: keep only these codes.
+    /// `snippet`: BSL text to analyse — statements or whole methods — that is not a file.
+    code: Option<String>,
+    /// `snippet`: statements | module (default: module when `code` declares a method, a
+    /// variable section or a directive, else statements — wrapped into a procedure).
+    code_kind: Option<String>,
+    /// `snippet`: server | client (default server) — picks the host when `path` is omitted,
+    /// and the directive of the wrapper in a form module.
+    environment: Option<String>,
+    /// `snippet`: names `code` reads that the runner provides (e.g. `Результат`), so they
+    /// are not reported as unresolved or unused.
+    #[serde(default)]
+    known_variables: Vec<String>,
+    /// `catalog`: narrow to these codes. `file`/`snippet`: keep only these codes.
     #[serde(default)]
     codes: Vec<String>,
     /// `catalog`: ru | en (default ru) — title language.
     locale: Option<String>,
-    /// `file`: inclusive severity floor error|warning|info|hint (default warning).
+    /// `file`/`snippet`: inclusive severity floor error|warning|info|hint (default warning).
     min_severity: Option<String>,
     /// `file`: 0-based first line to include (optional).
     range_start: Option<usize>,
     /// `file`: 0-based last line to include (optional).
     range_end: Option<usize>,
-    /// `file`: concise | detailed (default concise).
+    /// `file`/`snippet`: concise | detailed (default concise).
     detail: Option<String>,
-    /// `file`: cap on returned findings (default 200).
+    /// `file`/`snippet`: cap on returned findings (default 200).
     max_findings: Option<usize>,
     /// `workspace`: cap on files swept (default 1000).
     max_files: Option<usize>,
-    /// `catalog`/`file`/`workspace`: output budget in tokens (~4 chars each), minimum 256;
+    /// `catalog`/`file`/`snippet`/`workspace`: output budget in tokens (~4 chars each), minimum 256;
     /// a truncated response carries `budget_exhausted: true` and a `budget_hint` on how to narrow it
     /// (tighten `codes`/`min_severity`/range or raise the budget). When omitted, no token
     /// budget applies — only the action's own count caps (`max_findings`/`max_files`).
@@ -2665,8 +2678,10 @@ impl McpServer {
     /// config for issues, or to discover which rules exist. Not for finding code (use `search`)
     /// and not for call relationships (use `graph`). Actions: `catalog` — list rules (start here
     /// to learn the codes); `schema` — response shape; `status` — analysis readiness; `file` —
-    /// per-finding results for one `.bsl` path; `workspace` — a bounded per-code aggregate sweep
-    /// of the whole config. Honours `max_output_tokens`/`max_findings` and flags truncation.
+    /// per-finding results for one `.bsl` path; `snippet` — the same for BSL text that is not
+    /// a file (code to run or paste), analysed inside a host module of the config, ranges
+    /// relative to the text; `workspace` — a bounded per-code aggregate sweep of the whole
+    /// config. Honours `max_output_tokens`/`max_findings` and flags truncation.
     /// Reads the resident host; while it builds it returns a retry envelope.
     #[tool(
         name = "diagnostics",
@@ -2685,7 +2700,7 @@ impl McpServer {
         // Only the actions that honour a budget are held to its minimum: `schema` and
         // `status` ignore `max_output_tokens` entirely, and refusing them for a value
         // they never read would be a refusal about nothing.
-        let budgeted = matches!(p.action.as_str(), "catalog" | "file" | "workspace");
+        let budgeted = matches!(p.action.as_str(), "catalog" | "file" | "snippet" | "workspace");
         if budgeted
             && p.max_output_tokens
                 .is_some_and(|tokens| tokens < tools::diagnostics::MIN_OUTPUT_TOKENS)
@@ -2723,6 +2738,7 @@ impl McpServer {
                 .into())
             }
             "file" => self.diagnostics_file(p, ct, caller).await,
+            "snippet" => self.diagnostics_snippet(p, ct, caller).await,
             "workspace" => self.diagnostics_workspace(p, ct, caller).await,
             other => Err(contract::unknown_action(McpProfile::Workspace, "diagnostics", other)),
         }
@@ -2805,6 +2821,95 @@ impl McpServer {
                     }
                     ResidentOutcome::Disabled => Err(McpError::invalid_params(
                         "diagnostics 'file' is only available in the workspace profile",
+                        None,
+                    )),
+                    ResidentOutcome::Failed(msg) => match session.resident_failure(&msg) {
+                        FailureAnswer::Failed { reason, data } => Err(McpError::internal_error(
+                            format!("diagnostics database: {reason}"),
+                            Some(data),
+                        )),
+                        FailureAnswer::Moved(report) => Ok(tools::diagnostics::loading(&report)),
+                    },
+                }
+            },
+            move || tools::diagnostics::loading(&retry_diag.status_report()),
+        )
+        .await
+    }
+
+    /// The `diagnostics snippet` action: findings for BSL text that is not a file, analysed
+    /// inside a host module overlaid in memory for the duration of the call.
+    async fn diagnostics_snippet(
+        &self,
+        p: DiagnosticsParams,
+        ct: tokio_util::sync::CancellationToken,
+        caller: tasks::TaskCapable,
+    ) -> Result<CallToolResponse, McpError> {
+        use tools::diagnostics::snippet::{CodeKind, Environment, SnippetFilters, SnippetRequest};
+        use tools::diagnostics::{parse_detail, parse_min_severity};
+
+        let invalid = |e: String| McpError::invalid_params(e, None);
+        let code = require(p.code, "code", "snippet")?;
+        let request = SnippetRequest::new(
+            code,
+            CodeKind::parse(p.code_kind.as_deref()).map_err(invalid)?,
+            Environment::parse(p.environment.as_deref()).map_err(invalid)?,
+            p.known_variables,
+            p.path,
+            p.root_id,
+        )
+        .map_err(invalid)?;
+        let filters = SnippetFilters {
+            min_severity: parse_min_severity(p.min_severity.as_deref()).map_err(invalid)?,
+            codes: p.codes,
+            max_findings: p.max_findings.unwrap_or(tools::diagnostics::DEFAULT_MAX_FINDINGS),
+            max_output_tokens: p.max_output_tokens,
+            detailed: parse_detail(p.detail.as_deref()).map_err(invalid)?,
+        };
+
+        let diag = self.state.diagnostics().clone();
+        let graph = self.state.graph().clone();
+        diag.ensure_loading();
+        let retry_diag = diag.clone();
+        tasks::resident_response(
+            self,
+            caller,
+            "diagnostics snippet",
+            ct,
+            move |session| {
+                use crate::diagnostics_state::ResidentOutcome;
+                let max_output_tokens = filters.max_output_tokens;
+                let outcome = session.read_overlaid(
+                    |resident, analysis| {
+                        tools::diagnostics::snippet::plan(
+                            resident,
+                            analysis,
+                            &request,
+                            max_output_tokens,
+                        )
+                        .map(|(file_id, text, prepared)| (file_id, text, (file_id, prepared)))
+                    },
+                    |resident, analysis, _generation, (file_id, prepared)| {
+                        tools::diagnostics::snippet::findings(
+                            resident,
+                            analysis,
+                            file_id,
+                            prepared,
+                            &request.code,
+                            &filters,
+                        )
+                    },
+                );
+                match outcome {
+                    ResidentOutcome::Ready((result, completeness), mut freshness) => {
+                        freshness.stale |= graph.is_reloading();
+                        Ok(tools::diagnostics::snippet_envelope(freshness, completeness, result))
+                    }
+                    ResidentOutcome::Loading => {
+                        Ok(tools::diagnostics::loading(&session.status_report()))
+                    }
+                    ResidentOutcome::Disabled => Err(McpError::invalid_params(
+                        "diagnostics 'snippet' is only available in the workspace profile",
                         None,
                     )),
                     ResidentOutcome::Failed(msg) => match session.resident_failure(&msg) {
@@ -3789,6 +3894,10 @@ mod tests {
                     action: "status".to_owned(),
                     path: None,
                     root_id: None,
+                    code: None,
+                    code_kind: None,
+                    environment: None,
+                    known_variables: Vec::new(),
                     codes: Vec::new(),
                     locale: None,
                     min_severity: None,
@@ -4824,6 +4933,10 @@ mod graph_supersession_contract {
                 action: "workspace".to_owned(),
                 path: None,
                 root_id: None,
+                code: None,
+                code_kind: None,
+                environment: None,
+                known_variables: Vec::new(),
                 codes: Vec::new(),
                 locale: None,
                 min_severity: None,
@@ -4996,6 +5109,10 @@ mod graph_supersession_contract {
                         action: "file".to_owned(),
                         path: Some(changed_path.to_string_lossy().into_owned()),
                         root_id: None,
+                        code: None,
+                        code_kind: None,
+                        environment: None,
+                        known_variables: Vec::new(),
                         codes: Vec::new(),
                         locale: None,
                         min_severity: None,
@@ -5329,26 +5446,36 @@ mod tool_descriptions {
             config for issues, or to discover which rules exist. Not for finding code (use `search`)
             and not for call relationships (use `graph`). Actions: `catalog` — list rules (start here
             to learn the codes); `schema` — response shape; `status` — analysis readiness; `file` —
-            per-finding results for one `.bsl` path; `workspace` — a bounded per-code aggregate sweep
-            of the whole config. Honours `max_output_tokens`/`max_findings` and flags truncation.
+            per-finding results for one `.bsl` path; `snippet` — the same for BSL text that is not
+            a file (code to run or paste), analysed inside a host module of the config, ranges
+            relative to the text; `workspace` — a bounded per-code aggregate sweep of the whole
+            config. Honours `max_output_tokens`/`max_findings` and flags truncation.
             Reads the resident host; while it builds it returns a retry envelope.
-              - action: catalog | schema | status | file | workspace.
-              - codes: `catalog`: narrow to these codes. `file`: keep only these codes.
-              - detail: `file`: concise | detailed (default concise).
+              - action: catalog | schema | status | file | snippet | workspace.
+              - code: `snippet`: BSL text to analyse — statements or whole methods — that is not a file.
+              - code_kind: `snippet`: statements | module (default: module when `code` declares a method, a
+            variable section or a directive, else statements — wrapped into a procedure).
+              - codes: `catalog`: narrow to these codes. `file`/`snippet`: keep only these codes.
+              - detail: `file`/`snippet`: concise | detailed (default concise).
+              - environment: `snippet`: server | client (default server) — picks the host when `path` is omitted,
+            and the directive of the wrapper in a form module.
+              - known_variables: `snippet`: names `code` reads that the runner provides (e.g. `Результат`), so they
+            are not reported as unresolved or unused.
               - locale: `catalog`: ru | en (default ru) — title language.
               - max_files: `workspace`: cap on files swept (default 1000).
-              - max_findings: `file`: cap on returned findings (default 200).
-              - max_output_tokens: `catalog`/`file`/`workspace`: output budget in tokens (~4 chars each), minimum 256;
+              - max_findings: `file`/`snippet`: cap on returned findings (default 200).
+              - max_output_tokens: `catalog`/`file`/`snippet`/`workspace`: output budget in tokens (~4 chars each), minimum 256;
             a truncated response carries `budget_exhausted: true` and a `budget_hint` on how to narrow it
             (tighten `codes`/`min_severity`/range or raise the budget). When omitted, no token
             budget applies — only the action's own count caps (`max_findings`/`max_files`).
-              - min_severity: `file`: inclusive severity floor error|warning|info|hint (default warning).
+              - min_severity: `file`/`snippet`: inclusive severity floor error|warning|info|hint (default warning).
               - path: `file`: absolute or workspace-relative `.bsl` path, or a path relative to `root_id`.
+            `snippet`: the host module whose context `code` is analysed in (optional).
               - range_end: `file`: 0-based last line to include (optional).
               - range_start: `file`: 0-based first line to include (optional).
-              - root_id: `file`: the source root `path` is spelled against, as carried by every `search` code
-            hit. Omit for a path already spelled against the workspace; `""` names the
-            configuration.
+              - root_id: `file`/`snippet`: the source root `path` is spelled against, as carried by every
+            `search` code hit. Omit for a path already spelled against the workspace; `""` names
+            the configuration.
 
             ## event_log
             Read the 1C infobase event log (журнал регистрации) through the deployed BSL_Analyzer
@@ -6353,6 +6480,10 @@ mod resident_failed_answers {
             action: action.to_owned(),
             path: Some("CommonModules/Сервер/Ext/Module.bsl".to_owned()),
             root_id: None,
+            code: None,
+            code_kind: None,
+            environment: None,
+            known_variables: Vec::new(),
             codes: Vec::new(),
             locale: None,
             min_severity: None,

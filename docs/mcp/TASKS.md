@@ -29,7 +29,7 @@
 
 Только чтения резидентной базы анализа и только когда она **не готова**:
 `metadata` (`info`/`tree`/`object`), `symbol_info`, `references`,
-`diagnostics file`, `diagnostics workspace`. Там, где синхронная ветка вернула бы
+`diagnostics file`, `diagnostics snippet`, `diagnostics workspace`. Там, где синхронная ветка вернула бы
 конверт `{"status": "loading"}`, объявивший клиент получает
 
 ```json

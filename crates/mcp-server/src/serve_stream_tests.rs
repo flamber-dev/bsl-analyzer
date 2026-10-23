@@ -559,10 +559,10 @@ async fn workspace_catalog_schema_and_platform_calls_do_not_build_resident_or_gr
         .expect("diagnostics schema finishes within the shutdown budget")
         .expect("diagnostics schema answers over rmcp");
     let schema = schema.structured_content.expect("schema has structured content");
-    assert_eq!(schema["schema_version"], "16");
+    assert_eq!(schema["schema_version"], "17");
     assert_eq!(
         schema["actions"],
-        serde_json::json!(["catalog", "schema", "status", "file", "workspace"])
+        serde_json::json!(["catalog", "schema", "status", "file", "snippet", "workspace"])
     );
     assert_lazy_state();
 
