@@ -22,6 +22,7 @@ mod configurations_cfe_visibility;
 mod diagnostics_collection_row_methods;
 mod diagnostics_extension_merge;
 mod diagnostics_form_attribute_call;
+mod diagnostics_platform_docs_gap_members;
 mod doc3_integration_test;
 mod doc_see_effective;
 mod doc_see_query;
