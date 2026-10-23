@@ -1,6 +1,7 @@
 //! Integration tests of `ide` that share no process state, built and run as one
 //! target: each file a module, so the crate links one test binary instead of one per file.
 
+mod accounting_record_sides;
 mod call_name_navigation;
 mod cascade_typing;
 mod code_actions_convert_method;
