@@ -116,3 +116,73 @@ fn documentation_the_body_agrees_with_still_closes_the_result() {
     );
     assert_eq!(found, vec!["НетТакогоРеквизита".to_string(), "ИТакогоНет".to_string()]);
 }
+
+#[test]
+fn documented_array_of_references_over_returned_structures_does_not_close_the_elements() {
+    // The wrapper's documentation names catalog references; the array it passes on is the
+    // array of structures its callee documents.
+    let found = unresolved_fields(
+        r#"// Возвращаемое значение:
+//  Массив из Структура - описания устройств.
+Функция ОписанияУстройств()
+	Возврат Новый Массив;
+КонецФункции
+
+// Возвращаемое значение:
+//  Массив из СправочникСсылка.Справочник1 - устройства.
+Функция Устройства()
+	Возврат ОписанияУстройств();
+КонецФункции
+
+Процедура Тест() Экспорт
+	Для Каждого Устройство Из Устройства() Цикл
+		А = Устройство.КоличествоПодключенных;
+	КонецЦикла;
+КонецПроцедуры
+"#,
+    );
+    assert!(found.is_empty(), "the elements hold the structures the body returns: {found:?}");
+}
+
+#[test]
+fn documented_array_of_a_missing_object_does_not_close_the_elements() {
+    let found = unresolved_fields(
+        r#"// Возвращаемое значение:
+//  Массив из СправочникСсылка.НетТакогоСправочника - значения.
+Функция Значения(Источник)
+	Возврат Источник.Значения;
+КонецФункции
+
+Процедура Тест(Источник) Экспорт
+	Для Каждого Значение Из Значения(Источник) Цикл
+		Х = Значение.Показатель;
+	КонецЦикла;
+КонецПроцедуры
+"#,
+    );
+    assert!(found.is_empty(), "the documented catalog does not exist: {found:?}");
+}
+
+#[test]
+fn documented_array_the_body_does_not_contradict_still_closes_the_elements() {
+    // An array the body fills with `Добавить` carries no element type, so it says nothing
+    // against the documentation.
+    let found = unresolved_fields(
+        r#"// Возвращаемое значение:
+//  Массив из СправочникСсылка.Справочник1 - ссылки.
+Функция Ссылки()
+	Результат = Новый Массив;
+	Результат.Добавить(Справочники.Справочник1.ПустаяСсылка());
+	Возврат Результат;
+КонецФункции
+
+Процедура Тест() Экспорт
+	Для Каждого Ссылка Из Ссылки() Цикл
+		А = Ссылка.Реквизит1;
+		Б = Ссылка.НетТакогоРеквизита;
+	КонецЦикла;
+КонецПроцедуры
+"#,
+    );
+    assert_eq!(found, vec!["НетТакогоРеквизита".to_string()]);
+}

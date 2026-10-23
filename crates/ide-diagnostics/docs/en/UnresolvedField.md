@@ -13,7 +13,7 @@ This usually means one of the following:
 
 The current implementation is conservative. It reports only cases where type inference has a confident metadata reference type and the field lookup fails for that type.
 
-A function's documented return type ("Возвращаемое значение") that names a metadata object is checked against the function body. If the body returns a value of another type (for example, a `Структура`), the result of a call has both types and its fields are not reported. A documented object missing from a visible configuration is ignored. If the body returns the documented object or nothing definite, the documented type stays closed and a missing field is still reported.
+A function's documented return type ("Возвращаемое значение") that names a metadata object, alone or as the element of `Массив из`, is checked against the function body. If the body returns a value of another type (for example, a `Структура`), the result of a call has both types and its fields are not reported. A documented object missing from a visible configuration is ignored. If the body returns the documented object or nothing definite, the documented type stays closed and a missing field is still reported.
 
 
 Metadata collections are checked the same way:
