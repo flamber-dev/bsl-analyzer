@@ -4398,21 +4398,26 @@ impl<'db> InferenceContext<'db> {
                 None => {
                     // `ЭтотОбъект.Метод()` in a managed form module. The form type
                     // carries no such platform member, so the module's own methods
-                    // are the receiver's remaining surface — resolve and judge them
-                    // exactly as the equivalent bare call, and report the miss:
-                    // unlike a bare name, a self receiver has nowhere else to look.
+                    // and the main attribute's form extension are the receiver's
+                    // remaining surface — resolve and judge the methods exactly as
+                    // the equivalent bare call, and report a miss of both: unlike a
+                    // bare name, a self receiver has nowhere else to look.
                     if let Some(self_name) = self.form_self_receiver_name(base_id) {
                         let result = self
                             .infer_form_self_call(&self_name, &method_name, args, callee)
                             .unwrap_or_else(|| {
-                                self.push_inference_diagnostic(
-                                    InferenceDiagnostic::UnresolvedMethodCall {
-                                        expr: callee,
-                                        receiver_name: self_name,
-                                        method_name: method_name.clone(),
-                                        kind: UnresolvedMethodKind::MethodNotFound,
-                                    },
-                                );
+                                // `Прочитать`/`Записать` of an object form,
+                                // `УстановитьТекущийВариант` of a report form.
+                                if !self.implicit_receiver_owns_method(&method_name) {
+                                    self.push_inference_diagnostic(
+                                        InferenceDiagnostic::UnresolvedMethodCall {
+                                            expr: callee,
+                                            receiver_name: self_name,
+                                            method_name: method_name.clone(),
+                                            kind: UnresolvedMethodKind::MethodNotFound,
+                                        },
+                                    );
+                                }
                                 self.db.unknown()
                             });
                         self.expr_types.insert(callee, self.db.unknown());

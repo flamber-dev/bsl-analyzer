@@ -778,6 +778,96 @@ mod tests {
         assert!(assigns[0].message.contains("Открытый"), "got: {}", assigns[0].message);
     }
 
+    /// A managed form whose main attribute `Объект` has the type `main_type`.
+    fn form_xml_with_main_attribute(main_type: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.10">
+    <Attributes>
+        <Attribute name="Объект" id="1">
+            <Type>
+                <v8:Type>{main_type}</v8:Type>
+            </Type>
+            <MainAttribute>true</MainAttribute>
+        </Attribute>
+    </Attributes>
+</Form>"#
+        )
+    }
+
+    fn form_umc_with_main_attribute(main_type: &str, form_source: &str) -> Vec<String> {
+        crate::test_utils::check_form_with_form_xml(
+            form_source,
+            &form_xml_with_main_attribute(main_type),
+        )
+        .into_iter()
+        .filter(|d| d.code == DiagnosticCode::UnresolvedMethodCall)
+        .map(|d| d.message)
+        .collect()
+    }
+
+    /// The main attribute mixes its form extension into the form, and the extension's
+    /// methods are members of the form value: `ЭтотОбъект.Прочитать()` in an object form
+    /// is the platform's `Прочитать` of the extension, not a method the module lacks.
+    /// Checked on 8.3.17.1549 and 8.3.27.2214: in a form whose main attribute carries
+    /// such an extension, `ЭтотОбъект.Прочитать()` and `ЭтаФорма.Записать()` run.
+    #[test]
+    fn form_self_call_to_a_method_of_the_main_attribute_extension_is_silent() {
+        let module = "&НаКлиенте\nПроцедура Обновить()\n    ЭтотОбъект.Прочитать();\n    ЭтаФорма.Записать();\nКонецПроцедуры\n";
+        for main_type in
+            ["cfg:CatalogObject.Товары", "cfg:DocumentObject.Заказ", "cfg:ConstantsSet"]
+        {
+            let umc = form_umc_with_main_attribute(main_type, module);
+            assert!(
+                umc.is_empty(),
+                "a method of the form extension for {main_type} is a member of the form, \
+                 got: {umc:?}"
+            );
+        }
+
+        let report = form_umc_with_main_attribute(
+            "cfg:ReportObject.Продажи",
+            "&НаКлиенте\nПроцедура Показать()\n    ЭтаФорма.УстановитьТекущийВариант(\"Основной\");\nКонецПроцедуры\n",
+        );
+        assert!(report.is_empty(), "a report form has the report extension, got: {report:?}");
+    }
+
+    /// The other half: the extension is the main attribute's and nobody else's. A data
+    /// processor form has no `Прочитать` — checked on 8.3.17.1549 and 8.3.27.2214, the
+    /// same call fails there with «Метод объекта не обнаружен (Прочитать)» — and a name no
+    /// extension has stays a miss in an object form too.
+    #[test]
+    fn form_self_call_outside_the_main_attribute_extension_is_still_reported() {
+        let processor = form_umc_with_main_attribute(
+            "cfg:DataProcessorObject.Загрузка",
+            "&НаКлиенте\nПроцедура Обновить()\n    ЭтотОбъект.Прочитать();\nКонецПроцедуры\n",
+        );
+        assert_eq!(processor.len(), 1, "a data processor form has no Прочитать: {processor:?}");
+        assert!(processor[0].contains("Прочитать"), "got: {processor:?}");
+
+        let catalog = form_umc_with_main_attribute(
+            "cfg:CatalogObject.Товары",
+            "&НаКлиенте\nПроцедура Обновить()\n    ЭтотОбъект.НетТакогоМетода();\nКонецПроцедуры\n",
+        );
+        assert_eq!(catalog.len(), 1, "no extension has this method: {catalog:?}");
+        assert!(catalog[0].contains("НетТакогоМетода"), "got: {catalog:?}");
+    }
+
+    /// The extension answers only for a name the module does not declare: a module's
+    /// own exported `Записать` is still the method the self call reaches, so the call
+    /// is checked against that declaration's signature.
+    #[test]
+    fn form_self_call_to_own_method_named_like_an_extension_method_keeps_its_declaration() {
+        let arg_count: Vec<_> = crate::test_utils::check_form_with_form_xml(
+            "&НаКлиенте\nПроцедура Записать(Параметр) Экспорт\nКонецПроцедуры\n\n&НаКлиенте\nПроцедура Обновить()\n    ЭтаФорма.Записать(1, 2);\nКонецПроцедуры\n",
+            &form_xml_with_main_attribute("cfg:CatalogObject.Товары"),
+        )
+        .into_iter()
+        .filter(|d| d.code == DiagnosticCode::MismatchedArgCount)
+        .collect();
+        assert_eq!(arg_count.len(), 1, "the local signature takes one argument: {arg_count:?}");
+    }
+
     fn platform_umc(code: &str) -> Vec<String> {
         check_hir_diagnostic(code)
             .into_iter()
