@@ -4155,6 +4155,15 @@ impl<'db> InferenceContext<'db> {
                     // exactly as the equivalent bare call, and report the miss:
                     // unlike a bare name, a self receiver has nowhere else to look.
                     if let Some(self_name) = self.form_self_receiver_name(base_id) {
+                        // The extension the main attribute mixes into the form
+                        // (`Прочитать`/`Записать` of an object form,
+                        // `УстановитьТекущийВариант` of a report form) is part of the
+                        // form value, ahead of the module's own methods exactly like the
+                        // form type's members above.
+                        if self.implicit_receiver_owns_method(&method_name) {
+                            self.expr_types.insert(callee, self.db.unknown());
+                            return self.db.unknown();
+                        }
                         let result = self
                             .infer_form_self_call(&self_name, &method_name, args, callee)
                             .unwrap_or_else(|| {
