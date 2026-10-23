@@ -2348,12 +2348,25 @@ impl<'db> InferenceContext<'db> {
     /// served corpus. A homonym is refused here as well as by the verification itself, so the
     /// verdict does not rest on an unseen detail of the other module's contract.
     fn is_closed_platform_object(&self, ty: TypeId) -> bool {
-        let TypeKind::PlatformObject(facet) = self.db.lookup_type(ty) else {
+        let Some(name) = self.closed_platform_type_candidate(ty) else {
             return false;
         };
         let platform = bsl_platform::PlatformData::instance();
-        platform.platform_type_member_surface_verified(&facet.name)
-            && !platform.is_ambiguous_type_name(&facet.name)
+        platform.platform_type_member_surface_verified(&name)
+            && !platform.is_ambiguous_type_name(&name)
+    }
+
+    /// The platform type name a receiver answers to when its member surface may be judged
+    /// against the attestations: a platform object by its own name, and a value table, which
+    /// the walk keeps as a kind of its own to carry its columns, by the platform type it is.
+    /// The columns live on the rows, so the table's own members are the platform's whatever
+    /// the columns.
+    fn closed_platform_type_candidate(&self, ty: TypeId) -> Option<String> {
+        match self.db.lookup_type(ty) {
+            TypeKind::PlatformObject(facet) => Some(facet.name.clone()),
+            TypeKind::ValueTable(_) => Some("ТаблицаЗначений".to_string()),
+            _ => None,
+        }
     }
 
     /// True when every type `receiver_expr` can hold on the paths reaching it is a closed
@@ -4313,10 +4326,9 @@ impl<'db> InferenceContext<'db> {
                             method_name: method_name.clone(),
                             kind: UnresolvedMethodKind::MethodNotFound,
                         });
-                    } else if let Some(platform_type) = match self.db.lookup_type(receiver_ty) {
-                        TypeKind::PlatformObject(facet) => Some(facet.name.clone()),
-                        _ => None,
-                    } {
+                    } else if let Some(platform_type) =
+                        self.closed_platform_type_candidate(receiver_ty)
+                    {
                         // A platform type whose member surface is attested as
                         // complete is a closed receiver: the extract lists every
                         // method it has, so a miss is the platform's own answer

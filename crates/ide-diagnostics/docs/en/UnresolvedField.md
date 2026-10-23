@@ -32,6 +32,8 @@ Area = Spreadsheet.CurrentArea;
 None = Area.CurrentArea; // <-- a cell area has no such member
 ```
 
+A value table built by `New ValueTable` on every path counts as the attested type `ValueTable`; its columns belong to its rows, not to the table.
+
 ## Examples
 
 Incorrect:
