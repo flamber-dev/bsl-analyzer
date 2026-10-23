@@ -198,52 +198,72 @@ const COPYING_METHODS: &[&str] = &[
     "unloadcolumn",
 ];
 
+/// Methods that put their arguments into the collection they are called on.
+const STORING_METHODS: &[&str] = &["добавить", "add", "вставить", "insert", "установить", "set"];
+
+/// Platform function that writes the properties of its first argument.
+const FILL_PROPERTY_VALUES: &[&str] = &["заполнитьзначениясвойств", "fillpropertyvalues"];
+
 /// Parameters each method of the module changes in place, so that the caller sees the change.
 ///
-/// A parameter is changed when a field or element reached from it is assigned (`П.X = ...`,
-/// `П[...] = ...`, `П.Строки.Найти(1).Сумма = ...`), when a mutating collection method is called
-/// on something reached from it (`П.Добавить(...)`, `П.Товары.Очистить()`), or when it is passed
-/// to a method of the module that changes the matching parameter. A local that holds a part of
-/// the parameter (`Х = П.Товары`, `Для Каждого Х Из П`) changes the parameter too, until it or
-/// the parameter is assigned another value.
+/// Values are followed as sets of roots: a parameter `п` stands for the caller's value, `%п`
+/// for the values stored inside it; `#г` and `%г` stand for the value a module variable `г`
+/// holds when the method starts and the values stored inside it. A change is an assignment of a
+/// field or element (`П.X = ...`, `П[...] = ...`), a mutating collection method
+/// (`П.Добавить(...)`), `ЗаполнитьЗначенияСвойств(П, ...)` or a call of a module method that
+/// changes the matching argument. Locals carry roots statement by statement (`Х = П.Товары`,
+/// `Для Каждого Х Из П`, `Л.Товары = П`, `Х = ПолучитьТовары(П)`) until they are assigned
+/// another value.
 struct MutationScan {
     mutated: FxHashMap<hir::MethodKey, FxHashSet<String>>,
 }
 
 impl MutationScan {
     fn new(module_bodies: &hir::ModuleBodies, symbol_tree: &hir::SymbolTree) -> Self {
-        let methods: FxHashMap<String, (hir::MethodKey, Vec<String>)> = symbol_tree
-            .methods()
-            .map(|method| {
-                let params = method.params.iter().map(|p| p.name.as_str().fold_lower()).collect();
-                (method.name.as_str().fold_lower(), (method.id.local_id, params))
-            })
-            .collect();
-        let bodies: Vec<_> = symbol_tree
-            .methods()
-            .filter_map(|method| {
-                let key = method.id.local_id;
-                module_bodies.lower_result(key).map(|lower_result| (key, lower_result.body()))
-            })
-            .collect();
+        let module_vars: FxHashSet<String> =
+            symbol_tree.variables().map(|var| var.name.as_str().fold_lower()).collect();
+        let mut methods = FxHashMap::default();
+        let mut bodies = Vec::new();
+        for method in symbol_tree.methods() {
+            let key = method.id.local_id;
+            let params: Vec<String> =
+                method.params.iter().map(|p| p.name.as_str().fold_lower()).collect();
+            if let Some(lower_result) = module_bodies.lower_result(key) {
+                bodies.push((key, lower_result.body(), params.clone()));
+            }
+            methods.insert(method.name.as_str().fold_lower(), (key, params));
+        }
 
-        // Methods may call each other recursively, so the sets grow together until none changes;
-        // a callee's set only ever grows, so every rescan finds a superset of the previous one.
-        let mut mutated: FxHashMap<hir::MethodKey, FxHashSet<String>> = FxHashMap::default();
+        // Methods may call each other recursively, so the summaries grow together until none
+        // changes; every root set only grows, so the iteration ends.
+        let mut facts: FxHashMap<hir::MethodKey, MethodFacts> = FxHashMap::default();
         loop {
             let mut grew = false;
-            for &(key, body) in &bodies {
-                let found = BodyScan::run(body, &methods, &mutated);
-                let known = mutated.entry(key).or_default();
-                if found.len() != known.len() {
-                    *known = found;
+            for (key, body, params) in &bodies {
+                let found = BodyScan::run(body, params, &module_vars, &methods, &facts);
+                if facts.get(key) != Some(&found) {
+                    facts.insert(*key, found);
                     grew = true;
                 }
             }
             if !grew {
-                return Self { mutated };
+                break;
             }
         }
+
+        let mutated = bodies
+            .iter()
+            .map(|(key, _, params)| {
+                let changed = &facts[key].changed;
+                let mutated = params
+                    .iter()
+                    .filter(|p| changed.contains(*p) || changed.contains(&contents_root(p)))
+                    .cloned()
+                    .collect();
+                (*key, mutated)
+            })
+            .collect();
+        Self { mutated }
     }
 
     fn mutated(&self, key: hir::MethodKey) -> Option<&FxHashSet<String>> {
@@ -251,239 +271,521 @@ impl MutationScan {
     }
 }
 
-/// Local name -> parameters whose caller value it may hold at the current statement.
-type Aliases = FxHashMap<String, FxHashSet<String>>;
+fn contents_root(name: &str) -> String {
+    format!("%{name}")
+}
+
+fn entry_root(module_var: &str) -> String {
+    format!("#{module_var}")
+}
+
+type Roots = FxHashSet<String>;
+
+/// What a call of a method does to the caller's values, in roots of that method.
+#[derive(Default, PartialEq, Eq)]
+struct MethodFacts {
+    changed: Roots,
+    returns: Value,
+    /// Value each parameter and module variable carries when the method ends.
+    exit: FxHashMap<String, Value>,
+}
+
+/// Roots of the value itself and of the values stored inside it.
+#[derive(Clone, Default, PartialEq, Eq)]
+struct Value {
+    holds: Roots,
+    contains: Roots,
+}
+
+impl Value {
+    fn join(&mut self, other: Value) {
+        self.holds.extend(other.holds);
+        self.contains.extend(other.contains);
+    }
+
+    /// A field, element or method result of this value: one of the values stored inside it.
+    fn part(self) -> Value {
+        let mut all = self.holds;
+        all.extend(self.contains);
+        Value { holds: all.clone(), contains: all }
+    }
+}
+
+/// Name -> value it may have at the current statement.
+type State = FxHashMap<String, Value>;
+
+fn join(states: impl IntoIterator<Item = State>) -> State {
+    let mut joined = State::default();
+    for state in states {
+        for (name, value) in state {
+            joined.entry(name).or_default().join(value);
+        }
+    }
+    joined
+}
+
+#[derive(Default)]
+struct LoopFrame {
+    breaks: Option<State>,
+    continues: Option<State>,
+}
 
 struct BodyScan<'a> {
     body: &'a hir::Body,
+    module_vars: FxHashSet<String>,
     methods: &'a FxHashMap<String, (hir::MethodKey, Vec<String>)>,
-    callee_mutated: &'a FxHashMap<hir::MethodKey, FxHashSet<String>>,
-    changed: FxHashSet<String>,
+    facts: &'a FxHashMap<hir::MethodKey, MethodFacts>,
+    /// With `Перейти` any statement may follow any other: assignments only add roots.
+    weak: bool,
+    loops: Vec<LoopFrame>,
+    /// States an exception handler of each enclosing `Попытка` may start from.
+    tries: Vec<State>,
+    exits: State,
+    result: MethodFacts,
 }
 
 impl<'a> BodyScan<'a> {
     fn run(
         body: &'a hir::Body,
+        params: &[String],
+        module_vars: &FxHashSet<String>,
         methods: &'a FxHashMap<String, (hir::MethodKey, Vec<String>)>,
-        callee_mutated: &'a FxHashMap<hir::MethodKey, FxHashSet<String>>,
-    ) -> FxHashSet<String> {
-        let mut scan = Self { body, methods, callee_mutated, changed: FxHashSet::default() };
-        let mut aliases: Aliases = body
-            .params()
-            .map(|param| {
-                let name = body.binding(param).name.as_str().fold_lower();
-                (name.clone(), FxHashSet::from_iter([name]))
+        facts: &'a FxHashMap<hir::MethodKey, MethodFacts>,
+    ) -> MethodFacts {
+        let locals: FxHashSet<String> = body
+            .stmts_iter()
+            .filter_map(|(_, stmt)| match stmt {
+                Stmt::VarDecl { bindings } => Some(bindings),
+                _ => None,
             })
+            .flatten()
+            .map(|&binding| body.binding_idx(binding).name.as_str().fold_lower())
+            .chain(params.iter().cloned())
             .collect();
-        scan.stmts(body.body_stmts_typed(), &mut aliases);
-        scan.changed
+        let module_vars: FxHashSet<String> =
+            module_vars.iter().filter(|var| !locals.contains(*var)).cloned().collect();
+
+        let mut entry = State::default();
+        for param in params {
+            let value = Value {
+                holds: Roots::from_iter([param.clone()]),
+                contains: Roots::from_iter([contents_root(param)]),
+            };
+            entry.insert(param.clone(), value);
+        }
+        for var in &module_vars {
+            let value = Value {
+                holds: Roots::from_iter([entry_root(var)]),
+                contains: Roots::from_iter([contents_root(var)]),
+            };
+            entry.insert(var.clone(), value);
+        }
+
+        let weak = body.stmts_iter().any(|(_, stmt)| matches!(stmt, Stmt::Goto(_)));
+        let mut scan = Self {
+            body,
+            module_vars,
+            methods,
+            facts,
+            weak,
+            loops: Vec::new(),
+            tries: Vec::new(),
+            exits: State::default(),
+            result: MethodFacts::default(),
+        };
+        let mut state = entry;
+        if weak {
+            scan.repeat(&mut state, |scan, state| scan.stmts(body.body_stmts_typed(), state));
+        } else {
+            scan.stmts(body.body_stmts_typed(), &mut state);
+        }
+
+        let exit = join([std::mem::take(&mut scan.exits), state]);
+        scan.result.exit = params
+            .iter()
+            .chain(&scan.module_vars)
+            .map(|name| (name.clone(), exit.get(name).cloned().unwrap_or_default()))
+            .collect();
+        scan.result
     }
 
-    fn stmts(&mut self, stmts: &[hir::StmtIdx], aliases: &mut Aliases) {
+    fn stmts(&mut self, stmts: &[hir::StmtIdx], state: &mut State) {
         for &stmt in stmts {
-            self.stmt(self.body.stmt_idx(stmt), aliases);
+            self.stmt(self.body.stmt_idx(stmt), state);
         }
     }
 
     /// Runs `stmts` from a copy of `entry` and returns the state they leave.
-    fn branch(&mut self, stmts: &[hir::StmtIdx], entry: &Aliases) -> Aliases {
-        let mut aliases = entry.clone();
-        self.stmts(stmts, &mut aliases);
-        aliases
+    fn branch(&mut self, stmts: &[hir::StmtIdx], entry: &State) -> State {
+        let mut state = entry.clone();
+        self.stmts(stmts, &mut state);
+        state
     }
 
-    fn stmt(&mut self, stmt: &Stmt, aliases: &mut Aliases) {
+    fn stmt(&mut self, stmt: &Stmt, state: &mut State) {
+        for handler_entry in &mut self.tries {
+            *handler_entry = join([std::mem::take(handler_entry), state.clone()]);
+        }
         match stmt {
-            Stmt::Expr(expr)
-            | Stmt::Execute { expr }
-            | Stmt::Return { value: Some(expr) }
-            | Stmt::Raise { value: Some(expr) } => self.expr(*expr, aliases),
+            Stmt::Expr(expr) | Stmt::Execute { expr } => self.expr(*expr, state),
+            Stmt::Return { value } => {
+                if let Some(value) = value {
+                    self.expr(*value, state);
+                    let returned = self.value(*value, state);
+                    self.result.returns.join(returned);
+                }
+                self.exit(state);
+            }
+            Stmt::Raise { value } => {
+                if let Some(value) = value {
+                    self.expr(*value, state);
+                }
+                self.exit(state);
+            }
             Stmt::AddHandler { event, handler } | Stmt::RemoveHandler { event, handler } => {
-                self.expr(*event, aliases);
-                self.expr(*handler, aliases);
+                self.expr(*event, state);
+                self.expr(*handler, state);
             }
             Stmt::Assign { target, value } => {
-                self.expr(*value, aliases);
+                self.expr(*value, state);
                 match self.body.expr_idx(*target) {
                     Expr::Path(name) => {
-                        let holds = self.roots(*value, aliases);
-                        rebind(aliases, name.as_str().fold_lower(), holds);
+                        let value = self.value(*value, state);
+                        self.rebind(state, name.as_str().fold_lower(), value);
                     }
-                    Expr::Field { .. } | Expr::Index { .. } => {
-                        self.expr(*target, aliases);
-                        let changed = self.roots(*target, aliases);
-                        self.changed.extend(changed);
+                    Expr::Field { base, .. } | Expr::Index { base, .. } => {
+                        let base = *base;
+                        self.expr(*target, state);
+                        let stored = self.value(*value, state);
+                        self.change(base, state);
+                        self.store(base, stored, state);
                     }
-                    _ => self.expr(*target, aliases),
+                    _ => self.expr(*target, state),
                 }
             }
             Stmt::If(if_stmt) => {
-                self.expr(if_stmt.condition, aliases);
-                let mut exits = vec![self.branch(&if_stmt.then_branch, aliases)];
+                self.expr(if_stmt.condition, state);
+                let mut exits = vec![self.branch(&if_stmt.then_branch, state)];
                 for (condition, stmts) in if_stmt.elsif_branches.iter() {
-                    self.expr(*condition, aliases);
-                    exits.push(self.branch(stmts, aliases));
+                    self.expr(*condition, state);
+                    exits.push(self.branch(stmts, state));
                 }
                 match &if_stmt.else_branch {
-                    Some(stmts) => exits.push(self.branch(stmts, aliases)),
-                    None => exits.push(aliases.clone()),
+                    Some(stmts) => exits.push(self.branch(stmts, state)),
+                    None => exits.push(state.clone()),
                 }
-                *aliases = join(exits);
+                *state = join(exits);
             }
             Stmt::PreprocIf(preproc) => {
                 let mut exits: Vec<_> =
-                    preproc.branches().map(|branch| self.branch(branch.stmts, aliases)).collect();
+                    preproc.branches().map(|branch| self.branch(branch.stmts, state)).collect();
                 if preproc.else_branch.is_none() {
-                    exits.push(aliases.clone());
+                    exits.push(state.clone());
                 }
-                *aliases = join(exits);
+                *state = join(exits);
             }
             Stmt::While { condition, body } => {
-                self.repeat(aliases, |scan, state| {
+                self.looped(state, |scan, state| {
                     scan.expr(*condition, state);
                     scan.stmts(body, state);
                 });
             }
             Stmt::For { var, from, to, body } => {
-                self.expr(*from, aliases);
-                self.expr(*to, aliases);
+                self.expr(*from, state);
+                self.expr(*to, state);
                 let var = self.body.binding_idx(*var).name.as_str().fold_lower();
-                self.repeat(aliases, |scan, state| {
-                    rebind(state, var.clone(), FxHashSet::default());
+                self.looped(state, |scan, state| {
+                    scan.rebind(state, var.clone(), Value::default());
                     scan.stmts(body, state);
                 });
             }
             Stmt::ForEach { var, collection, body } => {
-                self.expr(*collection, aliases);
-                let holds = self.roots(*collection, aliases);
+                self.expr(*collection, state);
+                let element = self.value(*collection, state).part();
                 let var = self.body.binding_idx(*var).name.as_str().fold_lower();
-                self.repeat(aliases, |scan, state| {
-                    rebind(state, var.clone(), holds.clone());
+                self.looped(state, |scan, state| {
+                    scan.rebind(state, var.clone(), element.clone());
                     scan.stmts(body, state);
                 });
             }
             Stmt::Try { body, except } => {
-                let after_try = self.branch(body, aliases);
-                // The handler may start after any statement of the block.
-                let handler_entry = join(vec![aliases.clone(), after_try.clone()]);
+                self.tries.push(state.clone());
+                let after_try = self.branch(body, state);
+                let handler_entry = self.tries.pop().unwrap_or_default();
+                let handler_entry = join([handler_entry, after_try.clone()]);
                 let after_except = self.branch(except, &handler_entry);
-                *aliases = join(vec![after_try, after_except]);
+                *state = join([after_try, after_except]);
             }
-            _ => {}
+            Stmt::Break => {
+                if let Some(frame) = self.loops.last_mut() {
+                    let breaks = frame.breaks.take().unwrap_or_default();
+                    frame.breaks = Some(join([breaks, state.clone()]));
+                }
+            }
+            Stmt::Continue => {
+                if let Some(frame) = self.loops.last_mut() {
+                    let continues = frame.continues.take().unwrap_or_default();
+                    frame.continues = Some(join([continues, state.clone()]));
+                }
+            }
+            Stmt::VarDecl { .. } | Stmt::Goto(_) | Stmt::Label(_) => {}
         }
     }
 
-    /// Runs a loop body until the aliases it can leave stop growing; the loop may also run zero
-    /// times, so the entry state stays part of the result.
-    fn repeat(&mut self, aliases: &mut Aliases, mut body: impl FnMut(&mut Self, &mut Aliases)) {
+    fn exit(&mut self, state: &State) {
+        self.exits = join([std::mem::take(&mut self.exits), state.clone()]);
+    }
+
+    fn rebind(&self, state: &mut State, name: String, value: Value) {
+        if self.weak {
+            state.entry(name).or_default().join(value);
+        } else {
+            state.insert(name, value);
+        }
+    }
+
+    /// Runs a loop body until the state it can leave stops growing; the loop may also run zero
+    /// times, and `Прервать` leaves it from the middle.
+    fn looped(&mut self, state: &mut State, mut body: impl FnMut(&mut Self, &mut State)) {
         loop {
-            let mut state = aliases.clone();
-            body(self, &mut state);
-            let joined = join(vec![aliases.clone(), state]);
-            if joined == *aliases {
+            self.loops.push(LoopFrame::default());
+            let mut end = state.clone();
+            body(self, &mut end);
+            let frame = self.loops.pop().unwrap_or_default();
+            let next = join([state.clone(), end].into_iter().chain(frame.continues));
+            if next == *state {
+                *state = join([next].into_iter().chain(frame.breaks));
                 return;
             }
-            *aliases = joined;
+            *state = next;
         }
     }
 
-    fn expr(&mut self, expr_idx: hir::ExprIdx, aliases: &Aliases) {
+    /// Runs the whole body until the state stops growing.
+    fn repeat(&mut self, state: &mut State, mut body: impl FnMut(&mut Self, &mut State)) {
+        loop {
+            let mut end = state.clone();
+            body(self, &mut end);
+            let next = join([state.clone(), end]);
+            if next == *state {
+                return;
+            }
+            *state = next;
+        }
+    }
+
+    /// Walks the sub-expressions of `expr` in evaluation order and applies the calls among them.
+    fn expr(&mut self, expr_idx: hir::ExprIdx, state: &mut State) {
         match self.body.expr_idx(expr_idx) {
             Expr::BinaryOp { lhs, rhs, .. } => {
-                self.expr(*lhs, aliases);
-                self.expr(*rhs, aliases);
+                self.expr(*lhs, state);
+                self.expr(*rhs, state);
             }
-            Expr::UnaryOp { expr, .. } | Expr::Await { expr } => self.expr(*expr, aliases),
+            Expr::UnaryOp { expr, .. } | Expr::Await { expr } => self.expr(*expr, state),
             Expr::Ternary { condition, then_expr, else_expr } => {
-                self.expr(*condition, aliases);
-                self.expr(*then_expr, aliases);
-                self.expr(*else_expr, aliases);
+                self.expr(*condition, state);
+                self.expr(*then_expr, state);
+                self.expr(*else_expr, state);
             }
             Expr::Index { base, index } => {
-                self.expr(*base, aliases);
-                self.expr(*index, aliases);
+                self.expr(*base, state);
+                self.expr(*index, state);
             }
-            Expr::Field { base, .. } => self.expr(*base, aliases),
+            Expr::Field { base, .. } => self.expr(*base, state),
             Expr::New { args, .. } | Expr::Array(args) => {
                 for &arg in args.iter() {
-                    self.expr(arg, aliases);
+                    self.expr(arg, state);
                 }
             }
             Expr::MethodCall { receiver, method, args } => {
-                self.expr(*receiver, aliases);
+                self.expr(*receiver, state);
                 for &arg in args.iter() {
-                    self.expr(arg, aliases);
+                    self.expr(arg, state);
                 }
-                self.mutating_call(*receiver, method.as_str(), aliases);
+                self.receiver_call(*receiver, method.as_str(), args, state);
             }
             Expr::Call { callee, args } => {
                 for &arg in args.iter() {
-                    self.expr(arg, aliases);
+                    self.expr(arg, state);
                 }
                 match self.body.expr_idx(*callee) {
                     // `П.Добавить(...)` is lowered as a call of the field `Добавить` of `П`.
                     Expr::Field { base, field } => {
-                        self.expr(*base, aliases);
-                        self.mutating_call(*base, field.as_str(), aliases);
+                        self.expr(*base, state);
+                        self.receiver_call(*base, field.as_str(), args, state);
                     }
-                    Expr::Path(name) => self.module_method_call(name.as_str(), args, aliases),
-                    _ => self.expr(*callee, aliases),
+                    Expr::Path(name) => self.bare_call(name.as_str(), args, state),
+                    _ => self.expr(*callee, state),
                 }
             }
             Expr::Missing | Expr::Literal(_) | Expr::Path(_) => {}
         }
     }
 
-    fn mutating_call(&mut self, receiver: hir::ExprIdx, method: &str, aliases: &Aliases) {
-        if MUTATING_METHODS.contains(&method.fold_lower().as_str()) {
-            let changed = self.roots(receiver, aliases);
-            self.changed.extend(changed);
+    fn receiver_call(
+        &mut self,
+        receiver: hir::ExprIdx,
+        method: &str,
+        args: &[hir::ExprIdx],
+        state: &mut State,
+    ) {
+        let method = method.fold_lower();
+        if !MUTATING_METHODS.contains(&method.as_str()) {
+            return;
         }
-    }
-
-    /// A call of a module method changes every argument passed to a parameter it changes.
-    /// `Знач` of the callee does not matter here: inside one server call it copies the
-    /// reference, not the collection, so a change of the contents still reaches the argument.
-    fn module_method_call(&mut self, callee: &str, args: &[hir::ExprIdx], aliases: &Aliases) {
-        let Some((key, params)) = self.methods.get(&callee.fold_lower()) else {
-            return;
-        };
-        let Some(callee_mutated) = self.callee_mutated.get(key) else {
-            return;
-        };
-        for (&arg, param) in args.iter().zip(params) {
-            if callee_mutated.contains(param) {
-                let changed = self.roots(arg, aliases);
-                self.changed.extend(changed);
+        self.change(receiver, state);
+        if STORING_METHODS.contains(&method.as_str()) {
+            for &arg in args {
+                let stored = self.value(arg, state).part();
+                self.store(receiver, stored, state);
             }
         }
     }
 
-    /// Parameters whose caller value `expr` may reach.
-    fn roots(&self, expr: hir::ExprIdx, aliases: &Aliases) -> FxHashSet<String> {
-        access_chain_root(self.body, hir::ExprId::from_idx(expr))
-            .and_then(|name| aliases.get(&name).cloned())
-            .unwrap_or_default()
-    }
-}
-
-fn rebind(aliases: &mut Aliases, name: String, holds: FxHashSet<String>) {
-    if holds.is_empty() {
-        aliases.remove(&name);
-    } else {
-        aliases.insert(name, holds);
-    }
-}
-
-/// May-alias union of the states several control-flow paths leave.
-fn join(states: Vec<Aliases>) -> Aliases {
-    let mut joined = Aliases::default();
-    for state in states {
-        for (name, holds) in state {
-            joined.entry(name).or_default().extend(holds);
+    fn bare_call(&mut self, callee: &str, args: &[hir::ExprIdx], state: &mut State) {
+        let callee = callee.fold_lower();
+        let Some((key, params)) = self.methods.get(&callee) else {
+            if !FILL_PROPERTY_VALUES.contains(&callee.as_str()) {
+                return;
+            }
+            if let Some((&target, sources)) = args.split_first() {
+                self.change(target, state);
+                if let Some(&source) = sources.first() {
+                    let stored = self.value(source, state).part();
+                    self.store(target, stored, state);
+                }
+            }
+            return;
+        };
+        let Some(facts) = self.facts.get(key) else {
+            return;
+        };
+        let changed = self.translate(&facts.changed, params, args, state);
+        self.result.changed.extend(changed);
+        // `Знач` of the callee does not matter: inside one server call it copies the reference,
+        // not the collection, so a change of the contents still reaches the argument.
+        let mut updates = Vec::new();
+        for (name, value) in &facts.exit {
+            let translated = Value {
+                holds: self.translate(&value.holds, params, args, state),
+                contains: self.translate(&value.contains, params, args, state),
+            };
+            updates.push((name.clone(), translated));
+        }
+        for (name, value) in updates {
+            if let Some(index) = params.iter().position(|param| *param == name) {
+                // The callee may store values inside its argument; a new value it assigns to the
+                // parameter itself never reaches the argument.
+                if let Some(&arg) = args.get(index) {
+                    let stored = Value { holds: value.contains.clone(), contains: value.contains };
+                    self.store(arg, stored, state);
+                }
+            } else if self.module_vars.contains(&name) {
+                self.rebind(state, name, value);
+            }
         }
     }
-    joined
+
+    /// Roots of the callee mapped to roots of this method at the call.
+    fn translate(
+        &self,
+        roots: &Roots,
+        params: &[String],
+        args: &[hir::ExprIdx],
+        state: &State,
+    ) -> Roots {
+        let mut translated = Roots::default();
+        for root in roots {
+            let (contents, name) = match root.strip_prefix('%') {
+                Some(name) => (true, name),
+                None => (false, root.strip_prefix('#').unwrap_or(root)),
+            };
+            let value = match params.iter().position(|param| param == name) {
+                Some(index) => match args.get(index) {
+                    Some(&arg) => self.value(arg, state),
+                    None => continue,
+                },
+                None if self.module_vars.contains(name) => {
+                    state.get(name).cloned().unwrap_or_default()
+                }
+                // A module variable this method shadows keeps the value it had on entry.
+                None => {
+                    translated.insert(root.clone());
+                    continue;
+                }
+            };
+            translated.extend(if contents { value.contains } else { value.holds });
+        }
+        translated
+    }
+
+    /// Marks the value of `expr` as changed in place.
+    fn change(&mut self, expr: hir::ExprIdx, state: &State) {
+        let changed = self.value(expr, state).holds;
+        self.result.changed.extend(changed);
+    }
+
+    /// Records that `stored` is put inside the value of `container`.
+    fn store(&self, container: hir::ExprIdx, stored: Value, state: &mut State) {
+        let Some(root) = access_chain_root(self.body, hir::ExprId::from_idx(container)) else {
+            return;
+        };
+        let entry = state.entry(root).or_default();
+        entry.contains.extend(stored.holds);
+        entry.contains.extend(stored.contains);
+    }
+
+    /// Roots the value of `expr` may reach.
+    fn value(&self, expr: hir::ExprIdx, state: &State) -> Value {
+        match self.body.expr_idx(expr) {
+            Expr::Path(name) => state.get(&name.as_str().fold_lower()).cloned().unwrap_or_default(),
+            Expr::Field { base, .. } | Expr::Index { base, .. } => self.value(*base, state).part(),
+            Expr::MethodCall { receiver, method, .. } => {
+                self.method_result(*receiver, method.as_str(), state)
+            }
+            Expr::Call { callee, args } => match self.body.expr_idx(*callee) {
+                Expr::Field { base, field } => self.method_result(*base, field.as_str(), state),
+                Expr::Path(name) => {
+                    let Some((key, params)) = self.methods.get(&name.as_str().fold_lower()) else {
+                        return Value::default();
+                    };
+                    let Some(facts) = self.facts.get(key) else {
+                        return Value::default();
+                    };
+                    Value {
+                        holds: self.translate(&facts.returns.holds, params, args, state),
+                        contains: self.translate(&facts.returns.contains, params, args, state),
+                    }
+                }
+                _ => Value::default(),
+            },
+            Expr::Ternary { then_expr, else_expr, .. } => {
+                let mut value = self.value(*then_expr, state);
+                value.join(self.value(*else_expr, state));
+                value
+            }
+            Expr::New { args, .. } | Expr::Array(args) => {
+                let mut contains = Roots::default();
+                for &arg in args.iter() {
+                    let part = self.value(arg, state).part();
+                    contains.extend(part.holds);
+                }
+                Value { holds: Roots::default(), contains }
+            }
+            Expr::Await { expr } => self.value(*expr, state),
+            Expr::Missing | Expr::Literal(_) | Expr::BinaryOp { .. } | Expr::UnaryOp { .. } => {
+                Value::default()
+            }
+        }
+    }
+
+    /// A method result is a part of the receiver unless the method copies it.
+    fn method_result(&self, receiver: hir::ExprIdx, method: &str, state: &State) -> Value {
+        if COPYING_METHODS.contains(&method.fold_lower().as_str()) {
+            return Value::default();
+        }
+        self.value(receiver, state).part()
+    }
 }
 
 /// Name at the root of a `П.X[...].Метод()...` chain of field, index and method-call accesses.
