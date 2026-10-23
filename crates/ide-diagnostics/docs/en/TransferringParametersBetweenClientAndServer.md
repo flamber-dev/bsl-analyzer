@@ -14,6 +14,8 @@ The current implementation reports server methods when all of these conditions h
 - the parameter is not marked with `Val`;
 - the parameter is not assigned inside the server method body.
 
+If the server method changes the parameter in place - assigns a field or an element (`P.X = ...`, `P[...] = ...`, also deeper `P.X.Y = ...`) or calls a mutating collection method on it or on its field (`Add`/`Добавить`, `Insert`/`Вставить`, `Delete`/`Удалить`, `Clear`/`Очистить`, `Set`/`Установить`, `Load`/`Загрузить`, `LoadValues`/`ЗагрузитьЗначения`, `LoadColumn`/`ЗагрузитьКолонку`, `FillValues`/`ЗаполнитьЗначения`, `FillChecks`/`ЗаполнитьПометки`, `GroupBy`/`Свернуть`, `Sort`/`Сортировать`, `SortByValue`/`СортироватьПоЗначению`, `SortByPresentation`/`СортироватьПоПредставлению`, `Move`/`Сдвинуть`) - the caller reads that data after the call, and `Val` would silently drop it. Such a parameter is still reported (the standard does not recommend returning values from the server through parameters), but with a different message - return the data from a function instead of changing the parameter - and without the `Val` quick fix.
+
 ## Examples 
 <!-- This section contains examples for which the diagnostics work, and you can also give an example of how to fix the situation -->
 
