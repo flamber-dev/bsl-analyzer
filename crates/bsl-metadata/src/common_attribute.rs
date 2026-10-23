@@ -9,8 +9,9 @@
 //! Membership follows the platform rule (ITS, «Общие реквизиты»): an object listed in `Content`
 //! with `Use` or `DontUse` is in or out regardless of anything else; an object not listed, or
 //! listed with `Auto`, follows the attribute's `AutoUse`. Only the kinds that have fields are
-//! ever reported as members; everything else (constants, scheduled jobs, ...) may sit in
-//! `Content` but contributes no field this model could expose.
+//! ever reported as members; everything else (scheduled jobs, ...) may sit in `Content` but
+//! contributes no field this model could expose. A constant is a member like an object: its
+//! value manager (`КонстантаМенеджерЗначения.<Имя>`) carries the separator as a field.
 
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -127,12 +128,18 @@ impl ObjectCommonAttributes {
 /// Whether the platform lets a common attribute add a field to an object of this kind.
 ///
 /// The set is the ITS list of kinds a common attribute may include, narrowed to the kinds this
-/// model gives fields to. Constants, scheduled jobs and the like may sit in `Content` (a
-/// separator divides their data too) but expose no field to code or queries.
+/// model gives fields to. Scheduled jobs and the like may sit in `Content` (a separator divides
+/// their data too) but expose no field to code or queries. A constant does expose one: on
+/// 8.3.17 and 8.3.27 the value manager of a constant in a separator's composition (an explicit
+/// `Use`, or `AutoUse = Use` without a `DontUse`) reads and writes `МенеджерЗначения.<Разделитель>`,
+/// its value-manager module sees the bare name, and a query reads `Константа.<Имя>.<Разделитель>`;
+/// a constant outside the composition fails with "Поле объекта не обнаружено". The constant
+/// manager (`Константы.<Имя>`) has no such field — that type takes no metadata fields at all.
 pub fn kind_takes_common_attributes(mdo_type: MdoType) -> bool {
     matches!(
         mdo_type,
-        MdoType::Catalog
+        MdoType::Constant
+            | MdoType::Catalog
             | MdoType::Document
             | MdoType::ChartOfCharacteristicTypes
             | MdoType::ChartOfAccounts
@@ -269,6 +276,27 @@ impl CommonAttributeSet {
         if !kind_takes_common_attributes(mdo_type) {
             return ObjectCommonAttributes::default();
         }
+        let projected = self.project_extension_object(base, scope, mdo_type, object_name);
+        if mdo_type == MdoType::Constant {
+            // How an extension's separators reach its own or adopted constants was not checked
+            // against the platform: wherever an object of another kind would get a field or
+            // stay open, a constant's value manager asserts no field but stays open, so a miss
+            // on it is not reported as a defect.
+            return ObjectCommonAttributes {
+                fields: Vec::new(),
+                open: projected.open || !projected.fields.is_empty(),
+            };
+        }
+        projected
+    }
+
+    fn project_extension_object(
+        &self,
+        base: Option<&CommonAttributeSet>,
+        scope: ExtensionScope,
+        mdo_type: MdoType,
+        object_name: &str,
+    ) -> ObjectCommonAttributes {
         let mut out = ObjectCommonAttributes { fields: Vec::new(), open: self.unreadable };
 
         for local in &self.attributes {
@@ -514,9 +542,27 @@ mod tests {
 
     #[test]
     fn kinds_without_fields_never_take_the_attribute() {
-        let attr = attribute(true, &[(MdoType::Constant, "К", CommonAttributeUse::Use)]);
-        assert_eq!(attr.includes(MdoType::Constant, "К"), Some(false));
+        let attr = attribute(true, &[(MdoType::Enum, "П", CommonAttributeUse::Use)]);
         assert_eq!(attr.includes(MdoType::Enum, "П"), Some(false));
+        assert_eq!(attr.includes(MdoType::DataProcessor, "О"), Some(false));
+    }
+
+    #[test]
+    fn constant_membership_follows_content_and_auto_use() {
+        let explicit = attribute(
+            false,
+            &[
+                (MdoType::Constant, "Входит", CommonAttributeUse::Use),
+                (MdoType::Constant, "НеВходит", CommonAttributeUse::DontUse),
+            ],
+        );
+        assert_eq!(explicit.includes(MdoType::Constant, "Входит"), Some(true));
+        assert_eq!(explicit.includes(MdoType::Constant, "НеВходит"), Some(false));
+        assert_eq!(explicit.includes(MdoType::Constant, "НеУказана"), Some(false));
+
+        let auto = attribute(true, &[(MdoType::Constant, "НеВходит", CommonAttributeUse::DontUse)]);
+        assert_eq!(auto.includes(MdoType::Constant, "НеУказана"), Some(true));
+        assert_eq!(auto.includes(MdoType::Constant, "НеВходит"), Some(false));
     }
 
     #[test]
@@ -804,17 +850,50 @@ mod tests {
     }
 
     #[test]
-    fn constants_and_enums_never_acquire_extension_common_fields_or_open() {
+    fn enums_never_acquire_extension_common_fields_or_open() {
         let base = fixture_set("fixtures/extension_common_attributes/base");
         let mut local = fixture_set("fixtures/extension_common_attributes/extensions/explicit-use");
         local.unreadable = true;
         for scope in [ExtensionScope::InfoBase, ExtensionScope::DataSeparation] {
-            for kind in [MdoType::Constant, MdoType::Enum] {
-                let applied = local.for_extension_object(Some(&base), scope, kind, "NativeCatalog");
-                assert!(applied.fields.is_empty());
-                assert!(!applied.open);
-            }
+            let applied =
+                local.for_extension_object(Some(&base), scope, MdoType::Enum, "NativeCatalog");
+            assert!(applied.fields.is_empty());
+            assert!(!applied.open);
         }
+    }
+
+    #[test]
+    fn an_extension_constant_a_separator_may_reach_is_open_without_fields() {
+        let base = fixture_set("fixtures/extension_common_attributes/base");
+        let mut unreadable =
+            fixture_set("fixtures/extension_common_attributes/extensions/explicit-use");
+        unreadable.unreadable = true;
+        for scope in [ExtensionScope::InfoBase, ExtensionScope::DataSeparation] {
+            let applied =
+                unreadable.for_extension_object(Some(&base), scope, MdoType::Constant, "К");
+            assert!(applied.fields.is_empty());
+            assert!(applied.open);
+        }
+
+        let local = CommonAttributeSet {
+            attributes: vec![attribute(
+                false,
+                &[(MdoType::Constant, "Входит", CommonAttributeUse::Use)],
+            )],
+            unreadable: false,
+        };
+        let reached =
+            local.for_extension_object(None, ExtensionScope::InfoBase, MdoType::Constant, "Входит");
+        assert!(reached.fields.is_empty());
+        assert!(reached.open);
+        let unreached = local.for_extension_object(
+            None,
+            ExtensionScope::InfoBase,
+            MdoType::Constant,
+            "НеВходит",
+        );
+        assert!(unreached.fields.is_empty());
+        assert!(!unreached.open);
     }
 
     #[test]
