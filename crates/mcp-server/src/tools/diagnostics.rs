@@ -36,6 +36,8 @@ use crate::tools::file_request::{answer_location, FileError};
 use crate::tools::location as loc;
 use crate::tools::response::{structured, trim_items_to_budget};
 
+pub(crate) mod snippet;
+
 /// Server-side cap on returned findings, honouring Anthropic's tool-response budget.
 /// `counts` still reports the full severity histogram, so a capped response is honest.
 pub(crate) const DEFAULT_MAX_FINDINGS: usize = 200;
@@ -347,6 +349,27 @@ pub fn envelope(
     }))
 }
 
+/// Wrap a `snippet` result: the `file` envelope, named by its action. A snippet has no
+/// baseline to classify against, so it is the `action` that tells its body apart.
+pub fn snippet_envelope(
+    freshness: Freshness,
+    completeness: loc::Completeness,
+    result: Value,
+) -> CallToolResult {
+    structured(json!({
+        "action": "snippet",
+        "revision": freshness.revision,
+        "stale": freshness.stale,
+        "reload": freshness.reload,
+        "freshness": loc::Freshness::new(ANSWERED_BY, completeness)
+            .with_revision(freshness.revision)
+            .with_topology(freshness.topology)
+            .with_stale(freshness.stale)
+            .to_value(),
+        "result": result,
+    }))
+}
+
 /// Parse a `min_severity` floor, defaulting to `warning` (drops info/hint noise by
 /// default). An unrecognised label is an error so the agent learns the vocabulary.
 pub(crate) fn parse_min_severity(s: Option<&str>) -> Result<SeverityBucket, String> {
@@ -551,7 +574,7 @@ pub(crate) fn file_findings(
             enclosing: enclosing_method_range(diag.range, &methods)
                 .and_then(|range| line_index.utf16_line_col_range(&file_text, range)),
         };
-        findings.push(finding_value(diag, &out, bucket, graph_id, filters.detailed, &place));
+        findings.push(finding_value(diag, &out, bucket, graph_id, filters.detailed, Some(&place)));
     }
 
     // Byte budget on top of the `max_findings` count cap: a file of small findings stays
@@ -1140,7 +1163,7 @@ fn finding_value(
     bucket: SeverityBucket,
     graph_id: Option<String>,
     detailed: bool,
-    place: &FindingPlace<'_>,
+    place: Option<&FindingPlace<'_>>,
 ) -> Value {
     let mut v = json!({
         "code": out.code,
@@ -1158,15 +1181,18 @@ fn finding_value(
     // contract location travels beside it. In a location, `range` is the finding's own
     // span (a diagnostic has no name of its own to point at) and `enclosing_range` is the
     // method that holds it.
-    match place.file {
-        Ok(location) => {
+    // A snippet is no file: its findings carry no location at all, and no marker that one
+    // could not be formed either.
+    match place.map(|place| (place.file, place)) {
+        None => {}
+        Some((Ok(location), place)) => {
             v["location"] = location
                 .clone()
                 .with_range(place.range.map(loc::PositionRange::from))
                 .with_enclosing_range(place.enclosing.map(loc::PositionRange::from))
                 .to_value();
         }
-        Err(reason) => {
+        Some((Err(reason), _)) => {
             v["location_unavailable"] = json!(reason.code());
         }
     }
@@ -1273,8 +1299,8 @@ impl Counts {
 
 fn schema_json() -> Value {
     json!({
-        "schema_version": "16",
-        "actions": ["catalog", "schema", "status", "file", "workspace"],
+        "schema_version": "17",
+        "actions": ["catalog", "schema", "status", "file", "snippet", "workspace"],
         "severities": ["error", "warning", "info", "hint"],
         "status_result": {
             "state": "disabled | idle | loading | ready | failed — resident lifecycle",
@@ -1358,6 +1384,27 @@ fn schema_json() -> Value {
             "findings_ignored_by_author": "usize — findings suppressed because every covered line is blamed to [analysis].ignored_authors; present only when > 0",
             "author_hint": "string — present with findings_ignored_by_author"
         },
+        "snippet_params": {
+            "code": "string — BSL text to analyse, not a file (required); at most 1 MiB",
+            "code_kind": "statements | module (default: module when the text declares a method, a variable section or a compilation directive, else statements). statements are wrapped into a procedure (a function when they return a value); module text is placed as it is",
+            "path": "string — host module whose context the code is analysed in: its own methods, module variables, form or object, environments (optional). Spelled like `file`'s path, with root_id. Omitted: the smallest non-global common module of the configuration that runs only in `environment`",
+            "root_id": "string — as for `file` (optional)",
+            "environment": "server | client (default server) — picks the default host, and the directive of the wrapper in a form module host; refused for any other host, whose environment its module fixes",
+            "known_variables": "string[] — names the code reads without assigning, provided by whoever runs it (a toolkit's `Результат`, `Параметры`): declared in the wrapper so they are not reported unresolved or unused (statements only)",
+            "min_severity": "error | warning | info | hint (default warning)",
+            "codes": "string[] — keep only these codes; also the only way to get the module-structure codes a snippet drops by default",
+            "detail": "concise | detailed (default concise)",
+            "max_findings": "usize — cap on findings (default 200)"
+        },
+        "snippet_result": {
+            "kind": "snippet",
+            "context": "{ path, chosen: path | default, module: common_module | form | other, environment: server | client | null, code_kind, wrapper: procedure | function | none } — where the code was analysed",
+            "counts": "{ error, warning, info, hint } — histogram before the floor/cap",
+            "truncated": "bool",
+            "findings": "finding[] — `range` is 0-based and relative to `code`; no `location`, no `graph_id`. A parse error an unclosed block of `code` surfaces after it (on the wrapper's closing line or in the host after it), and that the host does not have by itself, is pinned to the end of `code`",
+            "module_structure_omitted": "usize — findings of rules about a whole module's layout (CodeOutOfRegion, EmptyRegion, DuplicateRegion, NonStandardRegion, NonExportMethodsInApiRegion, CodeBlockBeforeSub, UnusedLocalMethod) dropped because a snippet is not a module; present only when > 0. Ask for a code in `codes` to keep it",
+            "error": "no_host_module | invalid_snippet_context | the `file` path errors — present instead of findings when the code could not be placed"
+        },
         "workspace_params": {
             "min_severity": "error | warning | info | hint (default warning) — inclusive floor",
             "codes": "string[] — keep only these codes (optional)",
@@ -1425,7 +1472,7 @@ mod tests {
         let result = schema();
         assert_structured_mirrors_text(&result);
         let body = body_of(&result);
-        assert_eq!(body["schema_version"], "16");
+        assert_eq!(body["schema_version"], "17");
         let actions = body["actions"].as_array().unwrap();
         assert!(actions.iter().any(|a| a == "catalog"));
         assert!(actions.iter().any(|a| a == "status"));
@@ -1540,7 +1587,7 @@ mod tests {
     #[test]
     fn diagnostics_selective_baseline_response_advertises_schema_15() {
         let body = schema_json();
-        assert_eq!(body["schema_version"], "16");
+        assert_eq!(body["schema_version"], "17");
         for field in ["selection", "partitions_enabled", "partitions_unsuppressed", "unsuppressed"]
         {
             assert!(body["baseline_result"][field].is_string());
@@ -1550,7 +1597,7 @@ mod tests {
     #[test]
     fn diagnostics_schema_json() {
         let body = schema_json();
-        assert_eq!(body["schema_version"], "16");
+        assert_eq!(body["schema_version"], "17");
         assert!(body["baseline_result"]["selection"].is_string());
         assert!(body["baseline_result"]["unsuppressed"].is_string());
     }
