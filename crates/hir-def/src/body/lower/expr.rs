@@ -1267,7 +1267,7 @@ fn check_write_log_event_call(ctx: &mut LoweringCtx, node: &SyntaxNode) {
     let comment_empty = args.get(4).map(|a| a.is_none()).unwrap_or(true);
 
     let has_error_log_level =
-        args.get(1).and_then(|a| a.as_ref()).map(has_error_log_level_value).unwrap_or(false);
+        args.get(1).and_then(|a| a.as_ref()).map(has_except_log_level_value).unwrap_or(false);
 
     let has_detail_error_description =
         args.get(4).and_then(|a| a.as_ref()).map(has_detail_error_description).unwrap_or(false);
@@ -1325,13 +1325,43 @@ fn collect_arguments(arg_list: &SyntaxNode) -> Vec<Option<SyntaxNode>> {
     args
 }
 
-fn has_error_log_level_value(arg: &SyntaxNode) -> bool {
+/// Whether the level argument is acceptable for a record made in `Исключение`.
+///
+/// Standard 498 (п. 2.2) reserves `Ошибка` for critical events and records
+/// potential problems and non-fatal errors as `Предупреждение`, so both pass.
+/// `Информация` and `Примечание` do not. Only an argument whose text mentions
+/// `УровеньЖурналаРегистрации` / `EventLogLevel` is judged; a variable passes.
+/// Every enum member the argument names must be accepted, so a conditional
+/// with an `Информация` branch is reported whatever its other branch is.
+fn has_except_log_level_value(arg: &SyntaxNode) -> bool {
     let text = arg.text().to_string().fold_lower();
-    if text.contains("уровеньжурналарегистрации") || text.contains("eventloglevel")
+    if !text.contains("уровеньжурналарегистрации") && !text.contains("eventloglevel")
     {
-        return text.contains("ошибка") || text.contains("error");
+        return true;
     }
-    true
+    let members: Vec<String> = arg
+        .descendants()
+        .filter(|n| n.kind() == SyntaxKind::FIELD_EXPR)
+        .filter(|field| {
+            active_children(field).next().is_some_and(|base| {
+                matches!(
+                    normalized_code_text(&base).as_str(),
+                    "уровеньжурналарегистрации" | "eventloglevel"
+                )
+            })
+        })
+        .filter_map(|field| field_name_token(&field).map(|tok| tok.text().fold_lower()))
+        .collect();
+    if members.is_empty() {
+        // The enum is only part of another name, e.g. a function computing the level.
+        return text.contains("ошибка")
+            || text.contains("error")
+            || text.contains("предупреждение")
+            || text.contains("warning");
+    }
+    members
+        .iter()
+        .all(|member| matches!(member.as_str(), "ошибка" | "error" | "предупреждение" | "warning"))
 }
 
 fn has_detail_error_description(arg: &SyntaxNode) -> bool {
