@@ -192,6 +192,10 @@ struct PathWalk {
     /// The local reads being resolved.
     active: Vec<ExprId>,
     resolved: FxHashMap<ExprId, Option<Vec<TypeId>>>,
+    /// Whether a value read through no local is vouched for by its own inferred type: a call, a
+    /// literal, a constructor or a global. The type of a metadata object such a value yields does
+    /// not depend on the path that reached it, unlike a platform object's facets.
+    inferred_leaves: bool,
 }
 
 /// What a definition reaching a read takes its value from.
@@ -2481,13 +2485,12 @@ impl<'db> InferenceContext<'db> {
 
     /// False when a write reaching the local `receiver_expr` may hold a value with `field`.
     ///
-    /// Each write is judged by the type inferred for its own right-hand side, so a local written
-    /// once keeps its verdict whatever that right-hand side is: unlike
-    /// [`Self::miss_holds_on_every_path`] this does not require every value to be vouched for,
-    /// only that none of the writes reaching the read be of another type that may own the field.
-    /// A receiver that is not a local written in this body answers true. A parameter or a
-    /// declaration reaching the read, a loop element of an unknown collection and an untyped
-    /// write may hold anything.
+    /// The writes are followed through [`Self::types_on_every_path`] with
+    /// [`PathWalk::inferred_leaves`], so a write is judged by the type inferred for its own
+    /// right-hand side unless that value is itself read through a local, whose writes are then
+    /// judged in turn. A receiver that is not a local written in this body answers true. A
+    /// parameter or a declaration reaching the read, a loop element of an unknown collection, an
+    /// untyped write and a local a call or `Выполнить` may rewrite may hold anything.
     fn metadata_miss_holds_on_every_write(
         &self,
         receiver_expr: ExprId,
@@ -2500,29 +2503,11 @@ impl<'db> InferenceContext<'db> {
         if !self.body_writes_name(name, &key) {
             return true;
         }
-        let Some(use_stmt) = self.body.enclosing_stmt(receiver_expr) else {
-            return true;
+        let mut walk = PathWalk { inferred_leaves: true, ..PathWalk::default() };
+        let Some(types) = self.types_on_every_path(receiver_expr, &mut walk) else {
+            return false;
         };
-        let Some(reaching) = self
-            .read_point(use_stmt)
-            .and_then(|point| self.reaching_assignment_types_at(point, &key))
-        else {
-            return true;
-        };
-        let Some(sources) = self.loop_aware_definitions(&key, use_stmt.to_idx(), reaching) else {
-            return true;
-        };
-        let lacks =
-            |ty: Option<TypeId>| ty.is_some_and(|ty| self.value_certainly_lacks_field(ty, field));
-        sources.iter().all(|source| match *source {
-            DefinitionSource::Value(value) => lacks(self.expr_types.get(&value).copied()),
-            DefinitionSource::LoopElement(collection) => {
-                lacks(self.expr_types.get(&collection).copied().and_then(|collection_ty| {
-                    crate::iteration_lookup::resolve_iter_element_ty(self.db, collection_ty)
-                }))
-            }
-            DefinitionSource::Opaque => false,
-        })
+        !types.is_empty() && types.iter().all(|ty| self.value_certainly_lacks_field(*ty, field))
     }
 
     /// Whether a value of `ty` cannot answer `field`: an empty value, or a metadata object whose
@@ -2570,17 +2555,26 @@ impl<'db> InferenceContext<'db> {
     /// the right-hand sides of the writes reaching it and the collection of the loop that
     /// binds it. A constructor that writes its type name and takes no argument is that type
     /// on every path. A local being resolved that is reached again — a write that reads its own
-    /// target (`Описание = Описание.Родитель` in a loop) — vouches for nothing.
+    /// target (`Описание = Описание.Родитель` in a loop) — vouches for nothing. With
+    /// [`PathWalk::inferred_leaves`] a method call is vouched for like a member read, and any
+    /// other call, a literal, a constructor and a global by their own inferred type.
     fn types_on_every_path(&self, expr: ExprId, walk: &mut PathWalk) -> Option<Vec<TypeId>> {
         const MAX_DEPTH: usize = 16;
+        let through_receiver = |receiver: &hir_def::hir::ExprIdx, walk: &mut PathWalk| {
+            let receiver = ExprId::from_idx(*receiver);
+            let walked = self.expr_types.get(&receiver).copied()?;
+            let receiver_types = self.types_on_every_path(receiver, walk)?;
+            if receiver_types.is_empty() || receiver_types.iter().any(|ty| *ty != walked) {
+                return None;
+            }
+            Some(vec![self.expr_types.get(&expr).copied()?])
+        };
         match self.body.expr(expr) {
-            Expr::Field { base, .. } | Expr::Index { base, .. } => {
-                let base = ExprId::from_idx(*base);
-                let walked = self.expr_types.get(&base).copied()?;
-                let base_types = self.types_on_every_path(base, walk)?;
-                if base_types.is_empty() || base_types.iter().any(|ty| *ty != walked) {
-                    return None;
-                }
+            Expr::Field { base, .. } | Expr::Index { base, .. } => through_receiver(base, walk),
+            Expr::MethodCall { receiver, .. } if walk.inferred_leaves => {
+                through_receiver(receiver, walk)
+            }
+            Expr::Call { .. } | Expr::Literal(_) | Expr::New { .. } if walk.inferred_leaves => {
                 Some(vec![self.expr_types.get(&expr).copied()?])
             }
             Expr::Path(name) => {
@@ -2592,10 +2586,12 @@ impl<'db> InferenceContext<'db> {
                 }
                 let key = name.as_str().fold_lower();
                 if !self.body_writes_name(name, &key) {
-                    // Not a local: only the configuration root is the same on every path.
+                    // Not a local: only the configuration root is the same on every path,
+                    // unless the walk trusts the value's own inferred type.
                     let ty = self.expr_types.get(&expr).copied()?;
-                    return crate::field_lookup::is_configuration_metadata_root(self.db, ty)
-                        .then(|| vec![ty]);
+                    return (walk.inferred_leaves
+                        || crate::field_lookup::is_configuration_metadata_root(self.db, ty))
+                    .then(|| vec![ty]);
                 }
                 let use_stmt = self.body.enclosing_stmt(expr)?;
                 let reaching =

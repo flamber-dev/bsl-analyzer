@@ -93,3 +93,93 @@ fn field_no_written_object_has_is_still_reported() {
         vec!["НетТакогоРеквизита".to_string(), "ИТакогоНет".to_string(), "НиТакого".to_string()]
     );
 }
+
+#[test]
+fn field_through_a_copy_of_a_branch_written_local_is_not_reported() {
+    let found = unresolved_fields(
+        r#"Процедура Тест(Вид) Экспорт
+	Если Вид = 1 Тогда
+		Б = Справочники.Справочник1.СоздатьЭлемент();
+	Иначе
+		Б = Документы.Документ1.СоздатьДокумент();
+	КонецЕсли;
+	А = Б;
+	Х = А.Реквизит3;
+	В = А.Ссылка;
+	Х = В.Реквизит3;
+КонецПроцедуры
+"#,
+    );
+    assert!(found.is_empty(), "the catalog written to `Б` has the field: {found:?}");
+}
+
+#[test]
+fn field_after_a_loop_over_the_same_name_is_not_reported() {
+    let found = unresolved_fields(
+        r#"Процедура Тест(Вид, Массив) Экспорт
+	Для Каждого Приемник Из Массив Цикл
+	КонецЦикла;
+	Если Вид = 1 Тогда
+		Приемник = Справочники.Справочник1.СоздатьЭлемент();
+	Иначе
+		Приемник = Документы.Документ1.СоздатьДокумент();
+	КонецЕсли;
+	Х = Приемник.Реквизит3;
+КонецПроцедуры
+"#,
+    );
+    assert!(found.is_empty(), "the writes reaching the read are not vouched for: {found:?}");
+}
+
+#[test]
+fn field_of_an_object_a_back_edge_write_may_bring_is_not_reported() {
+    let found = unresolved_fields(
+        r#"Процедура Тест(Вид) Экспорт
+	Приемник = Документы.Документ1.СоздатьДокумент();
+	Пока Вид > 0 Цикл
+		Х = Приемник.Реквизит3;
+		Приемник = Справочники.Справочник1.СоздатьЭлемент();
+		Вид = Вид - 1;
+	КонецЦикла;
+КонецПроцедуры
+"#,
+    );
+    assert!(found.is_empty(), "the catalog written later in the loop has the field: {found:?}");
+}
+
+#[test]
+fn field_of_a_closed_structure_written_beside_an_object_is_not_reported() {
+    let found = unresolved_fields(
+        r#"Процедура Тест(Вид) Экспорт
+	Если Вид = 1 Тогда
+		Приемник = Справочники.Справочник1.СоздатьЭлемент();
+	Иначе
+		Приемник = Новый Структура("Реквизит1", 1);
+	КонецЕсли;
+	Х = Приемник.Реквизит3;
+КонецПроцедуры
+"#,
+    );
+    assert!(found.is_empty(), "the catalog written in the first branch has the field: {found:?}");
+}
+
+#[test]
+fn field_of_a_local_another_write_may_rewrite_unseen_is_not_reported() {
+    let found = unresolved_fields(
+        r#"Процедура Заполнить(Объект)
+	Объект = Справочники.Справочник1.СоздатьЭлемент();
+КонецПроцедуры
+
+Процедура Тест() Экспорт
+	Приемник = Документы.Документ1.СоздатьДокумент();
+	Заполнить(Приемник);
+	Приемник.Реквизит3 = 1;
+
+	Источник = Документы.Документ1.СоздатьДокумент();
+	Выполнить("Источник = Справочники.Справочник1.СоздатьЭлемент();");
+	Источник.Реквизит3 = 1;
+КонецПроцедуры
+"#,
+    );
+    assert!(found.is_empty(), "a call or `Выполнить` may write the catalog: {found:?}");
+}
