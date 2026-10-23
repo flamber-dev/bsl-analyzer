@@ -2483,24 +2483,23 @@ impl<'db> InferenceContext<'db> {
         }
     }
 
-    /// False when a write reaching the local `receiver_expr` may hold a value with `field`.
+    /// False when a write reaching the local `receiver_expr` is read through may hold a value
+    /// with `field`.
     ///
     /// The writes are followed through [`Self::types_on_every_path`] with
     /// [`PathWalk::inferred_leaves`], so a write is judged by the type inferred for its own
     /// right-hand side unless that value is itself read through a local, whose writes are then
-    /// judged in turn. A receiver that is not a local written in this body answers true. A
+    /// judged in turn; a member, an index or a method call of a local holds one type only when
+    /// the local does. A receiver read through no local written in this body answers true. A
     /// parameter or a declaration reaching the read, a loop element of an unknown collection, an
-    /// untyped write and a local a call or `Выполнить` may rewrite may hold anything.
+    /// untyped write and a local a call or `Выполнить` may rewrite before the read may hold
+    /// anything.
     fn metadata_miss_holds_on_every_write(
         &self,
         receiver_expr: ExprId,
         field: &hir_def::Name,
     ) -> bool {
-        let Expr::Path(name) = self.body.expr(receiver_expr) else {
-            return true;
-        };
-        let key = name.as_str().fold_lower();
-        if !self.body_writes_name(name, &key) {
+        if !self.read_through_local(receiver_expr) {
             return true;
         }
         let mut walk = PathWalk { inferred_leaves: true, ..PathWalk::default() };
@@ -2508,6 +2507,25 @@ impl<'db> InferenceContext<'db> {
             return false;
         };
         !types.is_empty() && types.iter().all(|ty| self.value_certainly_lacks_field(*ty, field))
+    }
+
+    /// Whether `expr` is a local written in this body, or a member, an index or a method call
+    /// whose receiver chain starts at one.
+    fn read_through_local(&self, expr: ExprId) -> bool {
+        match self.body.expr(expr) {
+            Expr::Path(name) => self.body_writes_name(name, &name.as_str().fold_lower()),
+            Expr::Field { base, .. } | Expr::Index { base, .. } => {
+                self.read_through_local(ExprId::from_idx(*base))
+            }
+            Expr::MethodCall { receiver, .. } => {
+                self.read_through_local(ExprId::from_idx(*receiver))
+            }
+            Expr::Call { callee, .. } => match self.body.expr_idx(*callee) {
+                Expr::Field { base, .. } => self.read_through_local(ExprId::from_idx(*base)),
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     /// Whether a value of `ty` cannot answer `field`: an empty value, or a metadata object whose
@@ -2557,7 +2575,8 @@ impl<'db> InferenceContext<'db> {
     /// on every path. A local being resolved that is reached again — a write that reads its own
     /// target (`Описание = Описание.Родитель` in a loop) — vouches for nothing. With
     /// [`PathWalk::inferred_leaves`] a method call is vouched for like a member read, and any
-    /// other call, a literal, a constructor and a global by their own inferred type.
+    /// other call, a literal, a constructor and a global by their own inferred type; a local is
+    /// then given up only for a call or `Выполнить` that may rewrite it before the read.
     fn types_on_every_path(&self, expr: ExprId, walk: &mut PathWalk) -> Option<Vec<TypeId>> {
         const MAX_DEPTH: usize = 16;
         let through_receiver = |receiver: &hir_def::hir::ExprIdx, walk: &mut PathWalk| {
@@ -2574,7 +2593,13 @@ impl<'db> InferenceContext<'db> {
             Expr::MethodCall { receiver, .. } if walk.inferred_leaves => {
                 through_receiver(receiver, walk)
             }
-            Expr::Call { .. } | Expr::Literal(_) | Expr::New { .. } if walk.inferred_leaves => {
+            Expr::Call { callee, .. } if walk.inferred_leaves => {
+                match self.body.expr_idx(*callee) {
+                    Expr::Field { base, .. } => through_receiver(base, walk),
+                    _ => Some(vec![self.expr_types.get(&expr).copied()?]),
+                }
+            }
+            Expr::Literal(_) | Expr::New { .. } if walk.inferred_leaves => {
                 Some(vec![self.expr_types.get(&expr).copied()?])
             }
             Expr::Path(name) => {
@@ -2597,7 +2622,12 @@ impl<'db> InferenceContext<'db> {
                 let reaching =
                     self.reaching_assignment_types_at(self.read_point(use_stmt)?, &key)?;
                 let use_stmt = use_stmt.to_idx();
-                if self.local_may_change_unseen(&key, use_stmt) {
+                let changes_unseen = if walk.inferred_leaves {
+                    self.local_may_change_unseen_before(&key, expr, use_stmt)
+                } else {
+                    self.local_may_change_unseen(&key, use_stmt)
+                };
+                if changes_unseen {
                     return None;
                 }
                 let sources = self.loop_aware_definitions(&key, use_stmt, reaching)?;
@@ -2677,14 +2707,123 @@ impl<'db> InferenceContext<'db> {
     /// the entry of the protected statements only, so a write among them that an error
     /// interrupts is not seen by the handler or the code after it.
     fn local_may_change_unseen(&self, key: &str, use_stmt: StmtIdx) -> bool {
-        let names_local = |expr: &hir_def::hir::ExprIdx| matches!(self.body.expr_idx(*expr), Expr::Path(arg) if arg.as_str().fold_lower() == key);
-        let passed_to_call = self.body.exprs_iter().any(|(_, expr)| match expr {
-            Expr::Call { args, .. } | Expr::MethodCall { args, .. } => args.iter().any(names_local),
-            _ => false,
-        });
-        if passed_to_call {
+        self.body.exprs_iter().any(|(_, expr)| self.call_given_local(expr, key))
+            || self.body.stmts_iter().any(|(_, stmt)| matches!(stmt, Stmt::Execute { .. }))
+            || self.write_hidden_by_try(key, use_stmt)
+    }
+
+    /// [`Self::local_may_change_unseen`] narrowed to what may run before `read`: a call given the
+    /// local counts only when it may reach a method of the configuration, which alone can write
+    /// a by-reference parameter, and it and `Выполнить` only when the read is reachable from them.
+    fn local_may_change_unseen_before(&self, key: &str, read: ExprId, use_stmt: StmtIdx) -> bool {
+        if self.write_hidden_by_try(key, use_stmt) {
             return true;
         }
+        let writers: Vec<ExprId> = self
+            .body
+            .exprs_iter()
+            .filter(|(id, expr)| {
+                self.call_given_local(expr, key) && self.call_may_write_argument(*id, expr)
+            })
+            .map(|(id, _)| id)
+            .chain(self.body.stmts_iter().filter_map(|(_, stmt)| match stmt {
+                Stmt::Execute { expr } => Some(ExprId::from_idx(*expr)),
+                _ => None,
+            }))
+            .collect();
+        if writers.is_empty() {
+            return false;
+        }
+        let cfg =
+            cfg::CfgBuilder::new().build_graph_from_hir(self.body.body_stmts_typed(), &self.body);
+        let index = crate::narrow::NarrowExprIndex::build(&self.body, &cfg);
+        writers.iter().any(|writer| self.may_run_before(&cfg, &index, *writer, read))
+    }
+
+    fn call_given_local(&self, expr: &Expr, key: &str) -> bool {
+        match expr {
+            Expr::Call { args, .. } | Expr::MethodCall { args, .. } => args.iter().any(|arg| {
+                matches!(self.body.expr_idx(*arg), Expr::Path(name) if name.as_str().fold_lower() == key)
+            }),
+            _ => false,
+        }
+    }
+
+    /// Whether the call `call` may bind a method of the configuration. A call inference has not
+    /// bound yet, or bound to nothing, may.
+    fn call_may_write_argument(&self, call: ExprId, expr: &Expr) -> bool {
+        let callee = match expr {
+            Expr::Call { callee, .. } => Some(ExprId::from_idx(*callee)),
+            _ => None,
+        };
+        let Some(binding) = self
+            .call_arg_bindings
+            .iter()
+            .find(|binding| binding.call_expr == call || Some(binding.call_expr) == callee)
+        else {
+            return true;
+        };
+        let candidates = binding.candidate.candidates.as_slice();
+        candidates.is_empty()
+            || candidates.iter().any(|candidate| {
+                matches!(
+                    candidate.provenance,
+                    crate::call_resolution::CandidateProvenance::UserMethod(_)
+                        | crate::call_resolution::CandidateProvenance::FunctionValue
+                )
+            })
+    }
+
+    /// Whether `from` may be evaluated before `to` on some path of the body.
+    fn may_run_before(
+        &self,
+        cfg: &cfg::ControlFlowGraph,
+        index: &crate::narrow::NarrowExprIndex,
+        from: ExprId,
+        to: ExprId,
+    ) -> bool {
+        let (Some(start), Some(target)) =
+            (index.vertex_of(from.to_idx()), index.vertex_of(to.to_idx()))
+        else {
+            return true;
+        };
+        let reaches = |source: cfg::NodeIndex| {
+            let mut seen = FxHashSet::default();
+            let mut stack: Vec<cfg::NodeIndex> =
+                cfg.outgoing_edges(source).map(|(next, _)| next).collect();
+            while let Some(node) = stack.pop() {
+                if node == target {
+                    return true;
+                }
+                if seen.insert(node) {
+                    stack.extend(cfg.outgoing_edges(node).map(|(next, _)| next));
+                }
+            }
+            false
+        };
+        if start != target {
+            return reaches(start);
+        }
+        let position = |expr: ExprId| {
+            let stmt = self.body.enclosing_stmt(expr)?;
+            match cfg.vertex(start)? {
+                cfg::CfgVertex::BasicBlock(block) => {
+                    block.statements().iter().position(|candidate| *candidate == stmt)
+                }
+                _ => None,
+            }
+        };
+        match (position(from), position(to)) {
+            (Some(from), Some(to)) if from > to => reaches(start),
+            _ => true,
+        }
+    }
+
+    /// The handler of `Попытка` is reached from the entry of the protected statements only, so a
+    /// write of the local `key` among them that an error interrupts is not seen by the handler or
+    /// the code after it.
+    fn write_hidden_by_try(&self, key: &str, use_stmt: StmtIdx) -> bool {
+        let names_local = |expr: &hir_def::hir::ExprIdx| matches!(self.body.expr_idx(*expr), Expr::Path(arg) if arg.as_str().fold_lower() == key);
         let covers = |outer: StmtIdx, inner: StmtIdx| {
             crate::narrow::stmt_covers_stmt(&self.body, outer, inner)
         };
@@ -2702,7 +2841,6 @@ impl<'db> InferenceContext<'db> {
             })
             .collect();
         self.body.stmts_iter().any(|(_, stmt)| match stmt {
-            Stmt::Execute { .. } => true,
             Stmt::Try { body: protected, .. } => {
                 let in_protected = |target: StmtIdx| protected.iter().any(|s| covers(*s, target));
                 !in_protected(use_stmt) && writes.iter().any(|write| in_protected(*write))
