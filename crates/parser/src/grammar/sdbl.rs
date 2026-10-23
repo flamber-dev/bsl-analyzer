@@ -27,6 +27,10 @@
 pub mod expressions;
 pub mod select;
 
+/// The message of the error over a leftover the parser skips to the next boundary: it reports
+/// no fault of its own, only that the text after an earlier error was not understood.
+pub const LEFTOVER_MESSAGE: &str = "не разобран остаток текста запроса";
+
 use crate::event::NodeKind;
 use crate::parser::token_set::TokenSet;
 use crate::parser::Parser;
@@ -345,7 +349,7 @@ fn drain_to_boundary(p: &mut Parser, member_is_due: bool) -> bool {
     }
 
     if took_anything {
-        p.error_custom_at_marker(leftover, "не разобран остаток текста запроса");
+        p.error_custom_at_marker(leftover, LEFTOVER_MESSAGE);
     } else {
         leftover.abandon(p);
     }
