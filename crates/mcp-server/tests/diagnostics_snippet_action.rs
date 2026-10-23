@@ -197,3 +197,55 @@ async fn a_snippet_leaves_the_host_file_diagnostics_unchanged() {
     assert_eq!(std::fs::read_to_string(dir.path().join(HOST)).unwrap(), HOST_TEXT);
     client.cancel().await.expect("session closed");
 }
+
+// Module text has no wrapper line to surface its unclosed block on: the parser reports the
+// missing closer at the end of the host, past the snippet, and that error is still the
+// snippet's. The host tail is clean here, so nothing there is the host's own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unclosed_method_in_module_code_is_a_parse_error_of_the_snippet() {
+    let _guard = TEST_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    project(dir.path());
+    let client = client(dir.path()).await;
+    let code = "Процедура Незакрытая()\n    А = 1;";
+
+    let body = diagnostics(&client, json!({"action": "snippet", "code": code, "path": HOST})).await;
+
+    assert_eq!(body["result"]["context"]["code_kind"], "module", "{body}");
+    let finding = body["result"]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|finding| finding["code"] == "ParseError")
+        .unwrap_or_else(|| panic!("no ParseError in {body}"));
+    assert_eq!(finding["range"]["start_line"], 1, "pinned to the end of code: {body}");
+    client.cancel().await.expect("session closed");
+}
+
+// Control: a host whose own text after its last method does not parse keeps that error to
+// itself, so a closed snippet placed before it gets no parse error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_parse_error_of_the_host_tail_is_not_the_snippets() {
+    let _guard = TEST_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    project(dir.path());
+    let broken = "CommonModules/Сосед/Ext/Module.bsl";
+    write(dir.path(), broken, "Процедура Пусто() Экспорт\nКонецПроцедуры\n\nА = ;\n");
+    let client = client(dir.path()).await;
+
+    let file = diagnostics(&client, json!({"action": "file", "path": broken})).await;
+    assert!(codes(&file).contains(&"ParseError".to_owned()), "{file}");
+
+    let body = diagnostics(
+        &client,
+        json!({
+            "action": "snippet",
+            "code": "Процедура Закрытая()\nКонецПроцедуры",
+            "path": broken,
+            "codes": ["ParseError"],
+        }),
+    )
+    .await;
+    assert_eq!(codes(&body), Vec::<String>::new(), "{body}");
+    client.cancel().await.expect("session closed");
+}

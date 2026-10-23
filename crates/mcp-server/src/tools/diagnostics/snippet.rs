@@ -178,9 +178,10 @@ pub(crate) struct SnippetFilters {
 pub(crate) struct Prepared {
     /// Byte span of the snippet in the overlaid host text.
     snippet: TextRange,
-    /// End of the wrapper's closing line: a parse error that surfaces there is the
-    /// snippet's (an unclosed block), not the wrapper's.
-    wrapper_end: TextSize,
+    /// Last offset at which a parse error past the snippet is still the snippet's (an
+    /// unclosed block): the end of the overlaid text when the host parses cleanly after the
+    /// insertion point, else the end of the wrapper's closing line.
+    parse_errors_end: TextSize,
     context: Value,
 }
 
@@ -312,6 +313,13 @@ pub(crate) fn plan(
     text.push_str(&suffix);
     let wrapper_end = text.len();
     text.push_str(&host_text[insert_at..]);
+    // Module text has no wrapper line, so its missing closer surfaces in the host tail or at
+    // the end of the text; only the host's own errors there are not the snippet's.
+    let host_tail_parses = parser::parse(&host_text)
+        .errors()
+        .iter()
+        .all(|error| usize::from(error.range().start()) < insert_at);
+    let parse_errors_end = if host_tail_parses { text.len() } else { wrapper_end };
 
     let relative = host_path
         .strip_prefix(resident.workspace_root())
@@ -330,7 +338,7 @@ pub(crate) fn plan(
         text,
         Prepared {
             snippet: TextRange::new(offset(snippet_start), offset(snippet_end)),
-            wrapper_end: offset(wrapper_end),
+            parse_errors_end: offset(parse_errors_end),
             context,
         },
     ))
@@ -359,7 +367,9 @@ pub(crate) fn findings(
     let mut structure_omitted = 0usize;
 
     for diag in diagnostics {
-        let Some(range) = snippet_range(&diag, snippet, prepared.wrapper_end) else { continue };
+        let Some(range) = snippet_range(&diag, snippet, prepared.parse_errors_end) else {
+            continue;
+        };
         if MODULE_STRUCTURE_CODES.contains(&diag.code) && !explicitly_asked(diag.code) {
             structure_omitted += 1;
             continue;
@@ -427,12 +437,12 @@ fn invalid(detail: &str, max_output_tokens: Option<usize>) -> Refusal {
 }
 
 /// The snippet-relative range of a finding, or `None` when it belongs to the host or the
-/// wrapper. A parse error that lands on the wrapper's closing line is the snippet's own
+/// wrapper. A parse error past the snippet, up to `parse_errors_end`, is the snippet's own
 /// unclosed block, and is pinned to the snippet's end.
 fn snippet_range(
     diag: &ide::Diagnostic,
     snippet: TextRange,
-    wrapper_end: TextSize,
+    parse_errors_end: TextSize,
 ) -> Option<TextRange> {
     let start = diag.range.start();
     let end = diag.range.end();
@@ -440,7 +450,7 @@ fn snippet_range(
         (start, end.min(snippet.end()).max(start))
     } else if diag.code == DiagnosticCode::ParseError
         && start > snippet.end()
-        && start <= wrapper_end
+        && start <= parse_errors_end
     {
         (snippet.end(), snippet.end())
     } else {
