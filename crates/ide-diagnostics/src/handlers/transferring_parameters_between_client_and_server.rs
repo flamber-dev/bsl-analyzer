@@ -78,6 +78,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
         let body = lower_result.body();
         let assigned_params = collect_assigned_params(body);
+        let mutated_params = collect_mutated_params(body);
 
         for (param_idx, param) in by_ref_params {
             let param_name_lower = param.name.as_str().fold_lower();
@@ -92,35 +93,138 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 .and_then(|item| item.params().get(param_idx))
                 .map(|param_info| param_info.name_range);
 
-            if let Some(range) = param_range {
+            let Some(range) = param_range else {
+                continue;
+            };
+
+            // The server method fills the argument for the caller (#271): `Знач` would silently
+            // drop that data on the way back, so the finding names the std 487 p.12 remedy -
+            // return the data from a function - and offers no quick fix.
+            if mutated_params.contains(&param_name_lower) {
                 diagnostics.push(Diagnostic {
                     code,
                     message: format!(
-                        "Установите модификатор \"Знач\" для параметра {} метода {}",
+                        "Параметр {} метода {} возвращает данные на клиент: верните их результатом функции вместо изменения параметра",
                         param.name.as_str(),
                         method.name.as_str()
                     ),
                     severity: ctx.severity(code),
                     range,
                     tags: ctx.tags(code),
-                    // Passing by value changes what the callee may do to the argument, so the
-                    // fix is opt-in and excluded from `source.fixAll`.
-                    fixes: vec![Fix::manual(
-                        format!(
-                            "Установить модификатор \"Знач\" для параметра {}",
-                            param.name.as_str()
-                        ),
-                        vec![TextEdit {
-                            range: TextRange::empty(range.start()),
-                            new_text: "Знач ".to_string(),
-                        }],
-                    )],
+                    fixes: Vec::new(),
                 });
+                continue;
             }
+
+            diagnostics.push(Diagnostic {
+                code,
+                message: format!(
+                    "Установите модификатор \"Знач\" для параметра {} метода {}",
+                    param.name.as_str(),
+                    method.name.as_str()
+                ),
+                severity: ctx.severity(code),
+                range,
+                tags: ctx.tags(code),
+                // Passing by value changes what the callee may do to the argument, so the
+                // fix is opt-in and excluded from `source.fixAll`.
+                fixes: vec![Fix::manual(
+                    format!(
+                        "Установить модификатор \"Знач\" для параметра {}",
+                        param.name.as_str()
+                    ),
+                    vec![TextEdit {
+                        range: TextRange::empty(range.start()),
+                        new_text: "Знач ".to_string(),
+                    }],
+                )],
+            });
         }
     }
 
     diagnostics
+}
+
+/// Methods of the mutable platform collections (Массив, Структура, Соответствие, СписокЗначений,
+/// ТаблицаЗначений, ДеревоЗначений and their rows/columns collections) that change the
+/// collection in place; lower-case, both spellings.
+const MUTATING_METHODS: &[&str] = &[
+    "добавить",
+    "add",
+    "вставить",
+    "insert",
+    "удалить",
+    "delete",
+    "очистить",
+    "clear",
+    "установить",
+    "set",
+    "загрузить",
+    "load",
+    "загрузитьзначения",
+    "loadvalues",
+    "загрузитьколонку",
+    "loadcolumn",
+    "заполнитьзначения",
+    "fillvalues",
+    "заполнитьпометки",
+    "fillchecks",
+    "свернуть",
+    "groupby",
+    "сортировать",
+    "sort",
+    "сортироватьпозначению",
+    "sortbyvalue",
+    "сортироватьпопредставлению",
+    "sortbypresentation",
+    "сдвинуть",
+    "move",
+];
+
+/// Parameters whose value is changed in place: a field or element is assigned
+/// (`П.X = ...`, `П[...] = ...`, also deeper `П.X.Y = ...`) or a mutating collection method is
+/// called on it (`П.Добавить(...)`, `П.Товары.Очистить()`).
+fn collect_mutated_params(body: &hir::Body) -> FxHashSet<String> {
+    let mut mutated = FxHashSet::default();
+
+    for (_stmt_id, stmt) in body.stmts_iter() {
+        if let Stmt::Assign { target, .. } = stmt {
+            let target_id = hir::ExprId::from_idx(*target);
+            if matches!(body.expr(target_id), Expr::Field { .. } | Expr::Index { .. }) {
+                mutated.extend(access_chain_root(body, target_id));
+            }
+        }
+    }
+
+    for (_expr_id, expr) in body.exprs_iter() {
+        // `П.Добавить(...)` is lowered as a call of the field `Добавить` of `П`.
+        let (receiver, method) = match expr {
+            Expr::MethodCall { receiver, method, .. } => (*receiver, method),
+            Expr::Call { callee, .. } => match body.expr(hir::ExprId::from_idx(*callee)) {
+                Expr::Field { base, field } => (*base, field),
+                _ => continue,
+            },
+            _ => continue,
+        };
+        if MUTATING_METHODS.contains(&method.as_str().fold_lower().as_str()) {
+            mutated.extend(access_chain_root(body, hir::ExprId::from_idx(receiver)));
+        }
+    }
+
+    mutated
+}
+
+/// Name at the root of a `П.X[...]...` chain of field and index accesses.
+fn access_chain_root(body: &hir::Body, mut expr_id: hir::ExprId) -> Option<String> {
+    loop {
+        match body.expr(expr_id) {
+            Expr::Path(name) => return Some(name.as_str().fold_lower()),
+            Expr::Field { base, .. } | Expr::Index { base, .. } => {
+                expr_id = hir::ExprId::from_idx(*base);
+            }
+            _ => return None,
+        }
+    }
 }
 
 fn collect_assigned_params(body: &hir::Body) -> FxHashSet<String> {
