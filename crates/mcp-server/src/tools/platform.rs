@@ -1221,7 +1221,7 @@ fn property_card(
     property: &bsl_platform::PlatformProperty,
 ) -> (String, SyntaxHelpItem) {
     let docs = platform.get_property_docs(property.id);
-    let owner = (!property.type_name.is_empty()).then(|| property.type_name.to_string());
+    let owner = (!property.type_name.is_empty()).then(|| display_type_name(&property.type_name));
 
     let mut out = match &owner {
         Some(owner) => {
@@ -2242,9 +2242,16 @@ mod tests {
                 );
             }
         }
-        let (_, property) = syntax_help_card("Отбор", Some("РегистрБухгалтерииНаборЗаписей"))
+        let (text, property) = syntax_help_card("Отбор", Some("РегистрБухгалтерииНаборЗаписей"))
             .expect("a property of the pattern answers too");
-        assert!(matches!(property, SyntaxHelpItem::Property { .. }));
+        let SyntaxHelpItem::Property { owner_type, .. } = property else {
+            panic!("Отбор must be a property card")
+        };
+        assert_eq!(
+            owner_type.as_deref(),
+            Some("AccountingRegisterRecordSet.<Accounting register name>")
+        );
+        assert!(!text.contains("&lt;"), "the card shows the placeholder as written: {text}");
     }
 
     /// The pattern is no licence to answer anything: a member the record set does not
