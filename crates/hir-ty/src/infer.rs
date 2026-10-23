@@ -2709,16 +2709,14 @@ impl<'db> InferenceContext<'db> {
     fn local_may_change_unseen(&self, key: &str, use_stmt: StmtIdx) -> bool {
         self.body.exprs_iter().any(|(_, expr)| self.call_given_local(expr, key))
             || self.body.stmts_iter().any(|(_, stmt)| matches!(stmt, Stmt::Execute { .. }))
-            || self.write_hidden_by_try(key, use_stmt)
+            || self.write_hidden_by_try(key, use_stmt, &[])
     }
 
     /// [`Self::local_may_change_unseen`] narrowed to what may run before `read`: a call given the
     /// local counts only when it may reach a method of the configuration, which alone can write
-    /// a by-reference parameter, and it and `Выполнить` only when the read is reachable from them.
+    /// a by-reference parameter, and it and `Выполнить` only when the read is reachable from them
+    /// or they are protected by a `Попытка` whose handler an error inside them reaches.
     fn local_may_change_unseen_before(&self, key: &str, read: ExprId, use_stmt: StmtIdx) -> bool {
-        if self.write_hidden_by_try(key, use_stmt) {
-            return true;
-        }
         let writers: Vec<ExprId> = self
             .body
             .exprs_iter()
@@ -2731,6 +2729,14 @@ impl<'db> InferenceContext<'db> {
                 _ => None,
             }))
             .collect();
+        let writer_stmts: Vec<StmtIdx> = writers
+            .iter()
+            .filter_map(|writer| self.body.enclosing_stmt(*writer))
+            .map(|stmt| stmt.to_idx())
+            .collect();
+        if self.write_hidden_by_try(key, use_stmt, &writer_stmts) {
+            return true;
+        }
         if writers.is_empty() {
             return false;
         }
@@ -2821,8 +2827,14 @@ impl<'db> InferenceContext<'db> {
 
     /// The handler of `Попытка` is reached from the entry of the protected statements only, so a
     /// write of the local `key` among them that an error interrupts is not seen by the handler or
-    /// the code after it.
-    fn write_hidden_by_try(&self, key: &str, use_stmt: StmtIdx) -> bool {
+    /// the code after it. `unseen_writers` are statements that may write the local besides its
+    /// assignments and loops.
+    fn write_hidden_by_try(
+        &self,
+        key: &str,
+        use_stmt: StmtIdx,
+        unseen_writers: &[StmtIdx],
+    ) -> bool {
         let names_local = |expr: &hir_def::hir::ExprIdx| matches!(self.body.expr_idx(*expr), Expr::Path(arg) if arg.as_str().fold_lower() == key);
         let covers = |outer: StmtIdx, inner: StmtIdx| {
             crate::narrow::stmt_covers_stmt(&self.body, outer, inner)
@@ -2839,6 +2851,7 @@ impl<'db> InferenceContext<'db> {
                 }
                 _ => None,
             })
+            .chain(unseen_writers.iter().copied())
             .collect();
         self.body.stmts_iter().any(|(_, stmt)| match stmt {
             Stmt::Try { body: protected, .. } => {
