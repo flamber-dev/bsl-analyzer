@@ -18,3 +18,4 @@ mod query_keyword_alias;
 mod query_nested_in_select_list;
 mod standalone_query_parity;
 mod unresolved_metadata_path;
+mod value_table_member_checks;

@@ -735,6 +735,9 @@ fn the_curated_attestations_resolve_against_the_types_they_name() {
     data["types"].as_array_mut().unwrap().push(json!({
         "name": "ЗаписьJSON", "english_name": "JSONWriter"
     }));
+    data["types"].as_array_mut().unwrap().push(json!({
+        "name": "ТаблицаЗначений", "english_name": "ValueTable"
+    }));
 
     let attestations = parse_resolved_member_surface_attestations(
         &data,
@@ -745,8 +748,8 @@ fn the_curated_attestations_resolve_against_the_types_they_name() {
     let names: Vec<&str> = attestations.iter().map(|a| a.type_name.as_str()).collect();
     assert_eq!(
         names,
-        ["SpreadsheetDocumentRange", "JSONWriter"],
-        "the curated document attests exactly the two types of this round"
+        ["SpreadsheetDocumentRange", "JSONWriter", "ValueTable"],
+        "the curated document attests exactly these three types"
     );
     assert!(attestations.iter().all(|a| a.verified_against_version == "8.3.27"));
 }

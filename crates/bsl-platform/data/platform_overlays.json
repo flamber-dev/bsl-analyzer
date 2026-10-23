@@ -315,6 +315,12 @@
       "verified_against_version": "8.3.27",
       "evidence_source": "The pinned 8.3.27 corpus documents ЗаписьJSON / JSONWriter with 11 methods (ids 4602-4612: УстановитьСтроку, ОткрытьФайл, ОткрытьПоток, ЗаписатьНачалоМассива, ЗаписатьКонецМассива, ЗаписатьЗначение, ЗаписатьИмяСвойства, ЗаписатьНачалоОбъекта, ЗаписатьКонецОбъекта, ЗаписатьБезОбработки, Закрыть) and 2 properties (ids 9550-9551: Параметры, ПроверятьСтруктуру); platform_facts.json holds exactly these 13 records, and the published syntax assistant of 8.3 names the same eleven methods. The type is not among the corpus types without members, its name is unique (ЗаписьJSON / JSONWriter resolve to one type), and no docs-gap overlay of crates/bsl-platform/src/db.rs covers it.",
       "rationale": "JSON is written through the object/array/value members the extract lists; there is no table-level member, so a call like `Запись.ЗаписатьНачалоТаблицы()` is a call the platform does not answer. Attesting the 13 members makes the method-miss check able to say so, where before the receiver was a PlatformObject with an unjudgeable surface."
+    },
+    {
+      "type": "ValueTable",
+      "verified_against_version": "8.3.27",
+      "evidence_source": "The pinned 8.3.27 corpus documents ТаблицаЗначений / ValueTable with 19 methods (ids 1817-1835: Удалить, Сортировать, Скопировать, Сдвинуть, Получить, Очистить, НайтиСтроки, Количество, ЗаполнитьЗначения, Итог, Найти, ЗагрузитьКолонку, ВыбратьСтроку, Вставить, ВыгрузитьКолонку, СкопироватьКолонки, Добавить, Индекс, Свернуть) and 2 properties (ids 5519-5520: Колонки, Индексы); platform_facts.json holds exactly these 21 records. The type is not among the corpus types without members, its name is unique (ТаблицаЗначений / ValueTable resolve to one type), and no docs-gap overlay of crates/bsl-platform/src/db.rs covers it. A live run on 8.3.17.1549 and 8.3.27.2214 answers `Таблица.НетТакогоМетода()` on `Новый ТаблицаЗначений` with «Метод объекта не обнаружен (НетТакогоМетода)» and `Таблица.НетТакогоПоля` with «Поле объекта не обнаружено (НетТакогоПоля)», while `Колонки.Добавить`, `Добавить` and `Количество()` work.",
+      "rationale": "A value table's columns are members of its rows, not of the table, so the table's own surface is the platform's 21 members whatever columns it carries. Attesting them lets the method-miss and field-miss checks judge a table the walk saw built by `Новый ТаблицаЗначений` on every path, where before the receiver was a kind of its own with no surface the checks could close."
     }
   ]
 }
