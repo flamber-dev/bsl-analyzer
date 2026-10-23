@@ -2344,6 +2344,105 @@ impl<'db> InferenceContext<'db> {
         })
     }
 
+    /// The element of `Для Каждого Набор Из <Документ>.Движения`: the record set of each
+    /// register the document writes to, as its `RegisterRecords` lists them.
+    ///
+    /// The platform types the collection as `КоллекцияДвижений`, whose element its help
+    /// names only generically, so the element is known once the document is: the
+    /// collection read off a document object (`Объект.Движения`, `ЭтотОбъект.Движения`) or
+    /// the bare `Движения` of the document's own object module. A document this file
+    /// cannot see, one an extension adopts (the extension may add registers), one that
+    /// writes to no register, or a listed register the configuration does not have leaves
+    /// the element unknown.
+    fn register_records_element_ty(&self, collection: ExprId, coll_ty: TypeId) -> Option<TypeId> {
+        let TypeKind::PlatformObject(facet) = self.db.lookup_type(coll_ty) else {
+            return None;
+        };
+        let collection_name = facet.name.fold_lower();
+        if collection_name != "коллекциядвижений" && collection_name != "registerrecordscollection"
+        {
+            return None;
+        }
+        let document = match self.body.expr(collection) {
+            Expr::Field { base, field } if is_register_records_name(field.as_str()) => {
+                let base_ty = self.expr_types.get(&ExprId::from_idx(*base)).copied()?;
+                let base_ty = crate::this_object::coerce_to_metadata_ref_id(self.db, base_ty)
+                    .unwrap_or(base_ty);
+                match self.db.lookup_type(base_ty) {
+                    TypeKind::MetadataRef(facet)
+                        if facet.kind == hir_def::ty::MetadataKind::DocumentObject
+                            && facet.config_id == ConfigId::Root =>
+                    {
+                        facet.name.as_str().to_string()
+                    }
+                    _ => return None,
+                }
+            }
+            Expr::Path(name) if is_register_records_name(name.as_str()) => {
+                let resolver = self.get_resolver();
+                let (mdo_type, owner) =
+                    crate::this_object::resolve_this_object_owner(self.db, &resolver)?;
+                if mdo_type != bsl_metadata::MdoType::Document {
+                    return None;
+                }
+                owner.as_str().to_string()
+            }
+            _ => return None,
+        };
+        let object = self.db.resolve_metadata_object(
+            self.context_file_id,
+            bsl_metadata::MdoType::Document,
+            &document,
+        )?;
+        if object.object_belonging() == bsl_metadata::ObjectBelonging::Adopted {
+            return None;
+        }
+        let records = object.register_records();
+        if records.is_empty() {
+            return None;
+        }
+        let mut sets = Vec::with_capacity(records.len());
+        for (mdo_type, register) in records {
+            let kind = hir_def::ty::MetadataKind::record_set_kind_for(*mdo_type)?;
+            self.db.resolve_register(self.context_file_id, *mdo_type, register.as_str())?;
+            sets.push(self.db.metadata_ref(kind, register.as_str().to_string(), &RootConfigCtx));
+        }
+        Some(if sets.len() == 1 { sets[0] } else { self.db.union(sets) })
+    }
+
+    /// The name a method miss on a union of register record sets is reported against, when
+    /// no arm owns the method: neither a platform member of the set nor a method of the
+    /// register's record set module. An arm that might own it — a module body nobody read
+    /// included — keeps the call silent.
+    fn record_sets_miss_receiver_name(
+        &self,
+        receiver_ty: TypeId,
+        method_name: &hir_def::Name,
+    ) -> Option<hir_def::Name> {
+        let TypeKind::Union(arms) = self.db.lookup_type(receiver_ty) else {
+            return None;
+        };
+        let resolver = self.get_resolver();
+        let mut names = Vec::with_capacity(arms.len());
+        for arm in arms.iter().copied() {
+            let TypeKind::MetadataRef(facet) = self.db.lookup_type(arm) else {
+                return None;
+            };
+            if !is_record_set_kind(facet.kind) {
+                return None;
+            }
+            if !matches!(
+                crate::method_resolution::resolve_user_call(self.db, arm, method_name, &resolver),
+                crate::method_resolution::UserCallTarget::NotUserMethod
+            ) || crate::method_lookup::lookup_method(self.db, arm, method_name).is_some()
+            {
+                return None;
+            }
+            names.push(receiver_display_name(self.db, arm)?.as_str().to_string());
+        }
+        (!names.is_empty()).then(|| hir_def::Name::new(&names.join(", ")))
+    }
+
     /// A platform object whose extracted member surface is attested as complete for the
     /// served corpus. A homonym is refused here as well as by the verification itself, so the
     /// verdict does not rest on an unseen detail of the other module's contract.
@@ -3075,9 +3174,12 @@ impl<'db> InferenceContext<'db> {
             }
 
             Stmt::ForEach { var, collection, body } => {
-                let coll_ty = self.infer_expr(ExprId::from_idx(*collection));
+                let collection = ExprId::from_idx(*collection);
+                let coll_ty = self.infer_expr(collection);
                 let var_name = NormName::intern(self.body.binding_idx(*var).name.as_str());
-                match crate::iteration_lookup::resolve_iter_element_ty(self.db, coll_ty)
+                match self
+                    .register_records_element_ty(collection, coll_ty)
+                    .or_else(|| crate::iteration_lookup::resolve_iter_element_ty(self.db, coll_ty))
                     .filter(|elem_ty| !self.is_unknown(*elem_ty))
                 {
                     Some(elem_ty) => {
@@ -4319,6 +4421,7 @@ impl<'db> InferenceContext<'db> {
                         // condition the branch settled, and then nothing about the
                         // receiver is established here either.
                     } else if let Some(receiver_name) = receiver_display_name(self.db, receiver_ty)
+                        .or_else(|| self.record_sets_miss_receiver_name(receiver_ty, &method_name))
                     {
                         self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
                             expr: callee,
@@ -5552,6 +5655,23 @@ enum BareReceiverDispatch {
     /// Имя обозначает тип, и вызов на нём — обычный вызов члена: судит его
     /// общий маршрут, а не отдельная ветка.
     Receiver(TypeId),
+}
+
+/// `Движения` / `RegisterRecords`, the document object's collection of record sets.
+fn is_register_records_name(name: &str) -> bool {
+    let name = name.fold_lower();
+    name == "движения" || name == "registerrecords"
+}
+
+fn is_record_set_kind(kind: hir_def::ty::MetadataKind) -> bool {
+    use hir_def::ty::MetadataKind;
+    matches!(
+        kind,
+        MetadataKind::InformationRegisterRecordSet
+            | MetadataKind::AccumulationRegisterRecordSet
+            | MetadataKind::AccountingRegisterRecordSet
+            | MetadataKind::CalculationRegisterRecordSet
+    )
 }
 
 fn receiver_display_name(db: &dyn TypeKernelDb, receiver_ty: TypeId) -> Option<hir_def::Name> {
