@@ -51,6 +51,17 @@ pub fn resolve_this_object_owner(
     Some((mdo.mdo_type, Name::new(&mdo.name)))
 }
 
+/// The constant whose value-manager module is being analyzed.
+pub fn resolve_this_value_manager_owner(db: &dyn DefDatabase, resolver: &Resolver) -> Option<Name> {
+    let module_id = resolver.module_id()?;
+    let metadata = db.module_metadata(module_id);
+    if metadata.module_type != ModuleType::ValueManagerModule {
+        return None;
+    }
+    let mdo = metadata.mdo.as_ref()?;
+    (mdo.mdo_type == MdoType::Constant).then(|| Name::new(&mdo.name))
+}
+
 pub fn resolve_this_manager_owner(
     db: &dyn DefDatabase,
     resolver: &Resolver,
