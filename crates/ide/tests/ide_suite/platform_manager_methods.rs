@@ -425,10 +425,10 @@ fn document_object_chained_unknown_method_emits_unresolved_method_call() {
         unresolved.iter().any(|(rcv, m, kind)| {
             m.as_str().eq_ignore_ascii_case("НетТакогоМетода")
                 && *kind == UnresolvedMethodKind::MethodNotFound
-                && rcv.as_str() == "Документы.Документ1"
+                && rcv.as_str() == "ДокументОбъект.Документ1"
         }),
         "DocumentObject.НетТакогоМетода must emit UnresolvedMethodCall(MethodNotFound) \
-         with `Plural.MDO` receiver-name; got {unresolved:?}",
+         named by its own type; got {unresolved:?}",
     );
 }
 
@@ -614,7 +614,7 @@ fn register_recordset_typo_emits_method_not_found() {
     assert_eq!(
         entries,
         vec![(
-            "РегистрыСведений.РегистрСведений1".to_string(),
+            "РегистрСведенийМенеджерЗаписи.РегистрСведений1".to_string(),
             UnresolvedMethodKind::MethodNotFound
         )],
         "register record-manager miss is now authoritative (workspace + platform exhausted); \
@@ -862,7 +862,7 @@ fn metadata_ref_total_miss_emits_method_not_found() {
         .collect();
     assert_eq!(
         entries,
-        vec![("Справочники.Справочник1".to_string(), UnresolvedMethodKind::MethodNotFound)],
+        vec![("СправочникОбъект.Справочник1".to_string(), UnresolvedMethodKind::MethodNotFound)],
         "MetadataRef.*Object miss is now authoritative; got {entries:?}",
     );
 }
