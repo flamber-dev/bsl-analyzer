@@ -527,6 +527,42 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         self.db.unknown()
     }
 
+    /// Infer the type of a free-standing expression given as *text*, in the
+    /// metadata/config context of `file_id`. Powers the `//: Имя = Выражение`
+    /// type-hint: the right-hand side is typed by the real inference engine, so it
+    /// covers configuration objects (`Документы.X.СоздатьДокумент()`) and platform
+    /// types (`Новый ТаблицаЗначений`) alike. The expression is lowered and
+    /// inferred in a throwaway body, so neither the real body nor its source map is
+    /// touched. Returns `None` when the text does not parse or its type is unknown.
+    ///
+    /// Limitation: the expression is evaluated in isolation, so a right-hand side
+    /// referencing other locals of the real method is not resolved.
+    pub fn type_of_expr_text(&self, file_id: FileId, expr_text: &str) -> Option<TypeId> {
+        // Lowercase target name: the engine keys local variable types in
+        // `var_types` by `fold_lower`, and this name folds to itself.
+        const TARGET: &str = "__результатподсказки__";
+        let src =
+            format!("Процедура __подсказкатипа__()\n{TARGET} = {expr_text};\nКонецПроцедуры\n");
+
+        let parse = parser::parse(&src);
+        let root = parse.syntax_node();
+        let method = root.descendants().find(|n| n.kind() == syntax::SyntaxKind::PROCEDURE_DEF)?;
+
+        let lowered = hir_def::body::lower_method(&method, false);
+        let body = std::sync::Arc::new(lowered.body);
+
+        let mut ctx =
+            hir_ty::InferenceContext::new(self.db, file_id, DefWithBodyId::ModuleCode, &body);
+        ctx.infer_all();
+        let result = ctx.finish();
+
+        let ty = result.var_types.get(TARGET).copied()?;
+        if ty == self.db.unknown() {
+            return None;
+        }
+        Some(ty)
+    }
+
     pub fn type_of_binding_at(&self, file_id: FileId, range: TextRange) -> Option<TypeId> {
         let module_id = ModuleId::new(file_id);
         let module_bodies = self.db.module_bodies_ref(module_id);
@@ -952,6 +988,21 @@ mod tests {
 
         let method = sema.find_method(file_id, "НесуществующаяФункция");
         assert!(method.is_none());
+    }
+
+    #[test]
+    fn type_of_expr_text_types_literal_and_rejects_unknown() {
+        // Exercises the //: type-hint engine end to end (synthetic lower + infer +
+        // binding-type extraction) without needing platform/config data.
+        let (db, file_id) = create_db_with_file("Процедура П()\nКонецПроцедуры\n");
+        let sema = Semantics::new(&db);
+
+        // A literal types to a known type.
+        assert!(sema.type_of_expr_text(file_id, "42").is_some(), "number literal should type");
+        // An undefined bare name has no resolvable type.
+        assert!(sema.type_of_expr_text(file_id, "НетТакойПеременной").is_none());
+        // Garbage that does not parse as an expression must not panic.
+        let _ = sema.type_of_expr_text(file_id, ")(");
     }
 
     #[test]
