@@ -103,6 +103,7 @@ mod platform_manager_methods;
 mod platform_properties;
 mod query_projection_helper_propagation;
 mod query_projection_ide_surface;
+mod record_form_common_attributes;
 mod record_form_record_manager;
 mod recovered_expr_inference;
 mod references_by_name;

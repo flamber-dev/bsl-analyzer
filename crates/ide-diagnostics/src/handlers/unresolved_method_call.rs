@@ -383,6 +383,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn second_name_of_module_var_decl_shadows_qualified_call() {
+        // `Перем а, б;` declares two module variables; a member call on the
+        // SECOND name must resolve as a variable, not an unresolved module.
+        let code = r#"
+Перем Процессы, МассивПакетов;
+
+Процедура Тест()
+    МассивПакетов.Добавить(1);
+КонецПроцедуры
+"#;
+        let diagnostics = check_hir_diagnostic(code);
+        let umc: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnresolvedMethodCall).collect();
+        assert!(
+            umc.is_empty(),
+            "second name of a multi-name `Перем` must not fire UnresolvedMethodCall, got: {umc:?}"
+        );
+    }
+
     // `Перем = ОбщегоНазначения.ОбщийМодуль("Имя")` types `Перем` as the named common module,
     // so member calls resolve against it. Two-file fixtures (the harness analyses the last file
     // by hash order; a self-referential module name keeps it to two files, like the tests above).
