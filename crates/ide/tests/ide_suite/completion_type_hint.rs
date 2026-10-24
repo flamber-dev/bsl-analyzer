@@ -152,3 +152,50 @@ fn hint_with_configuration_object_expression_offers_object_members() {
     );
     assert!(has_label(&items, "ДополнительныеСвойства"), "got: {:?}", labels(&items));
 }
+
+#[test]
+fn untypable_hint_does_not_mask_a_later_working_one() {
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест(Парам)
+    //: Парам = НетТакойПеременной
+    //: Парам = Новый ТаблицаЗначений
+    Парам.$0
+КонецПроцедуры
+"#,
+        false,
+    );
+    assert!(has_label(&items, "ВыгрузитьКолонку"), "got: {:?}", labels(&items));
+}
+
+#[test]
+fn nearest_hint_above_the_receiver_wins() {
+    let items = complete(
+        r#"//- /test.bsl
+Процедура Тест(Парам)
+    //: Парам = Новый ТаблицаЗначений
+    Парам.Добавить();
+    //: Парам = Новый Массив
+    Парам.$0
+КонецПроцедуры
+"#,
+        false,
+    );
+    assert!(!has_label(&items, "ВыгрузитьКолонку"), "unexpected: {:?}", labels(&items));
+    assert!(has_label(&items, "Добавить"), "got: {:?}", labels(&items));
+}
+
+#[test]
+fn method_hint_does_not_apply_to_module_level_code() {
+    let items = complete(
+        r#"//- /test.bsl
+Перем Таблица;
+Процедура А()
+    //: Таблица = Новый ТаблицаЗначений
+КонецПроцедуры
+Таблица.$0
+"#,
+        false,
+    );
+    assert!(!has_label(&items, "ВыгрузитьКолонку"), "unexpected: {:?}", labels(&items));
+}
