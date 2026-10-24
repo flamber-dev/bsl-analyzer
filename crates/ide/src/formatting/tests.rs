@@ -11,6 +11,13 @@ fn check(input: &str, expected: Expect) {
     expected.assert_eq(&result.text);
 }
 
+fn fmt(input: &str) -> String {
+    let parsed = parser::parse(input);
+    let root = parsed.syntax_node();
+    let config = FormattingConfig::default();
+    format_file(&root, &config).text
+}
+
 fn check_with_spaces(input: &str, expected: Expect) {
     let parsed = parser::parse(input);
     let root = parsed.syntax_node();
@@ -553,56 +560,50 @@ fn regression_trailing_inline_comment_single_space() {
 }
 
 #[test]
-fn regression_multiline_literal_on_assignment_rhs_reindented() {
+fn regression_multiline_literal_on_assignment_rhs_keeps_literal_bytes() {
+    // The GAP in front of the literal is reindented to body+1 (#std444 п. 3.1),
+    // but the literal's own lines are not touched: the `|` keeps the single space
+    // the author wrote. Rewritten from a version that required `\t\t|` — that
+    // assertion encoded the literal-reindent defect (register п. 5).
     let input = "Процедура Т()\n А =\n \"ВЫБРАТЬ\n |X\";\nКонецПроцедуры\n";
-    let parsed = parser::parse(input);
-    let root = parsed.syntax_node();
-    let config = FormattingConfig::default();
-    let output = format_file(&root, &config).text;
+    let output = fmt(input);
 
     let lines: Vec<&str> = output.lines().collect();
     let quote_line = lines
         .iter()
         .find(|l| l.trim_start().starts_with("\"ВЫБРАТЬ"))
         .expect("formatter dropped the literal");
-    let pipe_line =
-        lines.iter().find(|l| l.trim_start().starts_with("|")).expect("missing `|` continuation");
     assert!(
         quote_line.starts_with("\t\t") && !quote_line.starts_with("\t\t\t"),
         "opening `\"` must sit at body+1 (#std444 п. 3.1); got {:?}",
         quote_line
     );
     assert!(
-        pipe_line.starts_with("\t\t|") && !pipe_line.starts_with("\t\t\t"),
-        "`|` continuation must align with opening `\"`; got {:?}",
-        pipe_line
+        output.contains("\"ВЫБРАТЬ\n |X\";"),
+        "literal contents must stay byte for byte; got {:?}",
+        output
     );
 }
 
 #[test]
-fn regression_multiline_literal_after_plus_continuation_reindented() {
+fn regression_multiline_literal_after_plus_continuation_keeps_literal_bytes() {
     let input = "Процедура Т()\n А = Б +\n \"ВЫБРАТЬ\n |X\";\nКонецПроцедуры\n";
-    let parsed = parser::parse(input);
-    let root = parsed.syntax_node();
-    let config = FormattingConfig::default();
-    let output = format_file(&root, &config).text;
+    let output = fmt(input);
 
     let lines: Vec<&str> = output.lines().collect();
     let quote_line = lines
         .iter()
         .find(|l| l.trim_start().starts_with("\"ВЫБРАТЬ"))
         .expect("formatter dropped the literal");
-    let pipe_line =
-        lines.iter().find(|l| l.trim_start().starts_with("|")).expect("missing `|` continuation");
     assert!(
         quote_line.starts_with("\t\t") && !quote_line.starts_with("\t\t\t"),
         "opening `\"` after `+\\n` must sit at body+1 (#std444 п. 3.3); got {:?}",
         quote_line
     );
     assert!(
-        pipe_line.starts_with("\t\t|") && !pipe_line.starts_with("\t\t\t"),
-        "`|` continuation after `+\\n` must align with opening `\"`; got {:?}",
-        pipe_line
+        output.contains("\"ВЫБРАТЬ\n |X\";"),
+        "literal contents must stay byte for byte after `+\\n`; got {:?}",
+        output
     );
 }
 
@@ -684,6 +685,80 @@ fn regression_comment_spacing_preserves_existing_whitespace() {
             	А = 1; //	after-tab
             КонецПроцедуры
         "#]],
+    );
+}
+
+#[test]
+fn regression_comment_separator_triple_slash_untouched() {
+    // `///` is a separator, not prose: the space-after-`//` rule must not split it
+    // into `// /` (register п. 4).
+    let output = fmt("/// Для 8.3\nПроцедура Т()\nКонецПроцедуры\n");
+    assert!(output.starts_with("/// Для 8.3\n"), "got {:?}", output);
+    assert!(!output.contains("// /"), "got {:?}", output);
+}
+
+#[test]
+fn regression_comment_separator_slash_rule_untouched() {
+    // The `////////…` rule that heads regions in vendor 1C code.
+    let rule = "////////////////////////////////////////////////////////////////////////////////";
+    let output = fmt(&format!("{rule}\n// Описание\n{rule}\nПроцедура Т()\nКонецПроцедуры\n"));
+    assert_eq!(
+        output,
+        format!("{rule}\n// Описание\n{rule}\nПроцедура Т()\nКонецПроцедуры\n"),
+        "separator rules must survive formatting unchanged"
+    );
+}
+
+#[test]
+fn regression_comment_only_slashes_untouched() {
+    let output = fmt("////\nПроцедура Т()\n\tА = 1; ////\nКонецПроцедуры\n");
+    assert_eq!(output, "////\nПроцедура Т()\n\tА = 1; ////\nКонецПроцедуры\n");
+}
+
+#[test]
+fn regression_comment_spacing_still_applied_to_prose() {
+    // The fix for `///` must not disable the rule itself.
+    let output = fmt("//заголовок\nПроцедура Т()\n\tА = 1; //коммент\nКонецПроцедуры\n");
+    assert_eq!(output, "// заголовок\nПроцедура Т()\n\tА = 1; // коммент\nКонецПроцедуры\n");
+}
+
+#[test]
+fn regression_multiline_query_literal_pipes_untouched() {
+    // A query text assembled as a literal: every `|` keeps the author's indent,
+    // whatever it is (register п. 5).
+    let input = "Процедура Т()\nЗапрос.Текст =\n\t\"ВЫБРАТЬ\n\t|\tТовары.Ссылка\n\t|ИЗ\n\t|\tСправочник.Товары КАК Товары\";\nКонецПроцедуры\n";
+    let output = fmt(input);
+    assert!(
+        output
+            .contains("\"ВЫБРАТЬ\n\t|\tТовары.Ссылка\n\t|ИЗ\n\t|\tСправочник.Товары КАК Товары\""),
+        "query literal must stay byte for byte; got {:?}",
+        output
+    );
+    assert_eq!(fmt(&output), output, "formatting must be idempotent");
+}
+
+#[test]
+fn regression_both_literals_of_one_concatenation_untouched() {
+    // The defect was inconsistent: the FIRST literal of a concatenation was
+    // reindented and the second was not. Neither may be now.
+    let input =
+        "Процедура Т()\nТекст =\n\t\"ВЫБРАТЬ\n |A\"\n\t+\n\t\"\n |ИЗ Т\";\nКонецПроцедуры\n";
+    let output = fmt(input);
+    assert!(output.contains("\"ВЫБРАТЬ\n |A\""), "first literal changed; got {:?}", output);
+    assert!(output.contains("\"\n |ИЗ Т\""), "second literal changed; got {:?}", output);
+}
+
+#[test]
+fn regression_literal_containing_code_like_text_untouched() {
+    // Code-looking contents inside a literal (keywords, `//`, `=`) are data, not
+    // code: no reindent, no space after `//`, no spaces around `=`.
+    let input =
+        "Процедура Т()\nКод =\n\t\"Если А=1 Тогда\n|//коммент\n|КонецЕсли;\";\nКонецПроцедуры\n";
+    let output = fmt(input);
+    assert!(
+        output.contains("\"Если А=1 Тогда\n|//коммент\n|КонецЕсли;\""),
+        "literal contents must stay byte for byte; got {:?}",
+        output
     );
 }
 
