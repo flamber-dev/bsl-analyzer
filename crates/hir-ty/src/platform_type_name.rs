@@ -283,6 +283,18 @@ mod tests {
         assert!(manager_name_for(MdoType::Constant).is_none());
     }
 
+    /// Diagnostics and hover name an object by `display_label`, so it must be the
+    /// spelling the platform reads: `ОтчетОбъект`, not `ОтчётОбъект`.
+    #[test]
+    fn an_object_kind_is_displayed_by_its_platform_type_name() {
+        for &(mdo, ru, en) in OBJECT_NAMES {
+            let kind = hir_def::ty::MetadataKind::object_kind_for(mdo)
+                .unwrap_or_else(|| panic!("{mdo:?} has an object kind"));
+            assert_eq!(kind.display_label(base_db::Locale::Ru), ru, "{mdo:?}");
+            assert_eq!(kind.display_label(base_db::Locale::En), en, "{mdo:?}");
+        }
+    }
+
     #[test]
     fn generic_bridge_targets_recognised_case_insensitively() {
         for n in [
