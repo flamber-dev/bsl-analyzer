@@ -249,14 +249,23 @@ pub fn apply_extension_merge<'db>(
         // Structural applicability check: every `&Вместо`/`&Перед`/`&После` interceptor must
         // declare the same signature as the base method it weaves onto. Independent of the
         // overlay resolver — compares the extension's own symbols against the base module's.
-        if config.any_enabled(runner::WEAVING_DIAGNOSTICS) {
+        let weaving_checks = config.any_enabled(runner::WEAVING_DIAGNOSTICS);
+        let data_exchange = !config.is_disabled(DiagnosticCode::DataExchangeLoading);
+        if weaving_checks || data_exchange {
             let base_module = hir::ModuleId::new(wid.base_file(db));
             let base_symbols = std_ctx.symbol_tree_for(base_module);
-            standalone.extend(safe_collect("merge:weaving_signature", || {
-                handlers::weaving_signature_mismatch::check(&std_ctx, &base_symbols)
-            }));
-            standalone.extend(safe_collect("merge:weaving_annotation", || {
-                handlers::weaving_annotation_not_applicable::check(&std_ctx, &base_symbols)
+            if weaving_checks {
+                standalone.extend(safe_collect("merge:weaving_signature", || {
+                    handlers::weaving_signature_mismatch::check(&std_ctx, &base_symbols)
+                }));
+                standalone.extend(safe_collect("merge:weaving_annotation", || {
+                    handlers::weaving_annotation_not_applicable::check(&std_ctx, &base_symbols)
+                }));
+            }
+            // An interceptor is judged by the base handler it targets, which only the
+            // pairing knows; the standalone pass skips it.
+            standalone.extend(safe_collect("merge:data_exchange_interceptors", || {
+                handlers::data_exchange_loading::check_interceptors(&std_ctx, &base_symbols)
             }));
         }
     }
@@ -270,6 +279,10 @@ pub fn apply_extension_merge<'db>(
         let eff_base_sensitive =
             safe_collect("merge:effective_base_sensitive", || collect_base_sensitive(&eff_ctx));
         standalone.extend(effective::remap_inserted(eff_base_sensitive, &effmod.segments));
+        // Already on the extension method's name, so not remapped.
+        standalone.extend(safe_collect("merge:data_exchange_change_and_validate", || {
+            handlers::data_exchange_loading::check_change_and_validate(&eff_ctx, &std_ctx)
+        }));
     }
 
     finalize_diagnostics(db, file_id, config, file_set, &mut standalone);
