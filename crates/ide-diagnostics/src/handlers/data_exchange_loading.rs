@@ -34,29 +34,10 @@ const MONITORED_PROCEDURES: &[&str] =
 const DEFAULT_GUARD_WRAPPERS: &[&str] = &["ЗарплатаКадры.ОтключитьБизнесЛогикуПриЗаписи"];
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let code = DiagnosticCode::DataExchangeLoading;
-    if ctx.is_disabled_with_metadata(code) {
+    if !applies(ctx) {
         return Vec::new();
     }
-
-    if !is_applicable_module(ctx) {
-        return Vec::new();
-    }
-
-    let find_first =
-        ctx.config.get_bool(DiagnosticCode::DataExchangeLoading, "findFirst").unwrap_or(false);
-
-    let guard_wrappers: Vec<(String, String)> = ctx
-        .config
-        .get_string_array(code, "guardWrappers")
-        .unwrap_or_else(|| DEFAULT_GUARD_WRAPPERS.iter().map(|s| s.to_string()).collect())
-        .iter()
-        .filter_map(|entry| {
-            let (module, function) = entry.split_once('.')?;
-            Some((module.trim().fold_lower(), function.trim().fold_lower()))
-        })
-        .collect();
-
+    let settings = Settings::read(ctx);
     let item_tree = ctx.item_tree();
     let module_bodies = ctx.module_bodies();
     let root = ctx.config.quick_fixes.then(|| ctx.parse().syntax_node());
@@ -67,24 +48,160 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         if !is_monitored_procedure(proc.name()) {
             continue;
         }
-        let Some(body) = module_bodies.body(proc.key()) else { continue };
-        if !has_guard_pattern(body, find_first, &guard_wrappers) {
-            diagnostics.push(Diagnostic {
-                code: DiagnosticCode::DataExchangeLoading,
-                message: "Отсутствует проверка условия ОбменДанными.Загрузка в обработчике события. \
-                          Необходимо добавить проверку для предотвращения выполнения логики при обмене данными"
-                    .to_string(),
-                severity: ctx.severity(code),
-                range: proc.name_range(),
-                tags: ctx.tags(code),
-                fixes: root
-                    .as_ref()
-                    .map_or_else(Vec::new, |root| insert_guard_fix(root, proc.source_range())),
-            });
+        // An extension method is the handler of its annotation's target, not of its own
+        // name; the base-aware passes below judge it against the paired base module.
+        if proc.annotations().iter().any(|a| a.kind.is_interception()) {
+            continue;
         }
+        let Some(body) = module_bodies.body(proc.key()) else { continue };
+        diagnostics.extend(missing_guard(ctx, &settings, body, proc.name_range(), || {
+            root.as_ref().map_or_else(Vec::new, |root| insert_guard_fix(root, proc.source_range()))
+        }));
     }
 
     diagnostics
+}
+
+/// `&Перед` / `&После` / `&Вместо` interceptors of the paired base module's event
+/// handlers. The interceptor runs inside the same event as the handler it targets, so it
+/// needs its own guard whatever its own name is; a guard in the base body does not stop
+/// the interceptor's code.
+pub fn check_interceptors(
+    ctx: &DiagnosticsContext,
+    base_symbols: &hir::SymbolTree,
+) -> Vec<Diagnostic> {
+    if !applies(ctx) {
+        return Vec::new();
+    }
+    let settings = Settings::read(ctx);
+    let parse = ctx.parse();
+    let module_bodies = ctx.module_bodies();
+    let root = ctx.config.quick_fixes.then(|| parse.syntax_node());
+
+    let mut diagnostics = Vec::new();
+
+    for method in ctx.symbol_tree().methods() {
+        if method.is_function
+            || method.annotations.iter().any(|a| a.kind == hir::AnnotationKind::ChangeAndValidate)
+        {
+            continue;
+        }
+        let Some(node) = method.syntax_node(&parse) else { continue };
+        let Some(interception) = hir::interceptor_target(&node) else { continue };
+        let Some(base) = base_symbols.find_method(&Name::new(&interception.target)) else {
+            continue;
+        };
+        if base.is_function || !is_monitored_procedure(&base.name) {
+            continue;
+        }
+        let Some(body) = module_bodies.body(method.id.local_id) else { continue };
+        diagnostics.extend(missing_guard(ctx, &settings, body, method.name_range, || {
+            root.as_ref().map_or_else(Vec::new, |root| insert_guard_fix(root, method.source_range))
+        }));
+    }
+
+    diagnostics
+}
+
+/// `&ИзменениеИКонтроль` methods replacing the paired base module's event handlers. The
+/// method's final body is the base handler's body in the effective module (`#Удаление`
+/// dropped, `#Вставка` kept), so that is the body judged; the finding goes on the
+/// extension method's name. `eff_ctx` reads the effective module, `ext_ctx` the extension
+/// file itself.
+pub fn check_change_and_validate(
+    eff_ctx: &DiagnosticsContext,
+    ext_ctx: &DiagnosticsContext,
+) -> Vec<Diagnostic> {
+    if !applies(eff_ctx) {
+        return Vec::new();
+    }
+    let settings = Settings::read(eff_ctx);
+    let ext_parse = ext_ctx.parse();
+    let eff_item_tree = eff_ctx.item_tree();
+    let eff_bodies = eff_ctx.module_bodies();
+
+    let mut diagnostics = Vec::new();
+    let mut spliced_targets = Vec::new();
+
+    for method in ext_ctx.symbol_tree().methods() {
+        let Some(node) = method.syntax_node(&ext_parse) else { continue };
+        let Some(change) = hir::extract_change_and_validate(&node) else { continue };
+        let target = change.target.fold_lower();
+        // The merge splices the first method of a target in source order and drops the
+        // rest, which leave no final body of their own to judge.
+        if spliced_targets.contains(&target) {
+            continue;
+        }
+        spliced_targets.push(target.clone());
+        if method.is_function {
+            continue;
+        }
+        let Some(handler) = eff_item_tree
+            .methods()
+            .find(|m| !m.is_function() && m.name().as_str().fold_lower() == target)
+        else {
+            continue;
+        };
+        if !is_monitored_procedure(handler.name()) {
+            continue;
+        }
+        let Some(body) = eff_bodies.body(handler.key()) else { continue };
+        // The existing fix inserts outside the `#Вставка` markers, i.e. into the copy of the
+        // base the platform verifies, so none is offered here.
+        diagnostics.extend(missing_guard(eff_ctx, &settings, body, method.name_range, Vec::new));
+    }
+
+    diagnostics
+}
+
+fn applies(ctx: &DiagnosticsContext) -> bool {
+    !ctx.is_disabled_with_metadata(DiagnosticCode::DataExchangeLoading) && is_applicable_module(ctx)
+}
+
+struct Settings {
+    find_first: bool,
+    guard_wrappers: Vec<(String, String)>,
+}
+
+impl Settings {
+    fn read(ctx: &DiagnosticsContext) -> Self {
+        let code = DiagnosticCode::DataExchangeLoading;
+        let find_first = ctx.config.get_bool(code, "findFirst").unwrap_or(false);
+        let guard_wrappers = ctx
+            .config
+            .get_string_array(code, "guardWrappers")
+            .unwrap_or_else(|| DEFAULT_GUARD_WRAPPERS.iter().map(|s| s.to_string()).collect())
+            .iter()
+            .filter_map(|entry| {
+                let (module, function) = entry.split_once('.')?;
+                Some((module.trim().fold_lower(), function.trim().fold_lower()))
+            })
+            .collect();
+        Self { find_first, guard_wrappers }
+    }
+}
+
+fn missing_guard(
+    ctx: &DiagnosticsContext,
+    settings: &Settings,
+    body: &Body,
+    range: TextRange,
+    fixes: impl FnOnce() -> Vec<Fix>,
+) -> Option<Diagnostic> {
+    if has_guard_pattern(body, settings.find_first, &settings.guard_wrappers) {
+        return None;
+    }
+    let code = DiagnosticCode::DataExchangeLoading;
+    Some(Diagnostic {
+        code,
+        message: "Отсутствует проверка условия ОбменДанными.Загрузка в обработчике события. \
+                  Необходимо добавить проверку для предотвращения выполнения логики при обмене данными"
+            .to_string(),
+        severity: ctx.severity(code),
+        range,
+        tags: ctx.tags(code),
+        fixes: fixes(),
+    })
 }
 
 /// Inserts `Если ОбменДанными.Загрузка Тогда Возврат; КонецЕсли;` as the first
