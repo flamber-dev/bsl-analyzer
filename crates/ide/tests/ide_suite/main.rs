@@ -23,6 +23,7 @@ mod configurations_cfe_dependencies;
 mod configurations_cfe_visibility;
 mod constant_value_manager_context;
 mod diagnostics_collection_row_methods;
+mod diagnostics_data_exchange_extension;
 mod diagnostics_extension_merge;
 mod diagnostics_form_attribute_call;
 mod diagnostics_platform_docs_gap_members;
