@@ -5812,7 +5812,12 @@ fn receiver_display_name(db: &dyn TypeKernelDb, receiver_ty: TypeId) -> Option<h
             let plural = mdo_kind_to_receiver_label(facet.kind)?;
             Some(hir_def::Name::new(&format!("{}.{}", plural, facet.name.as_str())))
         }
-        TypeKind::ThisObject { owner, .. } | TypeKind::ThisManager { owner, .. } => {
+        TypeKind::ThisObject { owner, .. } => {
+            let kind = hir_def::ty::MetadataKind::object_kind_for(owner.mdo_type)?;
+            let label = mdo_kind_to_receiver_label(kind)?;
+            Some(hir_def::Name::new(&format!("{}.{}", label, owner.name.as_str())))
+        }
+        TypeKind::ThisManager { owner, .. } => {
             let plural = mdo_receiver_label(owner.mdo_type)?;
             Some(hir_def::Name::new(&format!("{}.{}", plural, owner.name.as_str())))
         }

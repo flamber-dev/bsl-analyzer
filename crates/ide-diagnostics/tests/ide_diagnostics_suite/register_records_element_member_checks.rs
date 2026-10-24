@@ -162,6 +162,22 @@ fn an_object_the_manager_creates_is_named_by_its_own_type() {
     );
 }
 
+/// `ЭтотОбъект` in the object module is that same object, so it is named the same way.
+#[test]
+fn this_object_is_named_by_its_own_type() {
+    let found = method_misses(
+        OBJECT_MODULE,
+        "Процедура Тест() Экспорт
+    ЭтотОбъект.НетТакогоМетода();
+КонецПроцедуры
+",
+    );
+    assert_eq!(
+        found,
+        ["Метод 'НетТакогоМетода' не найден у 'ДокументОбъект.Документ1' | ЭтотОбъект.НетТакогоМетода"]
+    );
+}
+
 fn method_misses(relative: &str, source: &str) -> Vec<String> {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("cf");
