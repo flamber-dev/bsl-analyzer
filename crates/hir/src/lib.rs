@@ -546,8 +546,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
 
         let parse = parser::parse(&src);
         let root = parse.syntax_node();
-        let method =
-            root.descendants().find(|n| n.kind() == syntax::SyntaxKind::PROCEDURE_DEF)?;
+        let method = root.descendants().find(|n| n.kind() == syntax::SyntaxKind::PROCEDURE_DEF)?;
 
         let lowered = hir_def::body::lower_method(&method, false);
         let body = std::sync::Arc::new(lowered.body);
