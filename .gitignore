@@ -4,6 +4,10 @@
 target/
 **/target/
 target-*/
+
+# code-index MCP search DB (created when indexing this repo)
+.code-index/
+**/.code-index/
 **/.rustc_info.json
 
 # IDE

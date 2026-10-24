@@ -5,6 +5,12 @@ members = [
     "crates/bsl-platform/tools/html-parser",
     "xtask",
 ]
+# `crates/.code-index/` is a code-search index DB (created by the code-index MCP
+# pointed at `crates/`), not a crate - keep the `crates/*` glob from treating it
+# as a workspace member.
+exclude = [
+    "crates/.code-index",
+]
 
 [workspace.package]
 version = "0.4.0"
