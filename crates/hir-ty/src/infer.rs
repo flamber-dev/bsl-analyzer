@@ -192,6 +192,10 @@ struct PathWalk {
     /// The local reads being resolved.
     active: Vec<ExprId>,
     resolved: FxHashMap<ExprId, Option<Vec<TypeId>>>,
+    /// Whether a value read through no local is vouched for by its own inferred type: a call, a
+    /// literal, a constructor or a global. The type of a metadata object such a value yields does
+    /// not depend on the path that reached it, unlike a platform object's facets.
+    inferred_leaves: bool,
 }
 
 /// What a definition reaching a read takes its value from.
@@ -2479,6 +2483,66 @@ impl<'db> InferenceContext<'db> {
         }
     }
 
+    /// False when a write reaching the local `receiver_expr` is read through may hold a value
+    /// with `field`.
+    ///
+    /// The writes are followed through [`Self::types_on_every_path`] with
+    /// [`PathWalk::inferred_leaves`], so a write is judged by the type inferred for its own
+    /// right-hand side unless that value is itself read through a local, whose writes are then
+    /// judged in turn; a member, an index or a method call of a local holds one type only when
+    /// the local does. A receiver read through no local written in this body answers true. A
+    /// parameter or a declaration reaching the read, a loop element of an unknown collection and
+    /// an untyped write may hold anything. A value a call writes through a by-reference argument
+    /// or `Выполнить` assigns is not among the writes, as for any other read of the object.
+    fn metadata_miss_holds_on_every_write(
+        &self,
+        receiver_expr: ExprId,
+        field: &hir_def::Name,
+    ) -> bool {
+        if !self.read_through_local(receiver_expr) {
+            return true;
+        }
+        let mut walk = PathWalk { inferred_leaves: true, ..PathWalk::default() };
+        let Some(types) = self.types_on_every_path(receiver_expr, &mut walk) else {
+            return false;
+        };
+        !types.is_empty() && types.iter().all(|ty| self.value_certainly_lacks_field(*ty, field))
+    }
+
+    /// Whether `expr` is a local written in this body, or a member, an index or a method call
+    /// whose receiver chain starts at one.
+    fn read_through_local(&self, expr: ExprId) -> bool {
+        match self.body.expr(expr) {
+            Expr::Path(name) => self.body_writes_name(name, &name.as_str().fold_lower()),
+            Expr::Field { base, .. } | Expr::Index { base, .. } => {
+                self.read_through_local(ExprId::from_idx(*base))
+            }
+            Expr::MethodCall { receiver, .. } => {
+                self.read_through_local(ExprId::from_idx(*receiver))
+            }
+            Expr::Call { callee, .. } => match self.body.expr_idx(*callee) {
+                Expr::Field { base, .. } => self.read_through_local(ExprId::from_idx(*base)),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Whether a value of `ty` cannot answer `field`: an empty value, or a metadata object whose
+    /// field set is closed and lacks it.
+    fn value_certainly_lacks_field(&self, ty: TypeId, field: &hir_def::Name) -> bool {
+        match self.db.lookup_type(ty) {
+            TypeKind::Undefined | TypeKind::Null => true,
+            TypeKind::MetadataRef(_) | TypeKind::ThisObject { .. } => {
+                let obj_resolver =
+                    crate::object_resolver::DbObjectResolver::new(self.db, self.context_file_id);
+                !crate::field_enum::metadata_fields_open(self.db, &obj_resolver, ty)
+                    && self.lacks_field(ty, field)
+            }
+            _ => false,
+        }
+    }
+
     /// True when every type `receiver_expr` can hold on the paths reaching it is a closed
     /// receiver lacking the member; false when that set cannot be vouched for.
     fn miss_holds_on_every_path(
@@ -2509,17 +2573,34 @@ impl<'db> InferenceContext<'db> {
     /// the right-hand sides of the writes reaching it and the collection of the loop that
     /// binds it. A constructor that writes its type name and takes no argument is that type
     /// on every path. A local being resolved that is reached again — a write that reads its own
-    /// target (`Описание = Описание.Родитель` in a loop) — vouches for nothing.
+    /// target (`Описание = Описание.Родитель` in a loop) — vouches for nothing. With
+    /// [`PathWalk::inferred_leaves`] a method call is vouched for like a member read, and any
+    /// other call, a literal, a constructor and a global by their own inferred type, and a
+    /// local by the writes reaching it alone, without the values a call or `Выполнить` may give
+    /// it unseen.
     fn types_on_every_path(&self, expr: ExprId, walk: &mut PathWalk) -> Option<Vec<TypeId>> {
         const MAX_DEPTH: usize = 16;
+        let through_receiver = |receiver: &hir_def::hir::ExprIdx, walk: &mut PathWalk| {
+            let receiver = ExprId::from_idx(*receiver);
+            let walked = self.expr_types.get(&receiver).copied()?;
+            let receiver_types = self.types_on_every_path(receiver, walk)?;
+            if receiver_types.is_empty() || receiver_types.iter().any(|ty| *ty != walked) {
+                return None;
+            }
+            Some(vec![self.expr_types.get(&expr).copied()?])
+        };
         match self.body.expr(expr) {
-            Expr::Field { base, .. } | Expr::Index { base, .. } => {
-                let base = ExprId::from_idx(*base);
-                let walked = self.expr_types.get(&base).copied()?;
-                let base_types = self.types_on_every_path(base, walk)?;
-                if base_types.is_empty() || base_types.iter().any(|ty| *ty != walked) {
-                    return None;
+            Expr::Field { base, .. } | Expr::Index { base, .. } => through_receiver(base, walk),
+            Expr::MethodCall { receiver, .. } if walk.inferred_leaves => {
+                through_receiver(receiver, walk)
+            }
+            Expr::Call { callee, .. } if walk.inferred_leaves => {
+                match self.body.expr_idx(*callee) {
+                    Expr::Field { base, .. } => through_receiver(base, walk),
+                    _ => Some(vec![self.expr_types.get(&expr).copied()?]),
                 }
+            }
+            Expr::Literal(_) | Expr::New { .. } if walk.inferred_leaves => {
                 Some(vec![self.expr_types.get(&expr).copied()?])
             }
             Expr::Path(name) => {
@@ -2531,16 +2612,18 @@ impl<'db> InferenceContext<'db> {
                 }
                 let key = name.as_str().fold_lower();
                 if !self.body_writes_name(name, &key) {
-                    // Not a local: only the configuration root is the same on every path.
+                    // Not a local: only the configuration root is the same on every path,
+                    // unless the walk trusts the value's own inferred type.
                     let ty = self.expr_types.get(&expr).copied()?;
-                    return crate::field_lookup::is_configuration_metadata_root(self.db, ty)
-                        .then(|| vec![ty]);
+                    return (walk.inferred_leaves
+                        || crate::field_lookup::is_configuration_metadata_root(self.db, ty))
+                    .then(|| vec![ty]);
                 }
                 let use_stmt = self.body.enclosing_stmt(expr)?;
                 let reaching =
                     self.reaching_assignment_types_at(self.read_point(use_stmt)?, &key)?;
                 let use_stmt = use_stmt.to_idx();
-                if self.local_may_change_unseen(&key, use_stmt) {
+                if !walk.inferred_leaves && self.local_may_change_unseen(&key, use_stmt) {
                     return None;
                 }
                 let sources = self.loop_aware_definitions(&key, use_stmt, reaching)?;
@@ -3410,6 +3493,16 @@ impl<'db> InferenceContext<'db> {
                     let base_id = ExprId::from_idx(*base);
                     let closed_platform_object = self.is_closed_platform_object(base_ty)
                         && self.platform_field_miss_holds_on_every_path(base_id, field);
+                    // A metadata object read through a local is typed by the local's textually
+                    // latest write; after `Если … ИначеЕсли` another branch may have written an
+                    // object of another kind that owns the field, so the miss must hold for
+                    // every write reaching the read.
+                    let closed_metadata_object = match base_kind {
+                        TypeKind::MetadataRef(_) | TypeKind::ThisObject { .. } => {
+                            self.metadata_miss_holds_on_every_write(base_id, field)
+                        }
+                        _ => true,
+                    };
                     let closed_receiver = (matches!(
                         base_kind,
                         TypeKind::MetadataRef(_)
@@ -3419,7 +3512,8 @@ impl<'db> InferenceContext<'db> {
                         self.db,
                         &obj_resolver,
                         base_ty,
-                    )) || matches!(base_kind, TypeKind::Structure(facet) if facet.closed)
+                    ) && closed_metadata_object)
+                        || matches!(base_kind, TypeKind::Structure(facet) if facet.closed)
                         || crate::manager_lookup::manager_members_closed(
                             self.db,
                             &obj_resolver,
@@ -3834,14 +3928,10 @@ impl<'db> InferenceContext<'db> {
             && !body_binding_shadows
             && !self.assigned_var_names.contains(&NormName::intern(name.as_str()))
         {
-            let source_root_id =
-                self.db.file_source_root_input(self.context_file_id).source_root_id(self.db);
-            if let Some(canonical) =
-                self.db.module_index(source_root_id).canonical_common_module_name(name)
-            {
+            if let Some(canonical) = self.canonical_common_module_name(name) {
                 trace!("resolved {} as common module type", name);
                 return found(
-                    self.db.common_module(canonical.to_string(), ConfigId::Root),
+                    self.db.common_module(canonical, ConfigId::Root),
                     BareNameOrigin::CommonModule,
                     all_env,
                 );
@@ -4102,6 +4192,13 @@ impl<'db> InferenceContext<'db> {
         (!self.manager_collection_shadowed(&plural)).then_some(plural)
     }
 
+    /// A common module named like the manager whose module this is still denotes
+    /// the common module (it extends the global context), so a call through it is
+    /// not the self-qualified access that verdict names (itrous/bsl-analyzer#225).
+    fn in_manager_module(&self) -> bool {
+        crate::this_object::resolve_this_manager_owner(self.db, &self.get_resolver()).is_some()
+    }
+
     fn report_self_qualified_manager_diagnostic(
         &mut self,
         call_expr: ExprId,
@@ -4232,12 +4329,14 @@ impl<'db> InferenceContext<'db> {
                             .iter()
                             .map(|arg_id| !matches!(self.body.expr(*arg_id), Expr::Missing))
                             .collect();
-                        self.push_inference_diagnostic(
-                            InferenceDiagnostic::RedundantAccessToObjectTwoLevel {
-                                expr: callee,
-                                module: module.clone(),
-                            },
-                        );
+                        if !self.in_manager_module() {
+                            self.push_inference_diagnostic(
+                                InferenceDiagnostic::RedundantAccessToObjectTwoLevel {
+                                    expr: callee,
+                                    module: module.clone(),
+                                },
+                            );
+                        }
                         self.push_inference_diagnostic(
                             InferenceDiagnostic::MissedRequiredParameterCommonModule {
                                 expr: callee,
@@ -5355,11 +5454,24 @@ impl<'db> InferenceContext<'db> {
         if !self.get_resolver().user_common_module_exists(self.db, &name) {
             return None;
         }
+        let canonical = self.canonical_common_module_name(&name)?;
+        Some(self.db.common_module(canonical, ConfigId::Root))
+    }
+
+    /// The declared spelling of the common module `name`. A module declared without
+    /// `Module.bsl` is absent from the path index; its declaration still carries it.
+    fn canonical_common_module_name(&self, name: &Name) -> Option<String> {
         let source_root_id =
             self.db.file_source_root_input(self.context_file_id).source_root_id(self.db);
-        let module_index = self.db.module_index(source_root_id);
-        let canonical = module_index.canonical_common_module_name(&name)?;
-        Some(self.db.common_module(canonical.to_string(), ConfigId::Root))
+        self.db
+            .module_index(source_root_id)
+            .canonical_common_module_name(name)
+            .map(str::to_string)
+            .or_else(|| {
+                self.db
+                    .resolve_common_module(self.context_file_id, name.as_str())
+                    .map(|cm| bsl_metadata::MdObject::name(cm.as_ref()).to_string())
+            })
     }
 
     fn dispatch_bare_ident_field_call(
@@ -5448,10 +5560,14 @@ impl<'db> InferenceContext<'db> {
                 .map(|arg_id| !matches!(self.body.expr(*arg_id), Expr::Missing))
                 .collect();
 
-            self.push_inference_diagnostic(InferenceDiagnostic::RedundantAccessToObjectTwoLevel {
-                expr: call_expr,
-                module: module_name.clone(),
-            });
+            if !self.in_manager_module() {
+                self.push_inference_diagnostic(
+                    InferenceDiagnostic::RedundantAccessToObjectTwoLevel {
+                        expr: call_expr,
+                        module: module_name.clone(),
+                    },
+                );
+            }
 
             self.push_inference_diagnostic(
                 InferenceDiagnostic::MissedRequiredParameterCommonModule {
