@@ -19,6 +19,39 @@ use super::env_filter::EnvFilter;
 use super::fuzzy::{MatchTier, PrefixMatcher};
 use super::{CompletionItem, CompletionItemKind, CompletionPosition};
 
+/// Find a `//: <var> = <expr>` type-hint comment for `var_name` and return the
+/// right-hand expression text. Scans the enclosing method (else the whole file).
+/// The discriminator is the colon right after `//` (`//:`), so ordinary comments
+/// never match.
+fn find_type_hint(receiver: &SyntaxNode, var_name: &str) -> Option<String> {
+    let want = var_name.fold_lower();
+    let scope = receiver
+        .ancestors()
+        .find(|n| matches!(n.kind(), SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF))
+        .or_else(|| receiver.ancestors().last())
+        .unwrap_or_else(|| receiver.clone());
+
+    for token in scope.descendants_with_tokens().filter_map(|e| e.into_token()) {
+        if token.kind() != SyntaxKind::COMMENT {
+            continue;
+        }
+        let Some(rest) = token.text().strip_prefix("//").and_then(|s| s.strip_prefix(':')) else {
+            continue;
+        };
+        let Some((lhs, rhs)) = rest.split_once('=') else {
+            continue;
+        };
+        if lhs.trim().fold_lower() != want {
+            continue;
+        }
+        let expr = rhs.trim().trim_end_matches(';').trim();
+        if !expr.is_empty() {
+            return Some(expr.to_string());
+        }
+    }
+    None
+}
+
 pub(super) fn platform_completions<DB: RootDatabase>(
     db: &DB,
     position: CompletionPosition,
@@ -57,10 +90,25 @@ pub(super) fn platform_completions<DB: RootDatabase>(
     let sema = Semantics::new(db);
     let mut receiver_id = sema.type_of_expr(position.file_id, &receiver_expr);
 
+    // An explicit `//: Имя = Выражение` type hint overrides a missing (`Unknown`)
+    // or too-generic (`Произвольный` -> `Any`) inferred type - the cases where
+    // member completion is otherwise empty. `Произвольный` is what the engine gives
+    // a standard event-handler parameter (e.g. `ДанныеЗаполнения` of
+    // `ОбработкаЗаполнения`), so gating only on `Unknown` would miss exactly those.
+    if matches!(db.lookup_type(receiver_id), TypeKind::Unknown | TypeKind::Any) {
+        if let Some(name) = extract_receiver_ident(&receiver_expr) {
+            if let Some(expr_text) = find_type_hint(&receiver_expr, &name) {
+                if let Some(id) = sema.type_of_expr_text(position.file_id, &expr_text) {
+                    receiver_id = id;
+                }
+            }
+        }
+    }
+
     // `Unknown` here means inference has no type for the receiver, which happens
     // both when a user symbol holds the name and when the name is a bare TYPE
     // (`XBase.`, `Запрос.`) that the cascade never types. Only the claim below
-    // tells those apart — the lowering status cannot, since both are lowered.
+    // tells those apart - the lowering status cannot, since both are lowered.
     if matches!(db.lookup_type(receiver_id), TypeKind::Unknown) {
         if let Some(name) = extract_receiver_ident(&receiver_expr) {
             let name_node = Name::new(&name);
@@ -75,7 +123,7 @@ pub(super) fn platform_completions<DB: RootDatabase>(
                 // A user symbol holds the name, so it does not denote the global.
                 // Its reaching assignment carries the receiver's real type; with no
                 // reaching write (a declared-but-unwritten local, a module item)
-                // there is nothing to complete against — and naming the global here
+                // there is nothing to complete against, and naming the global here
                 // is exactly the suggestion the availability diagnostic rejects.
                 Some(claim) => {
                     let value_id = claim.reaching_value?;
