@@ -44,8 +44,9 @@ pub fn from_metadata(
     //   * Серверный / Клиент-серверный (п. 2.1): `Клиент (обычное приложение)` exists
     //     only for the ordinary application, so it is required only when the
     //     configuration supports it - the same leniency the naming rules apply.
-    // Серверный для вызова с клиента stays exact: any mix of `ВызовСервера` with other
-    // contexts is a deviation (std469 п. 2.2, std679), as is a module with no context.
+    // Серверный для вызова с клиента stays exact: `ВызовСервера` is valid only with
+    // `Сервер` and no other context (std469 п. 2.2, std679); a module with no context
+    // is a deviation too.
     // `Глобальный`, `Привилегированный` and `ПовторноеИспользование` do not matter.
     let ordinary = ctx.config.ordinary_app_support;
     let is_client = !module.is_server_call()

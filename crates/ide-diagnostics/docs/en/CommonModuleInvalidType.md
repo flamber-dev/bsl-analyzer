@@ -27,9 +27,10 @@ Two deviations are accepted, both taken from the standard:
   client-server modules only when the configuration supports the ordinary
   application (`ordinaryAppSupport`), the same leniency the naming checks apply.
 
-`Global`, `Privileged` and `Return values reuse` do not affect the result. Any
-combination of `Server call` with other flags, and a module without any
-execution context, is reported.
+`Global`, `Privileged` and `Return values reuse` do not affect the result.
+`Server call` is accepted only together with `Server` and no other context;
+any other combination with `Server call`, and a module without any execution
+context, is reported.
 
 
 ## Examples
