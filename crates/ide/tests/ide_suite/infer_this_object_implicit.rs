@@ -256,8 +256,7 @@ fn document_implicit_tabular_section_member_resolves() {
 fn document_implicit_tabular_section_reads_as_metadata_ref() {
     // A bare tabular section in a Document object module reads as its own
     // section type, not Unknown.
-    let (db, file_id) =
-        setup_document("Процедура П()\n    Т = ТабличнаяЧасть1;\nКонецПроцедуры");
+    let (db, file_id) = setup_document("Процедура П()\n    Т = ТабличнаяЧасть1;\nКонецПроцедуры");
     let ty = var_ty(&db, file_id, "т");
     assert!(ty.is_some() && ty != Some(db.unknown()), "got {:?}", ty.map(|t| db.lookup_type(t)));
 }
