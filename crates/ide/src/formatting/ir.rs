@@ -127,31 +127,16 @@ impl Ir {
     }
 }
 
-fn reindent_literal_continuation_lines(text: &str, target_indent: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 16);
-    let mut iter = text.split('\n');
-    if let Some(first) = iter.next() {
-        out.push_str(first);
-    }
-    for line in iter {
-        out.push('\n');
-        let content_start = line
-            .char_indices()
-            .find_map(|(i, c)| (!c.is_whitespace()).then_some(i))
-            .unwrap_or(line.len());
-        if line.as_bytes().get(content_start) == Some(&b'|') {
-            out.push_str(target_indent);
-            out.push_str(&line[content_start..]);
-        } else {
-            out.push_str(line);
-        }
-    }
-    out
-}
-
 fn normalize_comment_spacing(raw: &str) -> String {
     let Some(rest) = raw.strip_prefix("//") else { return raw.to_string() };
     if rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace()) {
+        return raw.to_string();
+    }
+    // A third slash means the comment is not prose but a separator: `///` and the
+    // `////////…` rules that head every region in vendor 1C code. Inserting the
+    // space turns them into `// /` and `// ////…`, i.e. visually breaks the
+    // module's structure, so the rule stops at the first `/`.
+    if rest.starts_with('/') {
         return raw.to_string();
     }
     let mut s = String::with_capacity(raw.len() + 1);
@@ -549,26 +534,11 @@ pub fn render_full(
         out.push_str(&rendered);
 
         if i < n_atoms {
-            let atom = &ir.atoms[i];
-            let needs_reindent = atom.kind == SyntaxKind::LITERAL
-                && atom.text.contains('\n')
-                && matches!(decisions[i], GapDecision::NewlineWithIndent { .. });
-            if needs_reindent {
-                if let GapDecision::NewlineWithIndent { final_level, .. } = decisions[i] {
-                    let target_indent = cfg.indent_for_level(final_level);
-                    let normalized =
-                        reindent_literal_continuation_lines(&atom.text, &target_indent);
-                    if normalized != atom.text {
-                        edits.push(GapEdit {
-                            range: ir.atom_nodes[i].text_range(),
-                            new_text: normalized.clone(),
-                        });
-                    }
-                    out.push_str(&normalized);
-                    continue;
-                }
-            }
-            out.push_str(&atom.text);
+            // Atoms are emitted byte for byte. A multi-line string literal is one
+            // atom, so its inner lines — including the `|` continuation prefixes of
+            // a query text — keep the author's bytes: the formatter indents the gap
+            // in front of the literal, never the literal itself.
+            out.push_str(&ir.atoms[i].text);
         }
     }
 
