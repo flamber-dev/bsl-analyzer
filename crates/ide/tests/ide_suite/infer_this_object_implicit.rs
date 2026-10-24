@@ -250,15 +250,43 @@ fn document_implicit_tabular_section_member_resolves() {
         !kinds.contains(&UnresolvedMethodKind::ReceiverNotResolved),
         "document tabular-section member call must not be an unresolved module: {kinds:?}"
     );
+    if !has_platform_data() {
+        return;
+    }
+    assert!(kinds.is_empty(), "Выгрузить must resolve on the document section, got {kinds:?}");
+    let actual = var_ty(&db, file_id, "тз").expect("ТЗ must be inferred");
+    assert!(
+        matches!(db.lookup_type(actual), TypeKind::ValueTable(_)),
+        "Выгрузить() must return a ValueTable, got {:?}",
+        db.lookup_type(actual)
+    );
+}
+
+#[test]
+fn document_implicit_tabular_section_method_not_found() {
+    if !has_platform_data() {
+        eprintln!("Skipping: no platform data available");
+        return;
+    }
+
+    let text = r#"
+Процедура ПередЗаписью(Отказ)
+    ТабличнаяЧасть1.НетТакогоМетода();
+КонецПроцедуры
+"#;
+    let (db, file_id) = setup_document(text);
+    assert_eq!(unresolved_method_kinds(&db, file_id), vec![UnresolvedMethodKind::MethodNotFound]);
 }
 
 #[test]
 fn document_implicit_tabular_section_reads_as_metadata_ref() {
-    // A bare tabular section in a Document object module reads as its own
-    // section type, not Unknown.
     let (db, file_id) = setup_document("Процедура П()\n    Т = ТабличнаяЧасть1;\nКонецПроцедуры");
-    let ty = var_ty(&db, file_id, "т");
-    assert!(ty.is_some() && ty != Some(db.unknown()), "got {:?}", ty.map(|t| db.lookup_type(t)));
+    assert_metadata_ref(
+        &db,
+        var_ty(&db, file_id, "т"),
+        MetadataKind::TabularSection { parent: MdoType::Document },
+        "Документ1.ТабличнаяЧасть1",
+    );
 }
 
 #[test]

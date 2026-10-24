@@ -2,7 +2,7 @@
 //! are fields of its `Запись` too, and a register whose common-attribute membership
 //! cannot be decided leaves the field set open.
 
-use hir::{HirDatabase, InferenceDiagnostic};
+use hir::{HirDatabase, InferenceDiagnostic, TypeKernelDb, TypeKind};
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::RootDatabaseImpl;
 use std::path::{Path, PathBuf};
@@ -47,7 +47,7 @@ fn common_attributes_root_with_record_form(unreadable: bool) -> tempfile::TempDi
     root
 }
 
-fn unresolved_fields_at(root: &Path, bsl: &str) -> Vec<String> {
+fn setup(root: &Path, bsl: &str) -> (RootDatabaseImpl, FileId) {
     let module =
         root.join("InformationRegisters/РегистрСведений1/Forms/ФормаЗаписи/Ext/Form/Module.bsl");
     let mut db = RootDatabaseImpl::new();
@@ -58,6 +58,11 @@ fn unresolved_fields_at(root: &Path, bsl: &str) -> Vec<String> {
     db.set_file_source_root(file_id, SourceRootId(0));
     db.set_file_text(file_id, bsl);
     db.set_all_config_paths(vec![(None, root.to_path_buf())], None);
+    (db, file_id)
+}
+
+fn unresolved_fields_at(root: &Path, bsl: &str) -> Vec<String> {
+    let (db, file_id) = setup(root, bsl);
     db.infer(file_id)
         .diagnostics
         .iter()
@@ -87,6 +92,13 @@ fn a_common_attribute_of_the_register_resolves_on_the_record() {
 #[test]
 fn an_open_register_field_set_keeps_the_record_silent() {
     let root = common_attributes_root_with_record_form(true);
-    let bsl = "&НаСервере\nПроцедура Тест()\n    Д = Запись.НетТакогоПоля;\nКонецПроцедуры\n";
+    let bsl = "&НаСервере\nПроцедура Тест()\n    З = Запись;\n    Д = Запись.НетТакогоПоля;\nКонецПроцедуры\n";
     assert!(unresolved_fields_at(root.path(), bsl).is_empty());
+    // Silence alone would also follow from an untyped `Запись`; the record must still be typed.
+    let (db, file_id) = setup(root.path(), bsl);
+    let record = db.infer(file_id).var_types.get("з").copied().expect("З must be inferred");
+    assert!(
+        !matches!(db.lookup_type(record), TypeKind::Unknown),
+        "Запись must stay typed when its field set is open"
+    );
 }
