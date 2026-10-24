@@ -5761,7 +5761,8 @@ fn an_external_object_module_knows_its_own_attributes_and_not_a_namesakes() {
     assert!(
         external_calls
             .iter()
-            .any(|m| m.contains("ЗаведомоНетТакогоМетода") && m.contains("ВнешняяОбработка.АРМ")),
+            .any(|m| m.contains("ЗаведомоНетТакогоМетода")
+                && m.contains("ВнешняяОбработкаОбъект.АРМ")),
         "the external object flags the bogus call and names itself: {external_calls:?}"
     );
 }
