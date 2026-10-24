@@ -16,6 +16,7 @@ mod completion_form_object;
 mod completion_globals;
 mod completion_mdo;
 mod completion_mdo_plurals_hbk;
+mod completion_type_hint;
 mod completion_type_string;
 mod completion_value_collections;
 mod configurations_cfe_dependencies;
