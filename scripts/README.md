@@ -15,6 +15,18 @@
 - `cargo fmt --all -- --check`
 - `cargo clippy --all-targets --all-features -- -D warnings`
 
+## deploy-local.ps1
+
+Windows: подменить рабочий бинарник `~/.bsl-analyzer/bin/bsl-analyzer-app.exe` локальной сборкой.
+
+```powershell
+cargo build --release -p bsl-analyzer --bin bsl-analyzer-app
+.\scripts\deploy-local.ps1 -WhatIfOnly   # только план
+.\scripts\deploy-local.ps1
+```
+
+Занятый файл Windows нельзя перезаписать, но можно переименовать, поэтому порядок такой: старый бинарник переименовывается в `bsl-analyzer-app.<версия>.exe`, копируется новый, проверяется SHA-256, затем останавливаются воркеры текущего пользователя (чужие процессы не трогаются). При сбое старый бинарник возвращается на место. Параметры: `-ExePath`, `-InstallPath`, `-Keep` (сколько старых копий хранить, по умолчанию 3), `-NoRestart`.
+
 ## release.sh
 
 Локальная сборка релиза.
