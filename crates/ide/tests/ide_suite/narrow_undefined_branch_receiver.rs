@@ -289,7 +289,7 @@ fn overwritten_wildcard_definition_does_not_swallow_a_real_miss() {
     let (db, file_id) = setup(WILDCARD_THEN_CONCRETE);
     assert_eq!(
         unresolved(&db, file_id).into_iter().map(|(what, _)| what).collect::<Vec<_>>(),
-        vec!["НесуществующийМетод у Справочники.Справочник1".to_string()],
+        vec!["НесуществующийМетод у СправочникСсылка.Справочник1".to_string()],
     );
 }
 
@@ -345,7 +345,7 @@ const CONCRETE_THEN_WILDCARD: &str = r#"
 /// A wildcard reaching the call alongside a concrete type does not hide the miss
 /// the concrete type proves.
 ///
-/// The `Иначе` path really does carry `Справочники.Справочник1`, and the method
+/// The `Иначе` path really does carry `СправочникСсылка.Справочник1`, and the method
 /// really is absent there. A wildcard on the sibling path says nothing about
 /// members, but it says nothing about that path either.
 #[test]
@@ -356,7 +356,7 @@ fn a_wildcard_at_a_join_does_not_hide_the_miss_on_the_other_path() {
     let (db, file_id) = setup(WILDCARD_JOINS_CONCRETE);
     assert_eq!(
         unresolved(&db, file_id).into_iter().map(|(what, _)| what).collect::<Vec<_>>(),
-        vec!["НесуществующийМетод у Справочники.Справочник1".to_string()],
+        vec!["НесуществующийМетод у СправочникСсылка.Справочник1".to_string()],
     );
 }
 
@@ -437,7 +437,7 @@ fn a_parameter_under_an_unrelated_condition_keeps_the_diagnostic() {
     }
     assert_eq!(
         unresolved_names(PARAMETER_UNDER_ANOTHER_GUARD),
-        vec!["НесуществующийМетод у Справочники.Справочник1".to_string()],
+        vec!["НесуществующийМетод у СправочникСсылка.Справочник1".to_string()],
     );
 }
 
@@ -453,7 +453,7 @@ fn a_label_in_the_guarded_branch_proves_nothing() {
     }
     assert_eq!(
         unresolved_names(GUARDED_BRANCH_WITH_A_LABEL),
-        vec!["НесуществующийМетод у Справочники.Справочник1".to_string()],
+        vec!["НесуществующийМетод у СправочникСсылка.Справочник1".to_string()],
     );
 }
 

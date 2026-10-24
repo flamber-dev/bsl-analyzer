@@ -31,7 +31,7 @@ fn a_missing_method_on_the_element_of_a_document_s_movements_is_reported() {
     );
     assert_eq!(
         found,
-        ["Метод 'Читать' не найден у 'РегистрыНакопления.Регистр2, РегистрыСведений.Регистр1' | Набор.Читать"]
+        ["Метод 'Читать' не найден у 'РегистрНакопленияНаборЗаписей.Регистр2, РегистрСведенийНаборЗаписей.Регистр1' | Набор.Читать"]
     );
 }
 
@@ -47,7 +47,10 @@ fn a_document_writing_to_one_register_names_that_record_set() {
 КонецПроцедуры
 ",
     );
-    assert_eq!(found, ["Метод 'Читать' не найден у 'РегистрыНакопления.Регистр2' | Набор.Читать"]);
+    assert_eq!(
+        found,
+        ["Метод 'Читать' не найден у 'РегистрНакопленияНаборЗаписей.Регистр2' | Набор.Читать"]
+    );
 }
 
 /// In the document's own object module the collection is the bare `Движения` or
@@ -115,6 +118,48 @@ fn a_shadowed_movements_name_does_not_borrow_the_current_document_s_registers() 
         );
         assert!(found.is_empty(), "{name}: {found:?}");
     }
+}
+
+/// A record set the manager creates is named by its own type, like the element of
+/// `Движения`: the manager (`РегистрыНакопления.Регистр2`) has no `Читать` either, but it is
+/// not the value the call is made on.
+#[test]
+fn a_record_set_the_manager_creates_is_named_by_its_own_type() {
+    let found = method_misses(
+        COMMON_MODULE,
+        "Процедура Тест() Экспорт
+    Набор = РегистрыНакопления.Регистр2.СоздатьНаборЗаписей();
+    Набор.Читать();
+    НаборСведений = РегистрыСведений.Регистр1.СоздатьНаборЗаписей();
+    НаборСведений.Читать();
+КонецПроцедуры
+",
+    );
+    assert_eq!(
+        found,
+        [
+            "Метод 'Читать' не найден у 'РегистрНакопленияНаборЗаписей.Регистр2' | Набор.Читать",
+            "Метод 'Читать' не найден у 'РегистрСведенийНаборЗаписей.Регистр1' | НаборСведений.Читать",
+        ]
+    );
+}
+
+/// The same holds for an object a manager creates: the receiver is the object, not the
+/// manager collection.
+#[test]
+fn an_object_the_manager_creates_is_named_by_its_own_type() {
+    let found = method_misses(
+        COMMON_MODULE,
+        "Процедура Тест() Экспорт
+    Объект = Документы.Документ3.СоздатьДокумент();
+    Объект.НетТакогоМетода();
+КонецПроцедуры
+",
+    );
+    assert_eq!(
+        found,
+        ["Метод 'НетТакогоМетода' не найден у 'ДокументОбъект.Документ3' | Объект.НетТакогоМетода"]
+    );
 }
 
 fn method_misses(relative: &str, source: &str) -> Vec<String> {

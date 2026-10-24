@@ -5732,40 +5732,42 @@ fn mdo_receiver_label(mdo: bsl_metadata::MdoType) -> Option<&'static str> {
     })
 }
 
+/// A value (an object, a reference, a record set, a record manager, a value manager) is
+/// named by its own platform type, as hover shows it: the manager collection
+/// (`РегистрыНакопления.<Имя>`) is a different value, and naming it sends the reader to
+/// a manager access the code does not have.
 fn mdo_kind_to_receiver_label(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
     use hir_def::ty::MetadataKind;
     let mdo = match kind {
-        MetadataKind::CatalogObject | MetadataKind::CatalogRef => bsl_metadata::MdoType::Catalog,
-        MetadataKind::DocumentObject | MetadataKind::DocumentRef => bsl_metadata::MdoType::Document,
-        MetadataKind::EnumRef => bsl_metadata::MdoType::Enum,
-        MetadataKind::TaskRef | MetadataKind::TaskObject => bsl_metadata::MdoType::Task,
-        MetadataKind::BusinessProcessRef | MetadataKind::BusinessProcessObject => {
-            bsl_metadata::MdoType::BusinessProcess
+        MetadataKind::CatalogObject
+        | MetadataKind::CatalogRef
+        | MetadataKind::DocumentObject
+        | MetadataKind::DocumentRef
+        | MetadataKind::EnumRef
+        | MetadataKind::TaskRef
+        | MetadataKind::TaskObject
+        | MetadataKind::BusinessProcessRef
+        | MetadataKind::BusinessProcessObject
+        | MetadataKind::DataProcessorObject
+        | MetadataKind::ReportObject
+        | MetadataKind::ExternalDataProcessorObject
+        | MetadataKind::ExternalReportObject
+        | MetadataKind::ConstantValueManager
+        | MetadataKind::ExchangePlanRef
+        | MetadataKind::ExchangePlanObject
+        | MetadataKind::ChartOfAccountsRef
+        | MetadataKind::ChartOfAccountsObject
+        | MetadataKind::ChartOfCharacteristicTypesRef
+        | MetadataKind::ChartOfCharacteristicTypesObject
+        | MetadataKind::ChartOfCalculationTypesRef
+        | MetadataKind::ChartOfCalculationTypesObject
+        | MetadataKind::InformationRegisterRecordManager
+        | MetadataKind::InformationRegisterRecordSet
+        | MetadataKind::AccumulationRegisterRecordSet
+        | MetadataKind::AccountingRegisterRecordSet
+        | MetadataKind::CalculationRegisterRecordSet => {
+            return Some(kind.display_label(base_db::Locale::Ru));
         }
-        MetadataKind::DataProcessorObject => bsl_metadata::MdoType::DataProcessor,
-        MetadataKind::ReportObject => bsl_metadata::MdoType::Report,
-        MetadataKind::ExternalDataProcessorObject => bsl_metadata::MdoType::ExternalDataProcessor,
-        MetadataKind::ExternalReportObject => bsl_metadata::MdoType::ExternalReport,
-        // `Константы.<Имя>` is the manager; the value manager is named by its own type.
-        MetadataKind::ConstantValueManager => return Some("КонстантаМенеджерЗначения"),
-        MetadataKind::ExchangePlanRef | MetadataKind::ExchangePlanObject => {
-            bsl_metadata::MdoType::ExchangePlan
-        }
-        MetadataKind::ChartOfAccountsRef | MetadataKind::ChartOfAccountsObject => {
-            bsl_metadata::MdoType::ChartOfAccounts
-        }
-        MetadataKind::ChartOfCharacteristicTypesRef
-        | MetadataKind::ChartOfCharacteristicTypesObject => {
-            bsl_metadata::MdoType::ChartOfCharacteristicTypes
-        }
-        MetadataKind::ChartOfCalculationTypesRef | MetadataKind::ChartOfCalculationTypesObject => {
-            bsl_metadata::MdoType::ChartOfCalculationTypes
-        }
-        MetadataKind::InformationRegisterRecordManager
-        | MetadataKind::InformationRegisterRecordSet => bsl_metadata::MdoType::InformationRegister,
-        MetadataKind::AccumulationRegisterRecordSet => bsl_metadata::MdoType::AccumulationRegister,
-        MetadataKind::AccountingRegisterRecordSet => bsl_metadata::MdoType::AccountingRegister,
-        MetadataKind::CalculationRegisterRecordSet => bsl_metadata::MdoType::CalculationRegister,
         MetadataKind::InformationRegisterRef
         | MetadataKind::AccumulationRegisterRef
         | MetadataKind::AccountingRegisterRef
