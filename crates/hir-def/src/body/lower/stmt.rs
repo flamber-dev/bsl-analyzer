@@ -295,14 +295,11 @@ pub(super) fn lower_stmt_list_with_unreachable(
                     });
                 }
 
-                if is_inside_try_body(&child) {
-                    let extended_range = extend_range_with_semicolon(&child, child.text_range());
-                    ctx.emit(BodyDiagnostic::BeginTransactionBeforeTryCatch {
-                        range: extended_range,
-                    });
-                } else {
-                    pending_begin_transaction = Some(child.clone());
-                }
+                // An enclosing `Попытка` is not the one the standard places the begin
+                // outside of: a begin opening its own `Попытка` inside another one is the
+                // pattern itself, nested (a wider lock or an outer handler around it), and
+                // is judged the same way as everywhere else — by the statement after it.
+                pending_begin_transaction = Some(child.clone());
             } else if child.kind() == SyntaxKind::TRY_STMT {
                 pending_begin_transaction = None;
             } else if pending_begin_transaction.is_some() {
@@ -921,6 +918,17 @@ fn lower_for_each_stmt(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Option<Stmt>
         .as_ref()
         .map(|n| n.text().to_string())
         .unwrap_or_else(|| String::from("<unknown>"));
+
+    // A local's identity is (owner, folded name), so equal folded names within one
+    // body are the same symbol; no resolver is needed here.
+    if let Expr::Path(collection_name) = ctx.body.expr_idx(collection) {
+        if collection_name.eq_ignore_case(&Name::new(var_token.text())) {
+            ctx.emit(BodyDiagnostic::IteratorCollidesCollection {
+                iterator_name: var_token.text().to_string(),
+                range,
+            });
+        }
+    }
 
     ctx.enter_loop();
 
