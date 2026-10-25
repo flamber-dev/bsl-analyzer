@@ -86,8 +86,11 @@ pub enum Task {
         epoch: u64,
     },
     SharedMetadataWarmed {
-        /// A write cancelled it, and it is worth running again.
+        /// A cancellation cut it, and it is worth running again.
         cancelled: bool,
+        /// The cut was the event loop's own `request_cancellation`, which moves no
+        /// revision: unlike a drifted disk read, another run does not meet it again.
+        local: bool,
     },
     DiagnosticsReady {
         uri: Url,
@@ -101,6 +104,8 @@ pub enum Task {
         version: i32,
         generation: u64,
         kind: salsa::Cancelled,
+        /// The store the job read, as it stood when the job was dispatched.
+        dispatched: DispatchStamp,
         completed_at: std::time::Instant,
     },
     PreloadExternalFiles {
@@ -226,6 +231,28 @@ pub struct RequestLifecycle {
     pub client_cancelled: bool,
 }
 
+/// Where a store stood when a job was dispatched, for telling what cut the job. A write
+/// starts a new revision; a disk read that drifted from its revision moves the store's
+/// drift count instead; an LRU eviction and any other exclusive access cancel with neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DispatchStamp {
+    pub revision: salsa::Revision,
+    pub drifts: u64,
+}
+
+impl DispatchStamp {
+    pub fn of(db: &(impl base_db::SourceDatabase + ?Sized)) -> Self {
+        Self { revision: salsa::plumbing::current_revision(db), drifts: db.disk_drift_count() }
+    }
+
+    /// Whether a cut that finds the store as `self` came from a disk read that drifted from
+    /// its revision after `dispatched`: no revision started since, and a drift counted. A
+    /// re-dispatch now would unwind the same way until the change is applied.
+    pub fn drifted_since(self, dispatched: DispatchStamp) -> bool {
+        self.revision == dispatched.revision && self.drifts != dispatched.drifts
+    }
+}
+
 /// What a finished batch chunk carries back to the event loop.
 #[derive(Debug)]
 pub enum WorkspaceBatchOutcome {
@@ -240,10 +267,15 @@ pub enum WorkspaceBatchOutcome {
     /// A worker unwound on `salsa::Cancelled::PropagatedPanic` — ambiguous under
     /// parallelism: it is raised both for a genuine deterministic panic in a shared query
     /// AND for a sibling worker blocked on a query owned by a thread that unwound on a
-    /// (transient) edit cancellation. Retried like [`Self::Cancelled`] but with a bounded
-    /// budget, so a transient cascade recovers while a real deterministic panic is skipped
-    /// after the budget is spent rather than looping forever.
-    Propagated,
+    /// (transient) edit cancellation or a drifted disk read — or on a local cancellation.
+    /// Retried like [`Self::Cancelled`] but with a bounded budget, so a transient cascade
+    /// recovers while a real deterministic panic is skipped after the budget is spent
+    /// rather than looping forever.
+    Propagated {
+        /// Raised as `PropagatedPanic`: the worker was blocked on a query whose owner
+        /// unwound, rather than cancelled locally.
+        from_claim: bool,
+    },
     /// The chunk unwound on a stray non-cancellation panic — deterministic, so retrying
     /// would loop forever. The chunk is skipped (cursor advanced) and its files go
     /// uncovered until the next full sweep.
@@ -309,9 +341,10 @@ pub struct WorkspaceBatchPlan {
     /// so the chunk is retried up to a budget and then skipped. Reset when the cursor
     /// advances (a computed or skipped chunk).
     pub chunk_retries: u32,
-    /// The revision the current chunk was dispatched at. A `PendingWrite` cut after which it
-    /// still holds was not an edit's: the retry would compute the same thing again.
-    pub dispatched_revision: salsa::Revision,
+    /// Where the store stood when the current chunk was dispatched. A cut that finds it
+    /// drifted since ([`DispatchStamp::drifted_since`]) was not an edit's: the retry would
+    /// meet the same drift again.
+    pub dispatched: DispatchStamp,
     /// Set by such a cut: the chunk waits for the revision to move from this one — the
     /// disk change applied — instead of being re-dispatched at once. An idle tick lifts it,
     /// so a change the watcher never delivers is retried at the idle cadence, not spun on.
@@ -405,12 +438,12 @@ pub struct GlobalState {
     pub(crate) shared_metadata_warm_in_flight: bool,
     /// The current editor storage still wants a metadata warm-up started.
     pub(crate) shared_metadata_warm_pending: bool,
-    /// The revision the in-flight (or last) metadata warm-up started at.
-    pub(crate) shared_metadata_warm_revision: Option<salsa::Revision>,
-    /// Set when a warm-up was cancelled with the revision unchanged since it started — a
-    /// disk read that drifted from its revision, which unwinds the same way until the
-    /// change is applied. The next warm-up waits for the revision to move from this one,
-    /// or for an idle tick, instead of restarting at once.
+    /// Where the store stood when the in-flight (or last) metadata warm-up started.
+    pub(crate) shared_metadata_warm_started: Option<DispatchStamp>,
+    /// Set when a warm-up was cut by a disk read that drifted from its revision since it
+    /// started, which unwinds the same way until the change is applied. The next warm-up
+    /// waits for the revision to move from this one, or for an idle tick, instead of
+    /// restarting at once.
     pub(crate) shared_metadata_warm_parked_at: Option<salsa::Revision>,
     pub(crate) shared_request_generation: u64,
     pub(crate) shared_owner_generation: Option<u64>,
@@ -490,6 +523,12 @@ pub struct GlobalState {
     /// and so does a schedule that found the task pool saturated — the loop
     /// retries when a worker frees a queue slot. Deduplicated by URI.
     pub pending_diagnostics_uris: Vec<Url>,
+    /// Documents whose diagnostics were cut by a disk read that drifted from its revision,
+    /// each with the revision the cut left in place. A re-dispatch at that revision would
+    /// unwind the same way, so the document waits until the revision moves — the change
+    /// applied — or an idle tick lifts the wait, then rejoins
+    /// [`Self::pending_diagnostics_uris`].
+    pub parked_diagnostics: HashMap<Url, salsa::Revision>,
 
     pub diagnostics_tokens: HashMap<Url, salsa::CancellationToken>,
     pub preload_tokens: HashMap<vfs::FileId, salsa::CancellationToken>,
@@ -701,7 +740,7 @@ impl GlobalState {
             shared_metadata_warmups: 0,
             shared_metadata_warm_in_flight: false,
             shared_metadata_warm_pending: false,
-            shared_metadata_warm_revision: None,
+            shared_metadata_warm_started: None,
             shared_metadata_warm_parked_at: None,
             shared_request_generation: 0,
             shared_owner_generation: None,
@@ -728,6 +767,7 @@ impl GlobalState {
             supports_semantic_tokens_refresh: false,
             diagnostics_generation: HashMap::new(),
             pending_diagnostics_uris: Vec::new(),
+            parked_diagnostics: HashMap::new(),
             active_workspace_diagnostic: None,
             workspace_batch_dirty: false,
             workspace_batch_in_flight: false,
@@ -840,6 +880,25 @@ impl GlobalState {
     pub fn enqueue_pending_diagnostics(&mut self, uri: Url) {
         if !self.pending_diagnostics_uris.contains(&uri) {
             self.pending_diagnostics_uris.push(uri);
+        }
+    }
+
+    /// Queue again the parked documents whose wait is over: every one with `all` (an idle
+    /// tick), otherwise those whose revision has moved since the cut.
+    pub(crate) fn release_parked_diagnostics(&mut self, all: bool) {
+        if self.parked_diagnostics.is_empty() {
+            return;
+        }
+        let revision = salsa::plumbing::current_revision(self.analysis_host.raw_database());
+        let released: Vec<Url> = self
+            .parked_diagnostics
+            .iter()
+            .filter(|&(_, &parked_at)| all || parked_at != revision)
+            .map(|(uri, _)| uri.clone())
+            .collect();
+        for uri in released {
+            self.parked_diagnostics.remove(&uri);
+            self.enqueue_pending_diagnostics(uri);
         }
     }
 
@@ -1167,18 +1226,24 @@ impl GlobalState {
         }
         self.shared_metadata_warm_parked_at = None;
         let analysis = self.analysis_host.analysis();
-        let revision = salsa::plumbing::current_revision(analysis.database());
+        let started = DispatchStamp::of(analysis.database());
         let analysis_guard = self.note_analysis_spawned();
         let spawned = self.task_pool.pool.try_spawn(move || {
             let _analysis_guard = analysis_guard;
             shared_metadata_warmup(|| analysis.warm_configuration_inventory())
         });
         if spawned.is_ok() {
-            self.shared_metadata_warm_revision = Some(revision);
+            self.shared_metadata_warm_started = Some(started);
             self.shared_metadata_warmups += 1;
             self.shared_metadata_warm_in_flight = true;
             self.shared_metadata_warm_pending = false;
         }
+    }
+
+    /// Where the store [`SessionAnalysisHost::analysis`] reads stands now — the store the
+    /// warm-up and the sweep's chunks run on.
+    pub(crate) fn dispatch_stamp(&self) -> DispatchStamp {
+        DispatchStamp::of(self.analysis_host.analysis().database())
     }
 
     /// Whether the next warm-up waits for the revision to move — see
@@ -1263,13 +1328,14 @@ impl GlobalState {
 /// would fail the same way again, and the analysis loads what it needs itself.
 pub(crate) fn shared_metadata_warmup(warm: impl FnOnce()) -> Task {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(warm)) {
-        Ok(()) => Task::SharedMetadataWarmed { cancelled: false },
-        Err(payload) if payload.is::<salsa::Cancelled>() => {
-            Task::SharedMetadataWarmed { cancelled: true }
-        }
+        Ok(()) => Task::SharedMetadataWarmed { cancelled: false, local: false },
+        Err(payload) if payload.is::<salsa::Cancelled>() => Task::SharedMetadataWarmed {
+            cancelled: true,
+            local: matches!(payload.downcast_ref(), Some(salsa::Cancelled::Local)),
+        },
         Err(_) => {
             tracing::warn!("shared editor storage metadata warm-up failed; not retried");
-            Task::SharedMetadataWarmed { cancelled: false }
+            Task::SharedMetadataWarmed { cancelled: false, local: false }
         }
     }
 }

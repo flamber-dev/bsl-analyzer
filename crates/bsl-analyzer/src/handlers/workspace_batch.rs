@@ -102,7 +102,7 @@ fn g1_wait_at_batch_barrier(analysis: &ide::Analysis, cancellation_baseline: u64
 
 use crate::frozen_context::FrozenFilePaths;
 use crate::global_state::{
-    GlobalState, Task, WorkspaceBatchItem, WorkspaceBatchOutcome, WorkspaceBatchPlan,
+    DispatchStamp, GlobalState, Task, WorkspaceBatchItem, WorkspaceBatchOutcome, WorkspaceBatchPlan,
 };
 use crate::lsp::PositionEncoding;
 
@@ -293,7 +293,7 @@ fn build_batch_plan(state: &mut GlobalState) -> Option<WorkspaceBatchPlan> {
         mem_budget_mb: batch_mem_budget_mb(),
         chunks_since_trim: 0,
         chunk_retries: 0,
-        dispatched_revision: state.analysis_host.request_revision(),
+        dispatched: DispatchStamp::of(state.analysis_host.analysis().database()),
         parked_at: None,
         started_at: Instant::now(),
         analysis_guard,
@@ -340,7 +340,7 @@ fn dispatch_next_chunk(state: &mut GlobalState) {
     let analysis = state.analysis_host.analysis();
     {
         let plan = state.workspace_batch_plan.as_mut().expect("plan present when dispatching");
-        plan.dispatched_revision = salsa::plumbing::current_revision(analysis.database());
+        plan.dispatched = DispatchStamp::of(analysis.database());
         plan.parked_at = None;
     }
     #[cfg(test)]
@@ -406,9 +406,11 @@ fn dispatch_next_chunk(state: &mut GlobalState) {
                     tracing::debug!(chunk = chunk_index, "workspace batch chunk cancelled by an edit; will retry");
                     WorkspaceBatchOutcome::Cancelled
                 }
-                Some(_) => {
-                    tracing::debug!(chunk = chunk_index, "workspace batch chunk unwound on a propagated panic; will retry within budget");
-                    WorkspaceBatchOutcome::Propagated
+                Some(kind) => {
+                    tracing::debug!(chunk = chunk_index, ?kind, "workspace batch chunk unwound on a propagated panic; will retry within budget");
+                    WorkspaceBatchOutcome::Propagated {
+                        from_claim: matches!(kind, salsa::Cancelled::PropagatedPanic),
+                    }
                 }
                 None => {
                     tracing::error!(chunk = chunk_index, "workspace batch chunk panicked; skipping");

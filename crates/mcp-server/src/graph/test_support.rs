@@ -449,11 +449,13 @@ pub(super) fn seed_cache_with_layout(
     .expect("seed cache builds");
 }
 
+/// Reads the published file directly, outside the pause that holds product readers back
+/// while a patch is written in place, so it waits out that writer's lock itself. The
+/// connection's default five-second busy timeout made a slow commit fail the read.
 pub(crate) fn meta_string(path: &Path, key: &str) -> String {
-    rusqlite::Connection::open(path)
-        .unwrap()
-        .query_row("SELECT value FROM meta WHERE key=?1", [key], |row| row.get(0))
-        .unwrap()
+    let conn = rusqlite::Connection::open(path).unwrap();
+    conn.busy_timeout(WAIT_GUARD).unwrap();
+    conn.query_row("SELECT value FROM meta WHERE key=?1", [key], |row| row.get(0)).unwrap()
 }
 
 /// A workspace graph with a change hub and a running drift watcher — the graph every workspace

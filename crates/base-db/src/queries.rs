@@ -211,7 +211,7 @@ pub fn file_text_unmemoized(db: &dyn SourceDatabase, file_id: FileId) -> Cow<'_,
         tracing::error!(?file_id, ?path, %err, "file_text: disk read failed");
         panic!("file_text: cannot read {path:?} for {file_id:?}: {err}")
     });
-    verify_disk_revision(file_id, &path, &text, want);
+    verify_disk_revision(db, file_id, &path, &text, want);
     Cow::Owned(text)
 }
 
@@ -219,7 +219,13 @@ pub fn file_text_unmemoized(db: &dyn SourceDatabase, file_id: FileId) -> Cow<'_,
 /// the database has not applied yet. Unwound the way salsa unwinds its own cancellation —
 /// `resume_unwind` skips the panic hook — so every reader that already retries a pending
 /// write retries this one.
-fn verify_disk_revision(file_id: FileId, path: &Path, text: &str, want: u64) {
+fn verify_disk_revision(
+    db: &dyn SourceDatabase,
+    file_id: FileId,
+    path: &Path,
+    text: &str,
+    want: u64,
+) {
     let got = content_revision(text);
     if got != want {
         // No panic message carries the values any more, and they are what tells an
@@ -231,6 +237,7 @@ fn verify_disk_revision(file_id: FileId, path: &Path, text: &str, want: u64) {
             on_read = got,
             "file_text: disk changed under analysis; the read is superseded"
         );
+        db.note_disk_drift();
         std::panic::resume_unwind(Box::new(salsa::Cancelled::PendingWrite));
     }
 }
