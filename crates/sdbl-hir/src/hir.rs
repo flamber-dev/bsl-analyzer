@@ -174,6 +174,73 @@ impl SdblHir {
     }
 }
 
+impl SdblHir {
+    /// Every column path that dereferences past its first hop, as the object the first hop
+    /// refers to and the names that follow: `Т.Номенклатура.ЕдиницаИзмерения.Вес` over
+    /// `Справочник.Товары КАК Т`, whose `Номенклатура` is a `Справочник.Номенклатура`
+    /// reference, yields (`Справочник.Номенклатура`, [`ЕдиницаИзмерения`, `Вес`]). The first
+    /// hop itself is what [`Self::collect_resolved_attributes`] reports; the rest needs the
+    /// configuration, so it is resolved by the caller.
+    pub fn collect_dereference_chains(&self, out: &mut Vec<(MdoType, String, Vec<String>)>) {
+        use std::collections::HashMap;
+
+        let mut by_alias: HashMap<String, &ResolvedTable> = HashMap::new();
+        for table in self.all_tables() {
+            if let Some(meta) = &table.metadata {
+                by_alias.insert(table.effective_name().fold_lower(), meta);
+            }
+        }
+        let mut cols: Vec<&[Name]> = Vec::new();
+        let mut subqueries: Vec<&SdblHir> = Vec::new();
+        for expr in self.level_exprs() {
+            walk_level_expr(expr, &mut cols, &mut subqueries);
+        }
+        for parts in cols {
+            let [alias, field, rest @ ..] = parts else { continue };
+            if rest.is_empty() {
+                continue;
+            }
+            let Some(table) = by_alias.get(&alias.as_str().fold_lower()) else { continue };
+            let Some(field) = find_attr_field(table, field.as_str()) else { continue };
+            if let SdblType::Ref(target) = &field.ty {
+                out.push((
+                    target.mdo_type,
+                    target.name.clone(),
+                    rest.iter().map(|name| name.as_str().to_string()).collect(),
+                ));
+            }
+        }
+        for table in self.all_tables() {
+            for sub in &table.subquery {
+                sub.collect_dereference_chains(out);
+            }
+        }
+        for sq in subqueries {
+            sq.collect_dereference_chains(out);
+        }
+        for union in &self.unions {
+            union.query.collect_dereference_chains(out);
+        }
+    }
+
+    /// This level's own expressions: SELECT, JOIN-ON, WHERE, GROUP BY, HAVING, ORDER BY.
+    fn level_exprs(&self) -> impl Iterator<Item = &ExprHir> {
+        self.select
+            .fields
+            .iter()
+            .map(|field| &field.expr)
+            .chain(self.joins.iter().filter_map(|join| join.condition.as_ref()))
+            .chain(self.where_clause.iter())
+            .chain(self.group_by.iter().flat_map(|group_by| group_by.exprs.iter()))
+            .chain(self.having.iter())
+            .chain(
+                self.order_by
+                    .iter()
+                    .flat_map(|order_by| order_by.items.iter().map(|item| &item.expr)),
+            )
+    }
+}
+
 /// Search every field bucket of a resolved table (a register keeps dimensions,
 /// resources, and attributes separate from `fields`).
 fn find_attr_field<'a>(table: &'a ResolvedTable, col: &str) -> Option<&'a FieldDef> {

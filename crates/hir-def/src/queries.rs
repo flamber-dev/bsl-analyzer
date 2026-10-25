@@ -882,10 +882,13 @@ pub(crate) fn collect_module_query_refs(
         };
         let mut resolved = Vec::new();
         let mut attrs = Vec::new();
+        let mut chains = Vec::new();
         for query in package.queries() {
             query.hir.collect_resolved_tables(&mut resolved);
             query.hir.collect_resolved_attributes(&mut attrs);
+            query.hir.collect_dereference_chains(&mut chains);
         }
+        let dereferenced = resolve_dereference_chains(db, module.file_id, chains, &mut attrs);
         let tables = resolved
             .into_iter()
             .filter_map(|table| match table {
@@ -895,10 +898,43 @@ pub(crate) fn collect_module_query_refs(
                 }
                 sdbl_hir::ResolvedTable::TempTable { .. } => None,
             })
+            .chain(dereferenced)
             .collect();
         sites.push(QueryRefSite { from, tables, attrs });
     }
     ModuleQueryRefs { sites }
+}
+
+/// Follow each dereference chain through the configuration: every object it passes is
+/// read, and every declared attribute it names is read. A hop stops the chain when the
+/// object is not declared, when the name is not one of its declared attributes (a
+/// standard attribute such as `Код`, a tabular section), or when the attribute is not a
+/// single reference type the next name could belong to.
+fn resolve_dereference_chains(
+    db: &dyn crate::configs::ConfigsDatabase,
+    file_id: FileId,
+    chains: Vec<(MdoType, String, Vec<String>)>,
+    attrs: &mut Vec<(MdoType, String, String)>,
+) -> Vec<(MdoType, String)> {
+    let mut tables = Vec::new();
+    for (mut mdo_type, mut name, hops) in chains {
+        for hop in hops {
+            let Some(object) = db.resolve_metadata_object(file_id, mdo_type, &name) else {
+                break;
+            };
+            tables.push((mdo_type, object.name.clone()));
+            let Some(attribute) = object.find_attribute(&hop) else { break };
+            attrs.push((mdo_type, object.name.clone(), attribute.name.clone()));
+            match &attribute.attr_type {
+                bsl_metadata::AttributeType::Ref { mdo_type: next_type, name: next_name } => {
+                    mdo_type = *next_type;
+                    name = next_name.clone();
+                }
+                _ => break,
+            }
+        }
+    }
+    tables
 }
 
 /// Project collected query reads ([`collect_module_query_refs`]) into `query_ref`
