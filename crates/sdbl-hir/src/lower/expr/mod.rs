@@ -398,7 +398,21 @@ impl LoweringContext<'_> {
             self.infer_function_return_type(&function, &args)
         };
 
-        ExprHir::FunctionCall { function, args, member_access, ty, range: node.text_range() }
+        let cast_target = match &ty {
+            SdblType::Ref(target) if matches!(function, crate::hir::FunctionKind::Cast) => {
+                Some(target.clone())
+            }
+            _ => None,
+        };
+
+        ExprHir::FunctionCall {
+            function,
+            args,
+            member_access,
+            cast_target,
+            ty,
+            range: node.text_range(),
+        }
     }
 
     fn infer_function_return_type(

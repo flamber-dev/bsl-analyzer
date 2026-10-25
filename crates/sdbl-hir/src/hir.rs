@@ -3,7 +3,7 @@ use stdx::case::CaseExt;
 use text_size::{TextRange, TextSize};
 
 use crate::diagnostics::SdblDiagnostic;
-use crate::types::SdblType;
+use crate::types::{MdoRef, SdblType};
 use bsl_metadata::MdoType;
 
 pub type Name = SmolStr;
@@ -223,21 +223,18 @@ impl SdblHir {
 /// The object an `ЗНАЧЕНИЕ` or `ВЫРАЗИТЬ` call names, then every nested expression.
 fn collect_expr_objects(expr: &ExprHir, out: &mut Vec<(MdoType, String)>) {
     match expr {
-        ExprHir::FunctionCall { function, args, ty, .. } => {
-            match (function, ty) {
-                (FunctionKind::Cast, SdblType::Ref(target)) => {
-                    out.push((target.mdo_type, target.name.clone()));
-                }
-                (FunctionKind::Value, _) => {
-                    if let Some(ExprHir::ColumnRef { parts, .. }) = args.first() {
-                        if let [kind, object, ..] = parts.as_slice() {
-                            if let Ok(mdo_type) = kind.as_str().parse::<MdoType>() {
-                                out.push((mdo_type, object.as_str().to_string()));
-                            }
+        ExprHir::FunctionCall { function, args, cast_target, .. } => {
+            if let Some(target) = cast_target {
+                out.push((target.mdo_type, target.name.clone()));
+            }
+            if matches!(function, FunctionKind::Value) {
+                if let Some(ExprHir::ColumnRef { parts, .. }) = args.first() {
+                    if let [kind, object, ..] = parts.as_slice() {
+                        if let Ok(mdo_type) = kind.as_str().parse::<MdoType>() {
+                            out.push((mdo_type, object.as_str().to_string()));
                         }
                     }
                 }
-                _ => {}
             }
             for arg in args {
                 collect_expr_objects(arg, out);
@@ -872,6 +869,9 @@ pub enum ExprHir {
         function: FunctionKind,
         args: Vec<ExprHir>,
         member_access: Vec<Name>,
+        /// The object a `ВЫРАЗИТЬ(... КАК Вид.Объект)` names. Kept apart from `ty`, which a
+        /// dereference through parentheses erases while the query still reads the object.
+        cast_target: Option<MdoRef>,
         ty: SdblType,
         range: TextRange,
     },
