@@ -223,6 +223,7 @@ pub fn standards(code: DiagnosticCode) -> &'static [u16] {
         DiagnosticCode::UnresolvedMetadataPath => &[],
         DiagnosticCode::ReadOnlyPropertyAssignment => &[],
         DiagnosticCode::GlobalPropertyNotWritable => &[],
+        DiagnosticCode::UnknownTypeInNew => &[],
         DiagnosticCode::UnavailableInEnvironment => &[],
         DiagnosticCode::PlatformMemberNewerThanMinVersion => &[],
         DiagnosticCode::PlatformMemberHiddenByCompatibilityMode => &[],

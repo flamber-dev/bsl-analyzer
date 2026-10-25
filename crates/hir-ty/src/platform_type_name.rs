@@ -197,6 +197,19 @@ pub(crate) fn is_exact_non_corpus_type_name(name: &str) -> bool {
         || NON_CORPUS_SINGLETONS.iter().any(|(ru, en)| name_eq_ci(name, ru, en))
 }
 
+/// Pre-rename type names the platform still compiles in `Новый` although the help
+/// corpus lists only the current name; stock library code still uses the old ones.
+/// Not exhaustive: the corpus cannot enumerate what it omits.
+const LEGACY_PLATFORM_TYPE_NAMES: &[&str] = &[
+    // renamed to `БлокировкаСеансов`
+    "БлокировкаУстановкиСоединений",
+];
+
+pub(crate) fn is_legacy_platform_type_name(name: &str) -> bool {
+    let lc = name.fold_lower();
+    LEGACY_PLATFORM_TYPE_NAMES.iter().any(|legacy| legacy.fold_lower() == lc)
+}
+
 /// Real platform types the generated corpus omits but the type system still
 /// produces by other means — form controls/collections, managed-form family and
 /// its extensions, external components, metadata-object descriptions, register

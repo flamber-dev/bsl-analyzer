@@ -20,6 +20,7 @@ pub(crate) const INFERENCE_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::DeprecatedPlatformApi,
     DiagnosticCode::RedundantAccessToObject,
     DiagnosticCode::MissedRequiredParameter,
+    DiagnosticCode::UnknownTypeInNew,
     DiagnosticCode::UnavailableInEnvironment,
     DiagnosticCode::PlatformMemberNewerThanMinVersion,
     DiagnosticCode::PlatformMemberHiddenByCompatibilityMode,
@@ -121,6 +122,7 @@ fn diagnostic_expr(diag: &InferenceDiagnostic) -> ExprId {
         InferenceDiagnostic::MissedRequiredParameterCommonModule { expr, .. } => *expr,
         InferenceDiagnostic::MissedRequiredParameterManagerModule { expr, .. } => *expr,
         InferenceDiagnostic::RedundantAccessToObjectThreeLevel { expr, .. } => *expr,
+        InferenceDiagnostic::UnknownTypeInNew { expr, .. } => *expr,
         InferenceDiagnostic::UnavailableInEnvironment { expr, .. } => *expr,
         InferenceDiagnostic::PlatformMemberNewerThanMinVersion { expr, .. } => *expr,
         InferenceDiagnostic::PlatformMemberHiddenByCompatibilityMode { expr, .. } => *expr,
@@ -240,6 +242,9 @@ fn dispatch_inference_diagnostic(
             range,
             ctx,
         ),
+        InferenceDiagnostic::UnknownTypeInNew { name, .. } => {
+            handlers::unknown_type_in_new::from_hir(name, range, ctx)
+        }
         InferenceDiagnostic::UnavailableInEnvironment { name, member_kind, missing, .. } => {
             handlers::unavailable_in_environment::from_hir(name, *member_kind, *missing, range, ctx)
         }

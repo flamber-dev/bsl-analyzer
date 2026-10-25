@@ -181,6 +181,7 @@ pub enum DiagnosticCode {
     UnresolvedMetadataPath,
     ReadOnlyPropertyAssignment,
     GlobalPropertyNotWritable,
+    UnknownTypeInNew,
     UnavailableInEnvironment,
     PlatformMemberNewerThanMinVersion,
     PlatformMemberHiddenByCompatibilityMode,

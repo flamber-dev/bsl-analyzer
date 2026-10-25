@@ -310,6 +310,10 @@ const EXCLUSIONS_DOCUMENTED: &[(DiagnosticCode, &str)] = &[
         "message names the property as the source spells it, by design",
     ),
     (
+        DiagnosticCode::UnknownTypeInNew,
+        "message names the type exactly as the source spells it, by design",
+    ),
+    (
         DiagnosticCode::UnavailableInEnvironment,
         "message embeds the member name and environment qualifiers by design",
     ),
@@ -684,7 +688,7 @@ EndProcedure"#,
 #[test]
 fn bilingual_inventory_has_expected_size() {
     let all = all_codes();
-    assert_eq!(all.len(), 206, "update the bilingual inventory when DiagnosticCode changes");
+    assert_eq!(all.len(), 207, "update the bilingual inventory when DiagnosticCode changes");
 }
 
 #[test]
