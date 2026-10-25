@@ -406,9 +406,11 @@ fn dispatch_next_chunk(state: &mut GlobalState) {
                     tracing::debug!(chunk = chunk_index, "workspace batch chunk cancelled by an edit; will retry");
                     WorkspaceBatchOutcome::Cancelled
                 }
-                Some(_) => {
-                    tracing::debug!(chunk = chunk_index, "workspace batch chunk unwound on a propagated panic; will retry within budget");
-                    WorkspaceBatchOutcome::Propagated
+                Some(kind) => {
+                    tracing::debug!(chunk = chunk_index, ?kind, "workspace batch chunk unwound on a propagated panic; will retry within budget");
+                    WorkspaceBatchOutcome::Propagated {
+                        from_claim: matches!(kind, salsa::Cancelled::PropagatedPanic),
+                    }
                 }
                 None => {
                     tracing::error!(chunk = chunk_index, "workspace batch chunk panicked; skipping");

@@ -449,6 +449,8 @@ mod shared_backend_tests {
         .unwrap();
 
         state.mark_shared_view_changed();
+        let dispatched_revision =
+            salsa::plumbing::current_revision(state.analysis_host.raw_database());
         handle_task(
             &mut state,
             Task::DiagnosticsCancelled {
@@ -456,6 +458,7 @@ mod shared_backend_tests {
                 version: 3,
                 generation: 7,
                 kind: salsa::Cancelled::Local,
+                dispatched_revision,
                 completed_at: std::time::Instant::now(),
             },
         )
@@ -635,6 +638,7 @@ fn run_event_loop(state: &mut GlobalState, receiver: &Receiver<Message>) -> Resu
         // pool still saturated would requeue the same URI, and the loop only
         // re-runs on a genuine wake (a finished worker frees a slot and posts
         // its result task).
+        state.release_parked_diagnostics(false);
         if !state.pending_diagnostics_uris.is_empty() && state.task_pool.pool.has_capacity() {
             for uri in std::mem::take(&mut state.pending_diagnostics_uris) {
                 crate::handlers::schedule_diagnostics(state, &uri);
@@ -709,11 +713,14 @@ fn idle_trim_mem_budget_mb() -> usize {
 /// Decide whether this idle tick trims, and how hard. `None` unless the workspace has
 /// loaded, no workspace-batch sweep is active (its chunks run between loop wakes and
 /// hold a db snapshot the trim would block on; the sweep also has its own trim
-/// schedule), every interactive snapshot has drained, the process is over the idle
+/// schedule — a sweep parked on a disk change holds no snapshot and runs no schedule
+/// until the change is applied, which may be never, so it does not count), every interactive snapshot has drained, the process is over the idle
 /// budget, and the stage has not already run for this idle period. Pure so the
 /// schedule is testable with an injected budget signal.
 fn idle_trim_kind(state: &GlobalState, over_budget: bool) -> Option<IdleTrimKind> {
-    let batch_active = state.workspace_batch_plan.is_some() || state.workspace_batch_in_flight;
+    let batch_active = state.workspace_batch_in_flight
+        || (state.workspace_batch_plan.is_some()
+            && !crate::handlers::workspace_batch::workspace_batch_parked(state));
     if !state.vfs_done
         || batch_active
         || !state.interactive_analysis_quiescent()
@@ -772,13 +779,6 @@ fn answer_from_the_reloaded_baseline(state: &mut GlobalState) {
 fn handle_idle_tick(state: &mut GlobalState) {
     state.idle_ticks = state.idle_ticks.saturating_add(1);
 
-    // A job parked on a disk change the watcher never delivered is retried at this cadence:
-    // nothing else would move the revision it waits on.
-    if let Some(plan) = state.workspace_batch_plan.as_mut() {
-        plan.parked_at = None;
-    }
-    state.shared_metadata_warm_parked_at = None;
-
     // Ref-only git movement (fetch/rebase/reset) produces no file events; the
     // idle tick is the only place that notices it.
     state.check_scope_ref_drift();
@@ -792,6 +792,19 @@ fn handle_idle_tick(state: &mut GlobalState) {
         crate::mem_report::print_salsa_event_report(db, LABEL);
     }
 
+    idle_trim(state);
+
+    // A job parked on a disk change the watcher never delivered is retried at this cadence:
+    // nothing else would move the revision it waits on. Lifted after the trim, which a
+    // parked sweep does not hold back.
+    if let Some(plan) = state.workspace_batch_plan.as_mut() {
+        plan.parked_at = None;
+    }
+    state.shared_metadata_warm_parked_at = None;
+    state.release_parked_diagnostics(true);
+}
+
+fn idle_trim(state: &mut GlobalState) {
     if idle_trim_disabled() {
         return;
     }
@@ -1336,7 +1349,14 @@ pub(crate) fn handle_task(state: &mut GlobalState, task: crate::global_state::Ta
                 tracing::debug!(generation, current, "discarding stale diagnostics");
             }
         }
-        Task::DiagnosticsCancelled { uri, version, generation, kind, completed_at } => {
+        Task::DiagnosticsCancelled {
+            uri,
+            version,
+            generation,
+            kind,
+            dispatched_revision,
+            completed_at,
+        } => {
             tracing::debug!(
                 generation,
                 ?kind,
@@ -1351,21 +1371,33 @@ pub(crate) fn handle_task(state: &mut GlobalState, task: crate::global_state::Ta
                 && state.diagnostics_generation.get(&uri) == Some(&generation)
                 && state.mem_docs.get_version(&uri) == Some(version)
             {
-                state.enqueue_pending_diagnostics(uri);
+                // A write cancels a job and then starts a new revision, so a pending write
+                // that left the revision where the job was dispatched was not a write's: a
+                // closed file read from disk drifted from its revision, and a re-dispatch
+                // now would unwind the same way. It waits for the revision to move or for
+                // an idle tick.
+                let revision =
+                    salsa::plumbing::current_revision(state.analysis_host.raw_database());
+                if matches!(kind, salsa::Cancelled::PendingWrite) && dispatched_revision == revision
+                {
+                    state.parked_diagnostics.insert(uri, revision);
+                } else {
+                    state.enqueue_pending_diagnostics(uri);
+                }
             }
         }
-        Task::SharedMetadataWarmed { cancelled } => {
+        Task::SharedMetadataWarmed { cancelled, local } => {
             tracing::debug!(cancelled, "shared editor storage metadata warm-up ended");
             state.shared_metadata_warm_in_flight = false;
             // What it had parsed before the write stays memoised, so another run continues
-            // from there. A cancel no write explains is a disk read that drifted from its
-            // revision: another run unwinds the same way until the change is applied, so it
-            // waits for the revision to move (or for an idle tick) instead of restarting at
-            // once.
+            // from there. A cancel no write explains, other than the loop's own local one, is
+            // a disk read that drifted from its revision: another run unwinds the same way
+            // until the change is applied, so it waits for the revision to move (or for an
+            // idle tick) instead of restarting at once.
             if cancelled {
                 state.shared_metadata_warm_pending = true;
                 let revision = state.analysis_host.request_revision();
-                if state.shared_metadata_warm_revision == Some(revision) {
+                if !local && state.shared_metadata_warm_revision == Some(revision) {
                     state.shared_metadata_warm_parked_at = Some(revision);
                 }
             }
@@ -1944,11 +1976,18 @@ fn apply_workspace_batch_completion(
         }
         // Ambiguous under parallelism: a transient edit-cancellation cascade (retry) or a
         // real deterministic panic in a shared query (skip). Disambiguate by budget — retry
-        // a few times, and if it keeps unwinding treat it as deterministic and skip.
-        WorkspaceBatchOutcome::Propagated => {
+        // a few times, and if it keeps unwinding treat it as deterministic and skip. A claim
+        // owner that unwound with the revision unchanged since dispatch was not cut by an
+        // edit: a drifted disk read, met again by a re-dispatch at once, or a real panic. The
+        // chunk is parked like a cut no write explains, and the budget still counts.
+        WorkspaceBatchOutcome::Propagated { from_claim } => {
+            let revision = state.analysis_host.request_revision();
             let over_budget = {
                 let plan = state.workspace_batch_plan.as_mut().expect("plan present after gate");
                 plan.chunk_retries += 1;
+                if from_claim && plan.dispatched_revision == revision {
+                    plan.parked_at = Some(revision);
+                }
                 plan.chunk_retries > WORKSPACE_BATCH_MAX_PROPAGATED_RETRIES
             };
             if over_budget {
@@ -6422,11 +6461,16 @@ mod tests {
         let uri = crate::test_uri::file_uri("cancelled.bsl");
         state.mem_docs.insert(uri.clone(), "new".into(), 42);
         state.diagnostics_generation.insert(uri.clone(), 7);
+        // Dispatched before a write: the write's own cut.
+        let dispatched_revision =
+            salsa::plumbing::current_revision(state.analysis_host.raw_database());
+        state.analysis_host.raw_database_mut().set_workspace_load_complete(true);
         let task = |version, generation, kind| Task::DiagnosticsCancelled {
             uri: uri.clone(),
             version,
             generation,
             kind,
+            dispatched_revision,
             completed_at: std::time::Instant::now(),
         };
         handle_task(&mut state, task(42, 7, salsa::Cancelled::PendingWrite)).unwrap();
@@ -6445,6 +6489,64 @@ mod tests {
         state.mem_docs.remove(&uri);
         handle_task(&mut state, task(42, 7, salsa::Cancelled::PendingWrite)).unwrap();
         assert!(state.pending_diagnostics_uris.is_empty(), "closed documents are not retried");
+    }
+
+    /// A pending write that left the revision where the job was dispatched is a closed file
+    /// read from disk that drifted from its revision: a re-dispatch at once would unwind the
+    /// same way, every loop turn, for as long as the change stays unapplied. The document
+    /// waits until the revision moves or an idle tick lifts the wait, and is never dropped.
+    /// A local cancellation at the same revision is the loop's own and is retried at once.
+    #[test]
+    fn diagnostics_cut_no_write_explains_wait_for_the_revision_or_an_idle_tick() {
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+        let uri = crate::test_uri::file_uri("drifted.bsl");
+        state.mem_docs.insert(uri.clone(), "text".into(), 42);
+        state.diagnostics_generation.insert(uri.clone(), 7);
+        let cut = |state: &mut crate::global_state::GlobalState, kind| {
+            let dispatched_revision =
+                salsa::plumbing::current_revision(state.analysis_host.raw_database());
+            handle_task(
+                state,
+                Task::DiagnosticsCancelled {
+                    uri: uri.clone(),
+                    version: 42,
+                    generation: 7,
+                    kind,
+                    dispatched_revision,
+                    completed_at: std::time::Instant::now(),
+                },
+            )
+            .unwrap();
+        };
+
+        cut(&mut state, salsa::Cancelled::Local);
+        assert_eq!(
+            std::mem::take(&mut state.pending_diagnostics_uris),
+            vec![uri.clone()],
+            "a local cancellation is retried at once"
+        );
+
+        cut(&mut state, salsa::Cancelled::PendingWrite);
+        for _ in 0..10 {
+            state.release_parked_diagnostics(false);
+            assert!(state.pending_diagnostics_uris.is_empty(), "a cut no write explains waits");
+            assert!(state.parked_diagnostics.contains_key(&uri), "and is not dropped");
+        }
+        state.analysis_host.raw_database_mut().set_workspace_load_complete(true);
+        state.release_parked_diagnostics(false);
+        assert_eq!(
+            std::mem::take(&mut state.pending_diagnostics_uris),
+            vec![uri.clone()],
+            "the change applied lifts the wait"
+        );
+        assert!(state.parked_diagnostics.is_empty());
+
+        cut(&mut state, salsa::Cancelled::PendingWrite);
+        state.release_parked_diagnostics(false);
+        assert!(state.pending_diagnostics_uris.is_empty(), "control: the document waits again");
+        handle_idle_tick(&mut state);
+        assert_eq!(state.pending_diagnostics_uris, vec![uri], "an idle tick lifts the wait");
     }
 
     #[test]
@@ -6886,7 +6988,9 @@ mod tests {
                 &mut state,
                 Task::WorkspaceBatchChunk {
                     generation: gen,
-                    outcome: crate::global_state::WorkspaceBatchOutcome::Propagated,
+                    outcome: crate::global_state::WorkspaceBatchOutcome::Propagated {
+                        from_claim: false,
+                    },
                 },
             )
             .unwrap();
@@ -6902,7 +7006,9 @@ mod tests {
             &mut state,
             Task::WorkspaceBatchChunk {
                 generation: gen,
-                outcome: crate::global_state::WorkspaceBatchOutcome::Propagated,
+                outcome: crate::global_state::WorkspaceBatchOutcome::Propagated {
+                    from_claim: false,
+                },
             },
         )
         .unwrap();
@@ -6985,7 +7091,8 @@ mod tests {
             state.shared_metadata_warm_pending = false;
         };
         let cancelled = |state: &mut crate::global_state::GlobalState| {
-            handle_task(state, Task::SharedMetadataWarmed { cancelled: true }).unwrap();
+            handle_task(state, Task::SharedMetadataWarmed { cancelled: true, local: false })
+                .unwrap();
             assert!(state.shared_metadata_warm_pending, "a cancelled warm-up asks for another");
         };
         let edit = |state: &mut crate::global_state::GlobalState| {
@@ -7010,6 +7117,85 @@ mod tests {
         assert!(state.shared_metadata_warm_parked(), "control: the warm-up waits again");
         handle_idle_tick(&mut state);
         assert!(!state.shared_metadata_warm_parked(), "an idle tick lifts the wait");
+    }
+
+    /// A sibling blocked on a claim whose owner unwound gets `PropagatedPanic`, whatever the
+    /// owner's own payload was — a drifted disk read among them. With the revision unchanged
+    /// since dispatch the chunk waits like a cut no write explains instead of spending its
+    /// budget on re-dispatches that meet the same unwind; the budget still counts, so a real
+    /// panic is skipped in the end. A local cancellation and a cut after an edit are retried
+    /// at once.
+    #[test]
+    fn workspace_batch_propagated_cut_no_write_explains_waits_within_its_budget() {
+        use crate::handlers::workspace_batch::workspace_batch_parked;
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+        install_test_plan(&mut state, 2);
+        let gen = state.workspace_batch_generation;
+        let propagated = |from_claim| Task::WorkspaceBatchChunk {
+            generation: gen,
+            outcome: crate::global_state::WorkspaceBatchOutcome::Propagated { from_claim },
+        };
+        let dispatched = |state: &mut crate::global_state::GlobalState| {
+            let revision = state.analysis_host.request_revision();
+            let plan = state.workspace_batch_plan.as_mut().expect("plan active");
+            plan.dispatched_revision = revision;
+            plan.parked_at = None;
+        };
+        let next_chunk = |state: &crate::global_state::GlobalState| {
+            state.workspace_batch_plan.as_ref().expect("plan active").next_chunk
+        };
+
+        dispatched(&mut state);
+        handle_task(&mut state, propagated(false)).unwrap();
+        assert!(!workspace_batch_parked(&state), "a local cancellation is retried at once");
+
+        dispatched(&mut state);
+        state.analysis_host.raw_database_mut().set_workspace_load_complete(true);
+        handle_task(&mut state, propagated(true)).unwrap();
+        assert!(!workspace_batch_parked(&state), "a cut after an edit is retried at once");
+
+        dispatched(&mut state);
+        handle_task(&mut state, propagated(true)).unwrap();
+        assert!(workspace_batch_parked(&state), "a claim cut no write explains waits");
+        assert_eq!(next_chunk(&state), 0, "within budget the chunk is kept");
+
+        while state.workspace_batch_plan.as_ref().expect("plan active").chunk_retries
+            < WORKSPACE_BATCH_MAX_PROPAGATED_RETRIES
+        {
+            dispatched(&mut state);
+            handle_task(&mut state, propagated(true)).unwrap();
+            assert_eq!(next_chunk(&state), 0, "within budget the chunk is kept");
+        }
+        dispatched(&mut state);
+        handle_task(&mut state, propagated(true)).unwrap();
+        assert_eq!(next_chunk(&state), 1, "the budget still counts: the chunk is skipped");
+    }
+
+    /// The loop's own `request_cancellation` moves no revision, and another warm-up does not
+    /// meet it again: such a cancel runs again at once instead of waiting for an idle tick.
+    #[test]
+    fn a_metadata_warmup_cancelled_locally_runs_again_at_once() {
+        use crate::global_state::Task;
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+        let started = |state: &mut crate::global_state::GlobalState| {
+            state.shared_metadata_warm_revision = Some(state.analysis_host.request_revision());
+            state.shared_metadata_warm_parked_at = None;
+            state.shared_metadata_warm_in_flight = true;
+            state.shared_metadata_warm_pending = false;
+        };
+
+        started(&mut state);
+        handle_task(&mut state, Task::SharedMetadataWarmed { cancelled: true, local: true })
+            .unwrap();
+        assert!(state.shared_metadata_warm_pending, "a cancelled warm-up asks for another");
+        assert!(!state.shared_metadata_warm_parked(), "a local cancel runs again at once");
+
+        started(&mut state);
+        handle_task(&mut state, Task::SharedMetadataWarmed { cancelled: true, local: false })
+            .unwrap();
+        assert!(state.shared_metadata_warm_parked(), "control: a drifted read's cancel waits");
     }
 
     #[test]
@@ -7148,6 +7334,21 @@ mod tests {
         install_test_plan(&mut state, 2);
         state.idle_ticks = IDLE_TRIM_DEEP_TICKS;
         assert_eq!(idle_trim_kind(&state, true), None);
+    }
+
+    /// A sweep parked on a disk change holds no snapshot and runs no trim schedule of its
+    /// own until the change is applied, which may never happen: the idle trim runs under it.
+    /// The same plan between chunks, not parked, still holds the idle trim back.
+    #[test]
+    fn idle_trim_runs_under_a_parked_sweep() {
+        let mut state = idle_state();
+        install_test_plan(&mut state, 2);
+        state.workspace_batch_in_flight = false;
+        assert_eq!(idle_trim_kind(&state, true), None, "control: an active sweep holds it back");
+
+        let revision = state.analysis_host.request_revision();
+        state.workspace_batch_plan.as_mut().expect("plan active").parked_at = Some(revision);
+        assert_eq!(idle_trim_kind(&state, true), Some(IdleTrimKind::Shallow));
     }
 
     #[test]
@@ -7423,7 +7624,7 @@ mod tests {
         seed(&mut state);
         handle_task(
             &mut state,
-            crate::global_state::Task::SharedMetadataWarmed { cancelled: false },
+            crate::global_state::Task::SharedMetadataWarmed { cancelled: false, local: false },
         )
         .unwrap();
         assert_eq!(
@@ -7872,17 +8073,21 @@ mod tests {
 
         assert!(matches!(
             shared_metadata_warmup(|| {}),
-            Task::SharedMetadataWarmed { cancelled: false }
+            Task::SharedMetadataWarmed { cancelled: false, local: false }
         ));
         assert!(matches!(
             shared_metadata_warmup(|| std::panic::resume_unwind(Box::new(
                 salsa::Cancelled::PendingWrite
             ))),
-            Task::SharedMetadataWarmed { cancelled: true }
+            Task::SharedMetadataWarmed { cancelled: true, local: false }
+        ));
+        assert!(matches!(
+            shared_metadata_warmup(|| std::panic::resume_unwind(Box::new(salsa::Cancelled::Local))),
+            Task::SharedMetadataWarmed { cancelled: true, local: true }
         ));
         assert!(matches!(
             shared_metadata_warmup(|| std::panic::resume_unwind(Box::new("a parser bug"))),
-            Task::SharedMetadataWarmed { cancelled: false }
+            Task::SharedMetadataWarmed { cancelled: false, local: false }
         ));
     }
 

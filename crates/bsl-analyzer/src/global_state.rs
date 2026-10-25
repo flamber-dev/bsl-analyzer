@@ -86,8 +86,11 @@ pub enum Task {
         epoch: u64,
     },
     SharedMetadataWarmed {
-        /// A write cancelled it, and it is worth running again.
+        /// A cancellation cut it, and it is worth running again.
         cancelled: bool,
+        /// The cut was the event loop's own `request_cancellation`, which moves no
+        /// revision: unlike a drifted disk read, another run does not meet it again.
+        local: bool,
     },
     DiagnosticsReady {
         uri: Url,
@@ -101,6 +104,8 @@ pub enum Task {
         version: i32,
         generation: u64,
         kind: salsa::Cancelled,
+        /// The revision of the store the job read, taken when it was dispatched.
+        dispatched_revision: salsa::Revision,
         completed_at: std::time::Instant,
     },
     PreloadExternalFiles {
@@ -240,10 +245,15 @@ pub enum WorkspaceBatchOutcome {
     /// A worker unwound on `salsa::Cancelled::PropagatedPanic` — ambiguous under
     /// parallelism: it is raised both for a genuine deterministic panic in a shared query
     /// AND for a sibling worker blocked on a query owned by a thread that unwound on a
-    /// (transient) edit cancellation. Retried like [`Self::Cancelled`] but with a bounded
-    /// budget, so a transient cascade recovers while a real deterministic panic is skipped
-    /// after the budget is spent rather than looping forever.
-    Propagated,
+    /// (transient) edit cancellation or a drifted disk read — or on a local cancellation.
+    /// Retried like [`Self::Cancelled`] but with a bounded budget, so a transient cascade
+    /// recovers while a real deterministic panic is skipped after the budget is spent
+    /// rather than looping forever.
+    Propagated {
+        /// Raised as `PropagatedPanic`: the worker was blocked on a query whose owner
+        /// unwound, rather than cancelled locally.
+        from_claim: bool,
+    },
     /// The chunk unwound on a stray non-cancellation panic — deterministic, so retrying
     /// would loop forever. The chunk is skipped (cursor advanced) and its files go
     /// uncovered until the next full sweep.
@@ -490,6 +500,12 @@ pub struct GlobalState {
     /// and so does a schedule that found the task pool saturated — the loop
     /// retries when a worker frees a queue slot. Deduplicated by URI.
     pub pending_diagnostics_uris: Vec<Url>,
+    /// Documents whose diagnostics were cut by a disk read that drifted from its revision,
+    /// each with the revision the cut left in place. A re-dispatch at that revision would
+    /// unwind the same way, so the document waits until the revision moves — the change
+    /// applied — or an idle tick lifts the wait, then rejoins
+    /// [`Self::pending_diagnostics_uris`].
+    pub parked_diagnostics: HashMap<Url, salsa::Revision>,
 
     pub diagnostics_tokens: HashMap<Url, salsa::CancellationToken>,
     pub preload_tokens: HashMap<vfs::FileId, salsa::CancellationToken>,
@@ -728,6 +744,7 @@ impl GlobalState {
             supports_semantic_tokens_refresh: false,
             diagnostics_generation: HashMap::new(),
             pending_diagnostics_uris: Vec::new(),
+            parked_diagnostics: HashMap::new(),
             active_workspace_diagnostic: None,
             workspace_batch_dirty: false,
             workspace_batch_in_flight: false,
@@ -840,6 +857,25 @@ impl GlobalState {
     pub fn enqueue_pending_diagnostics(&mut self, uri: Url) {
         if !self.pending_diagnostics_uris.contains(&uri) {
             self.pending_diagnostics_uris.push(uri);
+        }
+    }
+
+    /// Queue again the parked documents whose wait is over: every one with `all` (an idle
+    /// tick), otherwise those whose revision has moved since the cut.
+    pub(crate) fn release_parked_diagnostics(&mut self, all: bool) {
+        if self.parked_diagnostics.is_empty() {
+            return;
+        }
+        let revision = salsa::plumbing::current_revision(self.analysis_host.raw_database());
+        let released: Vec<Url> = self
+            .parked_diagnostics
+            .iter()
+            .filter(|&(_, &parked_at)| all || parked_at != revision)
+            .map(|(uri, _)| uri.clone())
+            .collect();
+        for uri in released {
+            self.parked_diagnostics.remove(&uri);
+            self.enqueue_pending_diagnostics(uri);
         }
     }
 
@@ -1263,13 +1299,14 @@ impl GlobalState {
 /// would fail the same way again, and the analysis loads what it needs itself.
 pub(crate) fn shared_metadata_warmup(warm: impl FnOnce()) -> Task {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(warm)) {
-        Ok(()) => Task::SharedMetadataWarmed { cancelled: false },
-        Err(payload) if payload.is::<salsa::Cancelled>() => {
-            Task::SharedMetadataWarmed { cancelled: true }
-        }
+        Ok(()) => Task::SharedMetadataWarmed { cancelled: false, local: false },
+        Err(payload) if payload.is::<salsa::Cancelled>() => Task::SharedMetadataWarmed {
+            cancelled: true,
+            local: matches!(payload.downcast_ref(), Some(salsa::Cancelled::Local)),
+        },
         Err(_) => {
             tracing::warn!("shared editor storage metadata warm-up failed; not retried");
-            Task::SharedMetadataWarmed { cancelled: false }
+            Task::SharedMetadataWarmed { cancelled: false, local: false }
         }
     }
 }
