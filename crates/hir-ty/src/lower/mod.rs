@@ -66,6 +66,16 @@ impl<'a> TyLoweringContext<'a> {
         }
     }
 
+    /// Whether [`Self::lower_bare_name_id`] would reach its last resort for `raw`:
+    /// the name is no metadata-kind, collection or reference spelling, so only the
+    /// platform's own type list can say what it is.
+    pub fn bare_name_is_unmodelled(raw: &str) -> bool {
+        TypeRef::from_bare_name(raw).is_none()
+            && MdoType::from_plural(raw).is_none()
+            && MetadataReferenceKind::from_plural(raw).is_none()
+            && metadata_kind_from_prefix(raw).is_none()
+    }
+
     pub fn lower_bare_name_id(&self, db: &dyn TypeKernelDb, name: &Name) -> TypeId {
         let raw = name.as_str();
 

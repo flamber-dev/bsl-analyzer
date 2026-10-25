@@ -171,6 +171,7 @@ pub mod unavailable_in_environment;
 pub mod union_all;
 pub mod unknown_field_in_query;
 pub mod unknown_preprocessor_symbol;
+pub mod unknown_type_in_new;
 pub mod unlimited_length_string_usage_in_query;
 pub mod unreachable_code;
 pub mod unresolved_bare_call;
@@ -520,6 +521,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::UnresolvedMetadataPath => Some(&unresolved_metadata_path::METADATA),
         DiagnosticCode::ReadOnlyPropertyAssignment => Some(&read_only_property::METADATA),
         DiagnosticCode::GlobalPropertyNotWritable => Some(&global_property_not_writable::METADATA),
+        DiagnosticCode::UnknownTypeInNew => Some(&unknown_type_in_new::METADATA),
         DiagnosticCode::UnavailableInEnvironment => Some(&unavailable_in_environment::METADATA),
         DiagnosticCode::PlatformMemberNewerThanMinVersion => {
             Some(&platform_member_newer_than_min_version::METADATA)
