@@ -80,6 +80,14 @@ pub fn project() -> tempfile::TempDir {
     dir
 }
 
+/// Swap the config in one step: the running server watches it, and a plain write lets it read
+/// the file half-written and rebind the workspace to a project that never existed.
+pub fn replace_config(path: &Path, text: &str) {
+    let next = path.with_extension("toml.next");
+    std::fs::write(&next, text).expect("write the next config");
+    std::fs::rename(&next, path).expect("swap the config in");
+}
+
 /// An action repeated until the server reacts to it.
 ///
 /// The server's file watcher is armed asynchronously and nothing announces when; a change
