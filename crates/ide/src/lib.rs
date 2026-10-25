@@ -315,6 +315,8 @@ impl Analysis {
     /// force LRU eviction from a background worker, which would contend with the live
     /// database. Cancellation is automatic: a concurrent edit bumps the revision and the
     /// in-flight query unwinds, so the caller's `salsa::Cancelled::catch` aborts the sweep.
+    /// A file changed on disk under the sweep unwinds the same way, as
+    /// `Cancelled::PendingWrite`, and the sweep is retried once the change is applied.
     pub fn workspace_diagnostics(
         &self,
         file_ids: &[FileId],
@@ -323,10 +325,11 @@ impl Analysis {
         file_ids
             .iter()
             .filter_map(|&file_id| {
-                // One file must not sink the whole sweep. A file racing a disk delete/rewrite can
-                // make `file_text_query` panic on a revision mismatch; catch it and skip that file.
-                // A `salsa::Cancelled` is a genuine revision-bump abort, not a per-file fault — it
-                // must keep unwinding so the caller's `Cancelled::catch` aborts the request.
+                // One file must not sink the whole sweep. A file deleted or made unreadable under
+                // analysis makes `file_text_query` panic; catch it and skip that file. A
+                // `salsa::Cancelled` — a revision-bump abort, or a file changed on disk under
+                // analysis (`PendingWrite`) — is not a per-file fault: it must keep unwinding so
+                // the caller's `Cancelled::catch` aborts the request and retries it.
                 let computed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     self.file_diagnostics_cached(file_id, config.clone())
                 }));
@@ -386,8 +389,8 @@ impl Analysis {
     /// cores interactive requests need. Results are identical to the serial sweep.
     ///
     /// Cancellation and per-file panic handling match [`Self::workspace_diagnostics`]: a
-    /// `salsa::Cancelled` unwinds out of the pool to abort the chunk, a per-file compute
-    /// panic skips just that file.
+    /// `salsa::Cancelled` (including a file changed on disk under analysis) unwinds out of
+    /// the pool to abort the chunk, a per-file compute panic skips just that file.
     pub fn workspace_diagnostics_parallel(
         &self,
         file_ids: &[FileId],
@@ -747,5 +750,108 @@ mod suppression_surface_tests {
             !has_self_assign(&supp.file_diagnostics_cached(fid, input)),
             "directive must suppress through the salsa-tracked query"
         );
+    }
+}
+
+#[cfg(test)]
+mod workspace_diagnostics_drift_tests {
+    use super::*;
+    use ide_db::base_db::{content_revision, SourceDatabase, SourceRoot, SourceRootId};
+    use ide_db::vfs::{file_set::FileSet, VfsPath};
+    use ide_db::RootDatabaseImpl;
+
+    const BODY: &str = "Процедура Тест()\n    А = 1;\nКонецПроцедуры\n";
+
+    const BEFORE_THE_EDIT: &str = "a text before the edit";
+
+    /// Two disk files of one local root, both holding `BODY`: `FileId(1)` is recorded right,
+    /// `FileId(0)` with the revision of `first_recorded`.
+    fn two_file_analysis(dir: &std::path::Path, first_recorded: &str) -> Analysis {
+        let mut db = RootDatabaseImpl::default();
+        let mut file_set = FileSet::new();
+        for (id, name) in [(0, "Drifted.bsl"), (1, "Steady.bsl")] {
+            let path = dir.join(name);
+            std::fs::write(&path, BODY).unwrap();
+            file_set.insert(FileId(id), VfsPath::new(path));
+        }
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        for id in [0, 1] {
+            db.set_file_source_root(FileId(id), SourceRootId(0));
+        }
+        db.set_file_revision_from_disk(FileId(0), content_revision(first_recorded));
+        db.set_file_revision_from_disk(FileId(1), content_revision(BODY));
+        Analysis::from_database(db)
+    }
+
+    #[test]
+    fn workspace_diagnostics_aborts_on_a_file_changed_under_analysis() {
+        let dir = tempfile::tempdir().unwrap();
+        let analysis = two_file_analysis(dir.path(), BEFORE_THE_EDIT);
+        let swept = salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
+            analysis.workspace_diagnostics(
+                &[FileId(0), FileId(1)],
+                DiagnosticsConfig::all_enabled().to_input(),
+            )
+        }));
+        assert!(
+            matches!(swept, Err(salsa::Cancelled::PendingWrite)),
+            "a file changed under the sweep aborts it instead of being skipped: {:?}",
+            swept.map(|files| files.len())
+        );
+    }
+
+    #[test]
+    fn workspace_diagnostics_parallel_aborts_on_a_file_changed_under_analysis() {
+        let dir = tempfile::tempdir().unwrap();
+        let analysis = two_file_analysis(dir.path(), BEFORE_THE_EDIT);
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let swept = salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
+            analysis.workspace_diagnostics_parallel(
+                &[FileId(0), FileId(1)],
+                DiagnosticsConfig::all_enabled().to_input(),
+                &pool,
+            )
+        }));
+        assert!(
+            matches!(swept, Err(salsa::Cancelled::PendingWrite)),
+            "a file changed under the parallel sweep aborts it instead of being skipped: {:?}",
+            swept.map(|files| files.len())
+        );
+    }
+
+    /// The same stand with `FileId(0)` recorded right and then deleted from disk.
+    fn first_file_deleted(dir: &std::path::Path) -> Analysis {
+        let analysis = two_file_analysis(dir, BODY);
+        std::fs::remove_file(dir.join("Drifted.bsl")).unwrap();
+        analysis
+    }
+
+    /// A file that is gone is not a write waiting to be applied: it costs the sweep its own
+    /// entry, and the readable neighbour is still swept. The neighbour is what keeps this from
+    /// passing on a sweep that skips everything.
+    #[test]
+    fn workspace_diagnostics_skips_a_file_deleted_under_analysis() {
+        let dir = tempfile::tempdir().unwrap();
+        let analysis = first_file_deleted(dir.path());
+        let swept = analysis.workspace_diagnostics(
+            &[FileId(0), FileId(1)],
+            DiagnosticsConfig::all_enabled().to_input(),
+        );
+        let swept_ids: Vec<FileId> = swept.iter().map(|(file_id, _)| *file_id).collect();
+        assert_eq!(swept_ids, [FileId(1)], "only the deleted file is skipped");
+    }
+
+    #[test]
+    fn workspace_diagnostics_parallel_skips_a_file_deleted_under_analysis() {
+        let dir = tempfile::tempdir().unwrap();
+        let analysis = first_file_deleted(dir.path());
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let swept = analysis.workspace_diagnostics_parallel(
+            &[FileId(0), FileId(1)],
+            DiagnosticsConfig::all_enabled().to_input(),
+            &pool,
+        );
+        let swept_ids: Vec<FileId> = swept.iter().map(|(file_id, _)| *file_id).collect();
+        assert_eq!(swept_ids, [FileId(1)], "only the deleted file is skipped");
     }
 }

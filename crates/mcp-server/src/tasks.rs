@@ -240,10 +240,12 @@ where
             Err(TaskExit::Error(unfinished_error(tool)))
         }
         CallOutcome::Cancelled => Err(TaskExit::Cancelled),
-        // A writer moved the database out from under the read. Nobody cancelled anything and
-        // nothing failed: the caller is owed the same retry envelope the synchronous branch
-        // hands it, so the task completes carrying it.
+        // A writer moved the database out from under the read, or the read met a file changed
+        // on disk after its revision was recorded. Nobody cancelled anything and nothing
+        // failed: the caller is owed the same retry envelope the synchronous branch hands it,
+        // so the task completes carrying it.
         CallOutcome::Superseded => Ok(retry()),
+        CallOutcome::Frozen(reason) => Err(TaskExit::Error(McpError::internal_error(reason, None))),
         CallOutcome::Panicked => {
             Err(TaskExit::Error(McpError::internal_error("internal handler panic", None)))
         }
@@ -968,5 +970,77 @@ mod tests {
             );
         }
         manager.cancel_task(&task.task_id).expect("the waiting task is addressable");
+    }
+
+    /// A read cut short by a file that changed on disk after its revision was applied settles
+    /// a task the way it answers a synchronous caller: with the tool's retry envelope while
+    /// the owner can still apply the change, with the owner's own refusal once it is frozen on
+    /// an invalid project and never will.
+    ///
+    /// The refusal is the half a retry would hide: a frozen owner that answered `retry` would
+    /// have its caller ask again forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_drifted_read_settles_a_task_with_a_retry_or_the_owners_refusal() {
+        use crate::diagnostics_state::test_support::{join_load, write_common_module};
+        use crate::workspace_handle::WorkspaceRead;
+
+        fn drifted(_session: &ResidentSession) -> Result<CallToolResult, McpError> {
+            std::panic::resume_unwind(Box::new(salsa::Cancelled::PendingWrite))
+        }
+        fn retry() -> CallToolResult {
+            CallToolResult::structured(serde_json::json!({ "status": "loading" }))
+        }
+        /// What the task settled with, reported from inside it: the answer's body, or the
+        /// error's message.
+        async fn settled_with(diag: DiagnosticsState) -> Result<serde_json::Value, String> {
+            let manager = TaskManager::new();
+            let (settled_tx, settled_rx) = tokio::sync::oneshot::channel();
+            manager.spawn(TaskOptions::new(), move |task_ctx| {
+                Box::pin(async move {
+                    let settled =
+                        match run(diag, task_ctx, "probe", UNREACHABLE_DEADLINE, drifted, retry)
+                            .await
+                        {
+                            Ok(answer) => Ok(serde_json::to_value(&answer).unwrap()),
+                            Err(TaskExit::Error(error)) => Err(error.message.to_string()),
+                            Err(TaskExit::Cancelled) => Err("cancelled".to_owned()),
+                        };
+                    let _ = settled_tx.send(settled);
+                    Ok(CallToolResult::success(vec![]))
+                })
+            });
+            settled_rx.await.expect("the task reports what it settled with")
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bsl-analyzer.toml"), "[source]\nroot = \".\"\n").unwrap();
+        write_common_module(
+            dir.path(),
+            "Сервер",
+            true,
+            "&НаСервере\nФункция Считать() Экспорт КонецФункции",
+        );
+        let diag = DiagnosticsState::for_workspace(dir.path().to_path_buf())
+            .with_last_good_on_invalid(true);
+        join_load(&diag);
+
+        assert_eq!(
+            settled_with(diag.clone()).await,
+            Ok(serde_json::to_value(retry()).unwrap()),
+            "a live owner's drifted read completes the task with the retry envelope"
+        );
+
+        std::fs::write(dir.path().join("bsl-analyzer.toml"), "invalid {{{{ toml").unwrap();
+        assert!(diag.freeze_invalid_project());
+        // The refusal in the owner's own words, as it gives it to any other disk request.
+        let WorkspaceRead::Failed(refusal) = diag.refresh_saved_path(&dir.path().join("Any.bsl"))
+        else {
+            panic!("a frozen owner refuses a disk request");
+        };
+        assert_eq!(
+            settled_with(diag).await,
+            Err(refusal),
+            "a frozen owner's drifted read fails the task with the owner's refusal"
+        );
     }
 }

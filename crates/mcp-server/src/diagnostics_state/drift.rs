@@ -937,7 +937,7 @@ impl DiagnosticsState {
             else {
                 return;
             };
-            let (rebuild, moved) = apply_resident_changes(
+            let (rebuild, moved, read_past_scan) = apply_resident_changes(
                 resident,
                 xml_paths,
                 added_bsl,
@@ -961,6 +961,7 @@ impl DiagnosticsState {
                 for (key, fp) in new_fp {
                     stats.insert(key.clone(), *fp);
                 }
+                stats.extend(read_past_scan);
                 for key in removed_keys {
                     stats.remove(key);
                 }
@@ -1053,7 +1054,7 @@ impl DiagnosticsState {
             else {
                 return;
             };
-            let (rebuild, moved) = apply_resident_changes(
+            let (rebuild, moved, read_past_scan) = apply_resident_changes(
                 resident,
                 xml_paths,
                 added_bsl,
@@ -1094,6 +1095,8 @@ impl DiagnosticsState {
                         .chain(modified_bsl.iter().map(String::as_str));
                     rebase_over_incomplete_scan(stats, applied, &new_fp)
                 };
+                let baseline_moved = baseline_moved || !read_past_scan.is_empty();
+                stats.extend(read_past_scan);
                 if baseline_moved {
                     *baseline_epoch += 1;
                 }
@@ -1224,6 +1227,23 @@ impl DiagnosticsState {
         // event path would not re-observe an object the caller thinks it just added.
         self.force_scan.store(true, Ordering::SeqCst);
         None
+    }
+
+    /// Route the next poll through a disk walk after a read found a file changed on disk
+    /// since its revision was applied, WITHOUT the storm guard.
+    ///
+    /// The retry that read is owed starts with a poll, but a healthy hub's poll only drains
+    /// delivered events: an event not delivered yet would leave the retry in the same
+    /// revision, reading the same drift. The guard bounds walks for a miss a walk does not
+    /// cure — a loop of lookups for something genuinely absent. This walk does cure its
+    /// cause: the scan sees the changed file, the apply moves the revision, and the drift
+    /// is gone. A declined force would leave the retry exactly as blind as the read it
+    /// replaces. One flag, so simultaneous drifts merge into one walk per poll.
+    pub(crate) fn force_rescan_after_drift(&self) {
+        #[cfg(test)]
+        self.forced_rescans.fetch_add(1, Ordering::SeqCst);
+        *lock_recover(&self.scan) = None;
+        self.force_scan.store(true, Ordering::SeqCst);
     }
 
     /// Re-subscribe this state's hub cursor, dropping any prior one, and hand back the debt
@@ -2287,6 +2307,55 @@ mod tests {
             1,
             "the pacing record grew per call instead of per file"
         );
+    }
+
+    /// The scan and the apply read a body at two moments. When the body changes between
+    /// them, the baseline must describe the bytes the apply read: one that kept the scan's
+    /// fingerprint reads a later return to the scanned bytes as "no drift", and the
+    /// recorded revision then describes bytes no longer on disk, for good.
+    #[test]
+    fn a_body_that_returns_to_its_scanned_bytes_after_the_apply_read_others_is_reapplied() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let module = module_path(root, "Сервер");
+        let scanned = "&НаСервере\nФункция Считать() Экспорт Возврат 1; КонецФункции";
+        let read_by_apply = "&НаСервере\nФункция Считать() Экспорт Возврат \"два\"; КонецФункции";
+
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.drift_interval = Duration::from_secs(3600);
+        join_load(&state);
+        let canonical = module.canonicalize().unwrap();
+        let file_id = state
+            .workspace_snapshot()
+            .unwrap()
+            .catalog
+            .iter()
+            .find(|file| file.path == canonical)
+            .expect("the module is admitted")
+            .file_id;
+
+        // The scan sees `scanned`; the body changes before the apply reads it.
+        fs::write(&module, scanned).unwrap();
+        *lock_recover(&state.scan) = None;
+        state.throttled_scan(root).expect("the scan walks");
+        fs::write(&module, read_by_apply).unwrap();
+        state.poll_drift();
+        // Read without a poll: another walk before the return would heal the baseline on
+        // its own and hide the case.
+        let applied = state.workspace_analysis().unwrap().file_text(file_id).to_string();
+        assert_eq!(applied, read_by_apply, "control: the apply read the later bytes");
+
+        // Back to the scanned bytes: the next walk must see that as drift.
+        fs::write(&module, scanned).unwrap();
+        *lock_recover(&state.scan) = None;
+        state.poll_drift();
+        let ResidentOutcome::Ready(text, _) =
+            state.read(|resident, _| resident.analysis().file_text(file_id).to_string())
+        else {
+            panic!("expected Ready")
+        };
+        assert_eq!(text, scanned, "the body that returned to its scanned bytes is re-applied");
     }
 
     /// The flag that hands the drift over to the event stream is set by the call that walked
@@ -5474,8 +5543,8 @@ mod tests {
 
             // Observed through the generation, not through the file text: a resident whose
             // recorded revision no longer matches disk refuses to hand its text over at all
-            // (`file_text revision mismatch`), so the very state under test would panic the
-            // probe instead of failing it. Applying a body edit bumps the generation, and
+            // (the read unwinds as `salsa::Cancelled::PendingWrite`), so the very state under
+            // test would unwind the probe instead of failing it. Applying a body edit bumps the generation, and
             // nothing else in this window can: the config rebuild is declined, and the
             // hidden directory is unchanged.
             let generation_before = raw_generation(&state);
