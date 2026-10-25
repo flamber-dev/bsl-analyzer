@@ -104,8 +104,8 @@ pub enum Task {
         version: i32,
         generation: u64,
         kind: salsa::Cancelled,
-        /// The revision of the store the job read, taken when it was dispatched.
-        dispatched_revision: salsa::Revision,
+        /// The store the job read, as it stood when the job was dispatched.
+        dispatched: DispatchStamp,
         completed_at: std::time::Instant,
     },
     PreloadExternalFiles {
@@ -231,6 +231,28 @@ pub struct RequestLifecycle {
     pub client_cancelled: bool,
 }
 
+/// Where a store stood when a job was dispatched, for telling what cut the job. A write
+/// starts a new revision; a disk read that drifted from its revision moves the store's
+/// drift count instead; an LRU eviction and any other exclusive access cancel with neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DispatchStamp {
+    pub revision: salsa::Revision,
+    pub drifts: u64,
+}
+
+impl DispatchStamp {
+    pub fn of(db: &(impl base_db::SourceDatabase + ?Sized)) -> Self {
+        Self { revision: salsa::plumbing::current_revision(db), drifts: db.disk_drift_count() }
+    }
+
+    /// Whether a cut that finds the store as `self` came from a disk read that drifted from
+    /// its revision after `dispatched`: no revision started since, and a drift counted. A
+    /// re-dispatch now would unwind the same way until the change is applied.
+    pub fn drifted_since(self, dispatched: DispatchStamp) -> bool {
+        self.revision == dispatched.revision && self.drifts != dispatched.drifts
+    }
+}
+
 /// What a finished batch chunk carries back to the event loop.
 #[derive(Debug)]
 pub enum WorkspaceBatchOutcome {
@@ -319,9 +341,10 @@ pub struct WorkspaceBatchPlan {
     /// so the chunk is retried up to a budget and then skipped. Reset when the cursor
     /// advances (a computed or skipped chunk).
     pub chunk_retries: u32,
-    /// The revision the current chunk was dispatched at. A `PendingWrite` cut after which it
-    /// still holds was not an edit's: the retry would compute the same thing again.
-    pub dispatched_revision: salsa::Revision,
+    /// Where the store stood when the current chunk was dispatched. A cut that finds it
+    /// drifted since ([`DispatchStamp::drifted_since`]) was not an edit's: the retry would
+    /// meet the same drift again.
+    pub dispatched: DispatchStamp,
     /// Set by such a cut: the chunk waits for the revision to move from this one — the
     /// disk change applied — instead of being re-dispatched at once. An idle tick lifts it,
     /// so a change the watcher never delivers is retried at the idle cadence, not spun on.
@@ -415,12 +438,12 @@ pub struct GlobalState {
     pub(crate) shared_metadata_warm_in_flight: bool,
     /// The current editor storage still wants a metadata warm-up started.
     pub(crate) shared_metadata_warm_pending: bool,
-    /// The revision the in-flight (or last) metadata warm-up started at.
-    pub(crate) shared_metadata_warm_revision: Option<salsa::Revision>,
-    /// Set when a warm-up was cancelled with the revision unchanged since it started — a
-    /// disk read that drifted from its revision, which unwinds the same way until the
-    /// change is applied. The next warm-up waits for the revision to move from this one,
-    /// or for an idle tick, instead of restarting at once.
+    /// Where the store stood when the in-flight (or last) metadata warm-up started.
+    pub(crate) shared_metadata_warm_started: Option<DispatchStamp>,
+    /// Set when a warm-up was cut by a disk read that drifted from its revision since it
+    /// started, which unwinds the same way until the change is applied. The next warm-up
+    /// waits for the revision to move from this one, or for an idle tick, instead of
+    /// restarting at once.
     pub(crate) shared_metadata_warm_parked_at: Option<salsa::Revision>,
     pub(crate) shared_request_generation: u64,
     pub(crate) shared_owner_generation: Option<u64>,
@@ -717,7 +740,7 @@ impl GlobalState {
             shared_metadata_warmups: 0,
             shared_metadata_warm_in_flight: false,
             shared_metadata_warm_pending: false,
-            shared_metadata_warm_revision: None,
+            shared_metadata_warm_started: None,
             shared_metadata_warm_parked_at: None,
             shared_request_generation: 0,
             shared_owner_generation: None,
@@ -1203,18 +1226,24 @@ impl GlobalState {
         }
         self.shared_metadata_warm_parked_at = None;
         let analysis = self.analysis_host.analysis();
-        let revision = salsa::plumbing::current_revision(analysis.database());
+        let started = DispatchStamp::of(analysis.database());
         let analysis_guard = self.note_analysis_spawned();
         let spawned = self.task_pool.pool.try_spawn(move || {
             let _analysis_guard = analysis_guard;
             shared_metadata_warmup(|| analysis.warm_configuration_inventory())
         });
         if spawned.is_ok() {
-            self.shared_metadata_warm_revision = Some(revision);
+            self.shared_metadata_warm_started = Some(started);
             self.shared_metadata_warmups += 1;
             self.shared_metadata_warm_in_flight = true;
             self.shared_metadata_warm_pending = false;
         }
+    }
+
+    /// Where the store [`SessionAnalysisHost::analysis`] reads stands now — the store the
+    /// warm-up and the sweep's chunks run on.
+    pub(crate) fn dispatch_stamp(&self) -> DispatchStamp {
+        DispatchStamp::of(self.analysis_host.analysis().database())
     }
 
     /// Whether the next warm-up waits for the revision to move — see

@@ -14,7 +14,9 @@ use lsp_types::{
 };
 
 use crate::{
-    global_state::{GlobalState, LatencyAttemptOutcome, RequestAttemptKey, RequestLifecyclePhase},
+    global_state::{
+        DispatchStamp, GlobalState, LatencyAttemptOutcome, RequestAttemptKey, RequestLifecyclePhase,
+    },
     handlers::{NotificationDispatcher, RequestDispatcher},
     locale::parse_lsp_locale,
     lsp::{PositionEncoding, Progress},
@@ -449,8 +451,7 @@ mod shared_backend_tests {
         .unwrap();
 
         state.mark_shared_view_changed();
-        let dispatched_revision =
-            salsa::plumbing::current_revision(state.analysis_host.raw_database());
+        let dispatched = crate::global_state::DispatchStamp::of(state.analysis_host.raw_database());
         handle_task(
             &mut state,
             Task::DiagnosticsCancelled {
@@ -458,7 +459,7 @@ mod shared_backend_tests {
                 version: 3,
                 generation: 7,
                 kind: salsa::Cancelled::Local,
-                dispatched_revision,
+                dispatched,
                 completed_at: std::time::Instant::now(),
             },
         )
@@ -1349,14 +1350,7 @@ pub(crate) fn handle_task(state: &mut GlobalState, task: crate::global_state::Ta
                 tracing::debug!(generation, current, "discarding stale diagnostics");
             }
         }
-        Task::DiagnosticsCancelled {
-            uri,
-            version,
-            generation,
-            kind,
-            dispatched_revision,
-            completed_at,
-        } => {
+        Task::DiagnosticsCancelled { uri, version, generation, kind, dispatched, completed_at } => {
             tracing::debug!(
                 generation,
                 ?kind,
@@ -1371,16 +1365,13 @@ pub(crate) fn handle_task(state: &mut GlobalState, task: crate::global_state::Ta
                 && state.diagnostics_generation.get(&uri) == Some(&generation)
                 && state.mem_docs.get_version(&uri) == Some(version)
             {
-                // A write cancels a job and then starts a new revision, so a pending write
-                // that left the revision where the job was dispatched was not a write's: a
-                // closed file read from disk drifted from its revision, and a re-dispatch
-                // now would unwind the same way. It waits for the revision to move or for
-                // an idle tick.
-                let revision =
-                    salsa::plumbing::current_revision(state.analysis_host.raw_database());
-                if matches!(kind, salsa::Cancelled::PendingWrite) && dispatched_revision == revision
-                {
-                    state.parked_diagnostics.insert(uri, revision);
+                // A pending write from a closed file read from disk that drifted from its
+                // revision, with no write since, would unwind a re-dispatch now the same
+                // way. It waits for the revision to move or for an idle tick. An LRU
+                // eviction cuts the same way without a drift and is retried at once.
+                let now = DispatchStamp::of(state.analysis_host.raw_database());
+                if matches!(kind, salsa::Cancelled::PendingWrite) && now.drifted_since(dispatched) {
+                    state.parked_diagnostics.insert(uri, now.revision);
                 } else {
                     state.enqueue_pending_diagnostics(uri);
                 }
@@ -1390,15 +1381,17 @@ pub(crate) fn handle_task(state: &mut GlobalState, task: crate::global_state::Ta
             tracing::debug!(cancelled, "shared editor storage metadata warm-up ended");
             state.shared_metadata_warm_in_flight = false;
             // What it had parsed before the write stays memoised, so another run continues
-            // from there. A cancel no write explains, other than the loop's own local one, is
-            // a disk read that drifted from its revision: another run unwinds the same way
-            // until the change is applied, so it waits for the revision to move (or for an
-            // idle tick) instead of restarting at once.
+            // from there. A cut by a disk read that drifted from its revision, with no write
+            // since and other than the loop's own local cancel, unwinds another run the same
+            // way until the change is applied, so it waits for the revision to move (or for
+            // an idle tick) instead of restarting at once.
             if cancelled {
                 state.shared_metadata_warm_pending = true;
-                let revision = state.analysis_host.request_revision();
-                if !local && state.shared_metadata_warm_revision == Some(revision) {
-                    state.shared_metadata_warm_parked_at = Some(revision);
+                let now = state.dispatch_stamp();
+                if !local
+                    && state.shared_metadata_warm_started.is_some_and(|s| now.drifted_since(s))
+                {
+                    state.shared_metadata_warm_parked_at = Some(now.revision);
                 }
             }
             state.start_shared_metadata_warmup();
@@ -1961,32 +1954,32 @@ fn apply_workspace_batch_completion(
     match outcome {
         // A concurrent edit cancelled this chunk, or a file changed on disk under analysis
         // (`PendingWrite`). Keep the plan and cursor; the bottom-of-loop dispatch retries
-        // the SAME chunk once the edit settles. Salsa memoization resumes it cheaply. A write
-        // cancels a job and then starts a new revision, so a cut with the revision unchanged
-        // since dispatch was not an edit's: a re-dispatch now would unwind the same way, so
-        // the chunk is parked until the revision moves (the change applied) or an idle tick
-        // lifts it. Never skipped: its files are owed diagnostics of the text on disk.
+        // the SAME chunk once the edit settles. Salsa memoization resumes it cheaply. A cut
+        // by a disk read that drifted from its revision, with no write since, would unwind a
+        // re-dispatch now the same way, so the chunk is parked until the revision moves (the
+        // change applied) or an idle tick lifts it. Never skipped: its files are owed
+        // diagnostics of the text on disk.
         WorkspaceBatchOutcome::Cancelled => {
-            let revision = state.analysis_host.request_revision();
+            let now = state.dispatch_stamp();
             let plan = state.workspace_batch_plan.as_mut().expect("plan present after gate");
-            if plan.dispatched_revision == revision {
-                plan.parked_at = Some(revision);
+            if now.drifted_since(plan.dispatched) {
+                plan.parked_at = Some(now.revision);
             }
             Ok(())
         }
         // Ambiguous under parallelism: a transient edit-cancellation cascade (retry) or a
         // real deterministic panic in a shared query (skip). Disambiguate by budget — retry
         // a few times, and if it keeps unwinding treat it as deterministic and skip. A claim
-        // owner that unwound with the revision unchanged since dispatch was not cut by an
-        // edit: a drifted disk read, met again by a re-dispatch at once, or a real panic. The
-        // chunk is parked like a cut no write explains, and the budget still counts.
+        // owner that unwound on a disk read that drifted from its revision, with no write
+        // since, is met again by a re-dispatch at once: the chunk is parked like any drifted
+        // cut, and the budget still counts.
         WorkspaceBatchOutcome::Propagated { from_claim } => {
-            let revision = state.analysis_host.request_revision();
+            let now = state.dispatch_stamp();
             let over_budget = {
                 let plan = state.workspace_batch_plan.as_mut().expect("plan present after gate");
                 plan.chunk_retries += 1;
-                if from_claim && plan.dispatched_revision == revision {
-                    plan.parked_at = Some(revision);
+                if from_claim && now.drifted_since(plan.dispatched) {
+                    plan.parked_at = Some(now.revision);
                 }
                 plan.chunk_retries > WORKSPACE_BATCH_MAX_PROPAGATED_RETRIES
             };
@@ -6462,15 +6455,14 @@ mod tests {
         state.mem_docs.insert(uri.clone(), "new".into(), 42);
         state.diagnostics_generation.insert(uri.clone(), 7);
         // Dispatched before a write: the write's own cut.
-        let dispatched_revision =
-            salsa::plumbing::current_revision(state.analysis_host.raw_database());
+        let dispatched = DispatchStamp::of(state.analysis_host.raw_database());
         state.analysis_host.raw_database_mut().set_workspace_load_complete(true);
         let task = |version, generation, kind| Task::DiagnosticsCancelled {
             uri: uri.clone(),
             version,
             generation,
             kind,
-            dispatched_revision,
+            dispatched,
             completed_at: std::time::Instant::now(),
         };
         handle_task(&mut state, task(42, 7, salsa::Cancelled::PendingWrite)).unwrap();
@@ -6491,21 +6483,24 @@ mod tests {
         assert!(state.pending_diagnostics_uris.is_empty(), "closed documents are not retried");
     }
 
-    /// A pending write that left the revision where the job was dispatched is a closed file
-    /// read from disk that drifted from its revision: a re-dispatch at once would unwind the
-    /// same way, every loop turn, for as long as the change stays unapplied. The document
-    /// waits until the revision moves or an idle tick lifts the wait, and is never dropped.
-    /// A local cancellation at the same revision is the loop's own and is retried at once.
+    /// A pending write after which no revision started and a disk read drifted from its
+    /// revision is that read's: a re-dispatch at once would unwind the same way, every loop
+    /// turn, for as long as the change stays unapplied. The document waits until the revision
+    /// moves or an idle tick lifts the wait, and is never dropped. A pending write with no
+    /// drift — an LRU eviction — and a local cancellation are retried at once.
     #[test]
-    fn diagnostics_cut_no_write_explains_wait_for_the_revision_or_an_idle_tick() {
+    fn diagnostics_cut_by_a_drifted_read_wait_for_the_revision_or_an_idle_tick() {
+        use base_db::SourceDatabase as _;
         let (sender, _receiver) = crossbeam_channel::unbounded();
         let mut state = crate::global_state::GlobalState::new(sender);
         let uri = crate::test_uri::file_uri("drifted.bsl");
         state.mem_docs.insert(uri.clone(), "text".into(), 42);
         state.diagnostics_generation.insert(uri.clone(), 7);
-        let cut = |state: &mut crate::global_state::GlobalState, kind| {
-            let dispatched_revision =
-                salsa::plumbing::current_revision(state.analysis_host.raw_database());
+        let cut = |state: &mut crate::global_state::GlobalState, kind, drift: bool| {
+            let dispatched = DispatchStamp::of(state.analysis_host.raw_database());
+            if drift {
+                state.analysis_host.raw_database().note_disk_drift();
+            }
             handle_task(
                 state,
                 Task::DiagnosticsCancelled {
@@ -6513,21 +6508,28 @@ mod tests {
                     version: 42,
                     generation: 7,
                     kind,
-                    dispatched_revision,
+                    dispatched,
                     completed_at: std::time::Instant::now(),
                 },
             )
             .unwrap();
         };
 
-        cut(&mut state, salsa::Cancelled::Local);
+        cut(&mut state, salsa::Cancelled::Local, true);
         assert_eq!(
             std::mem::take(&mut state.pending_diagnostics_uris),
             vec![uri.clone()],
             "a local cancellation is retried at once"
         );
 
-        cut(&mut state, salsa::Cancelled::PendingWrite);
+        cut(&mut state, salsa::Cancelled::PendingWrite, false);
+        assert_eq!(
+            std::mem::take(&mut state.pending_diagnostics_uris),
+            vec![uri.clone()],
+            "a pending write with no drift is an eviction's, retried at once"
+        );
+
+        cut(&mut state, salsa::Cancelled::PendingWrite, true);
         for _ in 0..10 {
             state.release_parked_diagnostics(false);
             assert!(state.pending_diagnostics_uris.is_empty(), "a cut no write explains waits");
@@ -6542,7 +6544,7 @@ mod tests {
         );
         assert!(state.parked_diagnostics.is_empty());
 
-        cut(&mut state, salsa::Cancelled::PendingWrite);
+        cut(&mut state, salsa::Cancelled::PendingWrite, true);
         state.release_parked_diagnostics(false);
         assert!(state.pending_diagnostics_uris.is_empty(), "control: the document waits again");
         handle_idle_tick(&mut state);
@@ -6728,7 +6730,7 @@ mod tests {
             mem_budget_mb: 0,
             chunks_since_trim: 0,
             chunk_retries: 0,
-            dispatched_revision: state.analysis_host.request_revision(),
+            dispatched: state.dispatch_stamp(),
             parked_at: None,
             started_at: std::time::Instant::now(),
             analysis_guard,
@@ -7027,11 +7029,12 @@ mod tests {
     /// A cut that leaves the revision where the chunk was dispatched is a disk read that
     /// drifted from its revision: a re-dispatch at once would unwind the same way, so the
     /// chunk waits until the revision moves or an idle tick lifts the wait — and is never
-    /// skipped, however many such cuts come. An edit's cut moved the revision and is retried
-    /// at once.
+    /// skipped, however many such cuts come. An edit's cut moved the revision, and a cut with
+    /// no drift is an LRU eviction's: both are retried at once.
     #[test]
     fn workspace_batch_cut_no_write_explains_waits_and_is_never_skipped() {
         use crate::handlers::workspace_batch::workspace_batch_parked;
+        use base_db::SourceDatabase as _;
         let (sender, _receiver) = crossbeam_channel::unbounded();
         let mut state = crate::global_state::GlobalState::new(sender);
         install_test_plan(&mut state, 2);
@@ -7045,13 +7048,16 @@ mod tests {
         };
         // What a dispatch records; every cut answers the dispatch before it.
         let dispatched = |state: &mut crate::global_state::GlobalState| {
-            let revision = state.analysis_host.request_revision();
+            let stamp = state.dispatch_stamp();
             let plan = state.workspace_batch_plan.as_mut().expect("plan active");
-            plan.dispatched_revision = revision;
+            plan.dispatched = stamp;
             plan.parked_at = None;
         };
         let edit = |state: &mut crate::global_state::GlobalState| {
             state.analysis_host.raw_database_mut().set_workspace_load_complete(true);
+        };
+        let drift = |state: &crate::global_state::GlobalState| {
+            state.analysis_host.raw_database().note_disk_drift();
         };
 
         dispatched(&mut state);
@@ -7059,8 +7065,13 @@ mod tests {
         handle_task(&mut state, cancelled()).unwrap();
         assert!(!workspace_batch_parked(&state), "an edit's cut is retried at once");
 
+        dispatched(&mut state);
+        handle_task(&mut state, cancelled()).unwrap();
+        assert!(!workspace_batch_parked(&state), "an eviction's cut is retried at once");
+
         for _ in 0..10 {
             dispatched(&mut state);
+            drift(&state);
             handle_task(&mut state, cancelled()).unwrap();
             assert!(workspace_batch_parked(&state), "a cut no write explains waits");
             assert_eq!(next_chunk(&state), 0, "and its chunk is never skipped");
@@ -7069,6 +7080,7 @@ mod tests {
         assert!(!workspace_batch_parked(&state), "the change applied lifts the wait");
 
         dispatched(&mut state);
+        drift(&state);
         handle_task(&mut state, cancelled()).unwrap();
         assert!(workspace_batch_parked(&state), "control: the chunk waits again");
         handle_idle_tick(&mut state);
@@ -7076,16 +7088,17 @@ mod tests {
         assert_eq!(next_chunk(&state), 0);
     }
 
-    /// The warm-up's counterpart: a cancellation no write explains asks for another run that
+    /// The warm-up's counterpart: a cancellation by a drifted read asks for another run that
     /// waits for the revision to move or for an idle tick, and never gives up; a
-    /// cancellation after an edit runs again at once.
+    /// cancellation after an edit, or with no drift, runs again at once.
     #[test]
     fn a_metadata_warmup_cancelled_without_a_write_waits_and_is_never_dropped() {
         use crate::global_state::Task;
+        use base_db::SourceDatabase as _;
         let (sender, _receiver) = crossbeam_channel::unbounded();
         let mut state = crate::global_state::GlobalState::new(sender);
         let started = |state: &mut crate::global_state::GlobalState| {
-            state.shared_metadata_warm_revision = Some(state.analysis_host.request_revision());
+            state.shared_metadata_warm_started = Some(state.dispatch_stamp());
             state.shared_metadata_warm_parked_at = None;
             state.shared_metadata_warm_in_flight = true;
             state.shared_metadata_warm_pending = false;
@@ -7098,14 +7111,22 @@ mod tests {
         let edit = |state: &mut crate::global_state::GlobalState| {
             state.analysis_host.raw_database_mut().set_workspace_load_complete(true);
         };
+        let drift = |state: &crate::global_state::GlobalState| {
+            state.analysis_host.raw_database().note_disk_drift();
+        };
 
         started(&mut state);
         edit(&mut state);
         cancelled(&mut state);
         assert!(!state.shared_metadata_warm_parked(), "an edit's cancel runs again at once");
 
+        started(&mut state);
+        cancelled(&mut state);
+        assert!(!state.shared_metadata_warm_parked(), "an eviction's cancel runs again at once");
+
         for _ in 0..10 {
             started(&mut state);
+            drift(&state);
             cancelled(&mut state);
             assert!(state.shared_metadata_warm_parked(), "a cancel no write explains waits");
         }
@@ -7113,6 +7134,7 @@ mod tests {
         assert!(!state.shared_metadata_warm_parked(), "the change applied lifts the wait");
 
         started(&mut state);
+        drift(&state);
         cancelled(&mut state);
         assert!(state.shared_metadata_warm_parked(), "control: the warm-up waits again");
         handle_idle_tick(&mut state);
@@ -7120,14 +7142,15 @@ mod tests {
     }
 
     /// A sibling blocked on a claim whose owner unwound gets `PropagatedPanic`, whatever the
-    /// owner's own payload was — a drifted disk read among them. With the revision unchanged
-    /// since dispatch the chunk waits like a cut no write explains instead of spending its
-    /// budget on re-dispatches that meet the same unwind; the budget still counts, so a real
-    /// panic is skipped in the end. A local cancellation and a cut after an edit are retried
-    /// at once.
+    /// owner's own payload was — a drifted disk read among them. With a drift and no write
+    /// since dispatch the chunk waits like any drifted cut instead of spending its budget on
+    /// re-dispatches that meet the same unwind; the budget still counts. A local
+    /// cancellation, a cut after an edit and one with no drift (a real panic) are retried at
+    /// once.
     #[test]
-    fn workspace_batch_propagated_cut_no_write_explains_waits_within_its_budget() {
+    fn workspace_batch_propagated_cut_by_a_drifted_read_waits_within_its_budget() {
         use crate::handlers::workspace_batch::workspace_batch_parked;
+        use base_db::SourceDatabase as _;
         let (sender, _receiver) = crossbeam_channel::unbounded();
         let mut state = crate::global_state::GlobalState::new(sender);
         install_test_plan(&mut state, 2);
@@ -7137,37 +7160,45 @@ mod tests {
             outcome: crate::global_state::WorkspaceBatchOutcome::Propagated { from_claim },
         };
         let dispatched = |state: &mut crate::global_state::GlobalState| {
-            let revision = state.analysis_host.request_revision();
+            let stamp = state.dispatch_stamp();
             let plan = state.workspace_batch_plan.as_mut().expect("plan active");
-            plan.dispatched_revision = revision;
+            plan.dispatched = stamp;
             plan.parked_at = None;
+        };
+        let drift = |state: &crate::global_state::GlobalState| {
+            state.analysis_host.raw_database().note_disk_drift();
         };
         let next_chunk = |state: &crate::global_state::GlobalState| {
             state.workspace_batch_plan.as_ref().expect("plan active").next_chunk
         };
 
         dispatched(&mut state);
+        drift(&state);
         handle_task(&mut state, propagated(false)).unwrap();
         assert!(!workspace_batch_parked(&state), "a local cancellation is retried at once");
 
         dispatched(&mut state);
+        drift(&state);
         state.analysis_host.raw_database_mut().set_workspace_load_complete(true);
         handle_task(&mut state, propagated(true)).unwrap();
         assert!(!workspace_batch_parked(&state), "a cut after an edit is retried at once");
 
         dispatched(&mut state);
         handle_task(&mut state, propagated(true)).unwrap();
-        assert!(workspace_batch_parked(&state), "a claim cut no write explains waits");
+        assert!(!workspace_batch_parked(&state), "a cut with no drift is retried at once");
         assert_eq!(next_chunk(&state), 0, "within budget the chunk is kept");
 
         while state.workspace_batch_plan.as_ref().expect("plan active").chunk_retries
             < WORKSPACE_BATCH_MAX_PROPAGATED_RETRIES
         {
             dispatched(&mut state);
+            drift(&state);
             handle_task(&mut state, propagated(true)).unwrap();
+            assert!(workspace_batch_parked(&state), "a claim cut by a drifted read waits");
             assert_eq!(next_chunk(&state), 0, "within budget the chunk is kept");
         }
         dispatched(&mut state);
+        drift(&state);
         handle_task(&mut state, propagated(true)).unwrap();
         assert_eq!(next_chunk(&state), 1, "the budget still counts: the chunk is skipped");
     }
@@ -7177,13 +7208,16 @@ mod tests {
     #[test]
     fn a_metadata_warmup_cancelled_locally_runs_again_at_once() {
         use crate::global_state::Task;
+        use base_db::SourceDatabase as _;
         let (sender, _receiver) = crossbeam_channel::unbounded();
         let mut state = crate::global_state::GlobalState::new(sender);
+        // Even with a drift counted meanwhile: the local cancel is what cut this run.
         let started = |state: &mut crate::global_state::GlobalState| {
-            state.shared_metadata_warm_revision = Some(state.analysis_host.request_revision());
+            state.shared_metadata_warm_started = Some(state.dispatch_stamp());
             state.shared_metadata_warm_parked_at = None;
             state.shared_metadata_warm_in_flight = true;
             state.shared_metadata_warm_pending = false;
+            state.analysis_host.raw_database().note_disk_drift();
         };
 
         started(&mut state);

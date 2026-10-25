@@ -88,6 +88,14 @@ pub trait SourceDatabase: salsa::Database {
 
     /// Счётчики исходов `parse_query` этой базы. См. [`ParseStats`].
     fn parse_stats(&self) -> ParseStats;
+
+    /// Count a disk read that unwound because its bytes drifted from the file's recorded
+    /// revision. See [`Files::note_disk_drift`].
+    fn note_disk_drift(&self);
+
+    /// How many disk reads of this database drifted from their revision. See
+    /// [`Files::disk_drift_count`].
+    fn disk_drift_count(&self) -> u64;
 }
 
 /// Предыдущий разбор открытого файла и текст, из которого он получен —
@@ -158,6 +166,7 @@ pub struct Files {
     file_source_roots: Arc<DashMap<FileId, FileSourceRootInput, BuildHasherDefault<FxHasher>>>,
     parse_snapshots: Arc<DashMap<FileId, ParseSnapshot, BuildHasherDefault<FxHasher>>>,
     parse_counters: Arc<ParseCounters>,
+    disk_drifts: Arc<AtomicU64>,
 }
 
 impl Files {
@@ -185,6 +194,19 @@ impl Files {
 
     pub fn store_parse_snapshot(&self, file_id: FileId, snapshot: ParseSnapshot) {
         self.parse_snapshots.insert(file_id, snapshot);
+    }
+
+    /// Count a disk read that unwound because its bytes drifted from the file's recorded
+    /// revision. Every handle of one database shares the count.
+    pub fn note_disk_drift(&self) {
+        self.disk_drifts.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// How many disk reads of this database drifted from their revision. A cancellation
+    /// that starts no revision comes from such a read only when this moved: an LRU
+    /// eviction and every other exclusive access cancel the same way without one.
+    pub fn disk_drift_count(&self) -> u64 {
+        self.disk_drifts.load(Ordering::SeqCst)
     }
 
     pub fn count_parse(&self, outcome: ParseOutcome) {
@@ -579,6 +601,14 @@ mod tests {
 
         fn parse_stats(&self) -> ParseStats {
             self.files.parse_stats()
+        }
+
+        fn note_disk_drift(&self) {
+            self.files.note_disk_drift();
+        }
+
+        fn disk_drift_count(&self) -> u64 {
+            self.files.disk_drift_count()
         }
 
         fn source_root_input(&self, source_root_id: SourceRootId) -> SourceRootInput {
@@ -1094,6 +1124,7 @@ mod tests {
         db.set_file_revision_from_disk(file_id, input::content_revision("a stale snapshot"));
 
         // Twice in one revision: the second read proves the unwound read left no value behind.
+        let drifts_before = db.disk_drift_count();
         for _ in 0..2 {
             let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 db.file_text(file_id);
@@ -1107,6 +1138,7 @@ mod tests {
                 "a drifted disk read is a pending write, not a panic"
             );
         }
+        assert_eq!(db.disk_drift_count(), drifts_before + 2, "each drifted read is counted");
 
         db.set_file_revision_from_disk(file_id, input::content_revision("actual on-disk bytes"));
         assert_eq!(&*db.file_text(file_id), "actual on-disk bytes");
@@ -1128,6 +1160,7 @@ mod tests {
         db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
         db.set_file_source_root(file_id, SourceRootId(0));
         db.set_file_revision_from_disk(file_id, input::content_revision("text that was there"));
+        let drifts_before = db.disk_drift_count();
 
         let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             db.file_text(file_id);
@@ -1139,6 +1172,7 @@ mod tests {
         );
         let message = payload.downcast_ref::<String>().expect("a panic message");
         assert!(message.contains("cannot read"), "the panic names the failed read: {message}");
+        assert_eq!(db.disk_drift_count(), drifts_before, "an unreadable file is not a drift");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

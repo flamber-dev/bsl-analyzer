@@ -3074,6 +3074,14 @@ impl SourceDatabase for RootDatabaseImpl {
         self.files.parse_stats()
     }
 
+    fn note_disk_drift(&self) {
+        self.files.note_disk_drift();
+    }
+
+    fn disk_drift_count(&self) -> u64 {
+        self.files.disk_drift_count()
+    }
+
     fn set_file_source_root(&mut self, file_id: FileId, source_root_id: SourceRootId) {
         let inserted = self.files.try_file_source_root(file_id).is_none();
         let files = self.files.clone();

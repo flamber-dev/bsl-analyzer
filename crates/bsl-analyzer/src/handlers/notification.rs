@@ -114,7 +114,7 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
     };
 
     let db = state.analysis_host.raw_database().clone();
-    let dispatched_revision = salsa::plumbing::current_revision(&db);
+    let dispatched = crate::global_state::DispatchStamp::of(&db);
     state.diagnostics_tokens.insert(uri.clone(), db.cancellation_token());
     state.parked_diagnostics.remove(uri);
     let mut config = state.diagnostics_config().clone();
@@ -192,7 +192,7 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
                     version,
                     generation,
                     kind,
-                    dispatched_revision,
+                    dispatched,
                     completed_at: Instant::now(),
                 }
             }
