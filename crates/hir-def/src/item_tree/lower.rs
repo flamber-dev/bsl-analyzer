@@ -367,6 +367,14 @@ mod tests {
             self.files.parse_stats()
         }
 
+        fn note_disk_drift(&self) {
+            self.files.note_disk_drift();
+        }
+
+        fn disk_drift_count(&self) -> u64 {
+            self.files.disk_drift_count()
+        }
+
         fn source_root_input(
             &self,
             source_root_id: base_db::SourceRootId,

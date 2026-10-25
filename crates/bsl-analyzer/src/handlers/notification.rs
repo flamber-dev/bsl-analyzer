@@ -114,7 +114,9 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
     };
 
     let db = state.analysis_host.raw_database().clone();
+    let dispatched = crate::global_state::DispatchStamp::of(&db);
     state.diagnostics_tokens.insert(uri.clone(), db.cancellation_token());
+    state.parked_diagnostics.remove(uri);
     let mut config = state.diagnostics_config().clone();
     // An edited-but-unsaved buffer no longer matches the disk state the
     // vendor-diff scope was computed against: analyze it whole-file until the
@@ -190,6 +192,7 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
                     version,
                     generation,
                     kind,
+                    dispatched,
                     completed_at: Instant::now(),
                 }
             }

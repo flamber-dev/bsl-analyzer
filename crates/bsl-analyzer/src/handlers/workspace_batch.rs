@@ -102,7 +102,7 @@ fn g1_wait_at_batch_barrier(analysis: &ide::Analysis, cancellation_baseline: u64
 
 use crate::frozen_context::FrozenFilePaths;
 use crate::global_state::{
-    GlobalState, Task, WorkspaceBatchItem, WorkspaceBatchOutcome, WorkspaceBatchPlan,
+    DispatchStamp, GlobalState, Task, WorkspaceBatchItem, WorkspaceBatchOutcome, WorkspaceBatchPlan,
 };
 use crate::lsp::PositionEncoding;
 
@@ -191,7 +191,20 @@ pub fn spawn_workspace_batch(state: &mut GlobalState) {
         }
     }
 
+    if workspace_batch_parked(state) {
+        return;
+    }
     dispatch_next_chunk(state);
+}
+
+/// Whether the active sweep waits for the revision to move before its chunk is
+/// dispatched again — see [`WorkspaceBatchPlan::parked_at`].
+pub(crate) fn workspace_batch_parked(state: &GlobalState) -> bool {
+    state
+        .workspace_batch_plan
+        .as_ref()
+        .and_then(|plan| plan.parked_at)
+        .is_some_and(|parked_at| parked_at == state.analysis_host.request_revision())
 }
 
 /// Enumerate the in-scope closed file set and freeze it into a fresh sweep plan. Returns
@@ -280,6 +293,8 @@ fn build_batch_plan(state: &mut GlobalState) -> Option<WorkspaceBatchPlan> {
         mem_budget_mb: batch_mem_budget_mb(),
         chunks_since_trim: 0,
         chunk_retries: 0,
+        dispatched: DispatchStamp::of(state.analysis_host.analysis().database()),
+        parked_at: None,
         started_at: Instant::now(),
         analysis_guard,
     })
@@ -323,6 +338,11 @@ fn dispatch_next_chunk(state: &mut GlobalState) {
     };
 
     let analysis = state.analysis_host.analysis();
+    {
+        let plan = state.workspace_batch_plan.as_mut().expect("plan present when dispatching");
+        plan.dispatched = DispatchStamp::of(analysis.database());
+        plan.parked_at = None;
+    }
     #[cfg(test)]
     let cancellation_baseline =
         analysis.database().salsa_event_global().map_or(0, |events| events.set_cancellation);
@@ -386,9 +406,11 @@ fn dispatch_next_chunk(state: &mut GlobalState) {
                     tracing::debug!(chunk = chunk_index, "workspace batch chunk cancelled by an edit; will retry");
                     WorkspaceBatchOutcome::Cancelled
                 }
-                Some(_) => {
-                    tracing::debug!(chunk = chunk_index, "workspace batch chunk unwound on a propagated panic; will retry within budget");
-                    WorkspaceBatchOutcome::Propagated
+                Some(kind) => {
+                    tracing::debug!(chunk = chunk_index, ?kind, "workspace batch chunk unwound on a propagated panic; will retry within budget");
+                    WorkspaceBatchOutcome::Propagated {
+                        from_claim: matches!(kind, salsa::Cancelled::PropagatedPanic),
+                    }
                 }
                 None => {
                     tracing::error!(chunk = chunk_index, "workspace batch chunk panicked; skipping");
@@ -409,9 +431,10 @@ fn dispatch_next_chunk(state: &mut GlobalState) {
 }
 
 /// Compute one chunk's diagnostics on the worker's snapshot. Each closed file has no
-/// overlay, so its text is read disk-backed from the db; that read can panic if the file
-/// was deleted or rewritten mid-sweep, which is caught and skips just that file (mirroring
-/// the pull sweep), while a `salsa::Cancelled` keeps unwinding to abort the whole chunk.
+/// overlay, so its text is read disk-backed from the db; that read panics if the file was
+/// deleted or made unreadable mid-sweep, which is caught and skips just that file (mirroring
+/// the pull sweep), while a `salsa::Cancelled` — including `PendingWrite` for a file
+/// rewritten mid-sweep — keeps unwinding to abort the whole chunk, which is retried.
 fn compute_chunk(
     analysis: &ide::Analysis,
     chunk: &[vfs::FileId],

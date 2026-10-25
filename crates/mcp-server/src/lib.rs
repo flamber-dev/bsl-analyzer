@@ -3095,6 +3095,7 @@ fn cancellable_answer(
             Err(McpError::internal_error("request cancelled", None))
         }
         CallOutcome::Superseded => Ok(retry()),
+        CallOutcome::Frozen(reason) => Err(McpError::internal_error(reason, None)),
         CallOutcome::Panicked => Err(McpError::internal_error("internal handler panic", None)),
     }
 }
@@ -3952,6 +3953,44 @@ mod tests {
 
         drop(held_lease);
         server.shutdown();
+    }
+
+    /// A superseded read is answered with the tool's retry envelope; a frozen owner's
+    /// refusal reaches the client as an error carrying the owner's own text.
+    #[test]
+    fn a_superseded_read_retries_and_a_frozen_one_refuses() {
+        use crate::diagnostics_state::{CallOutcome, StatusReport};
+        let report = StatusReport {
+            state: "ready",
+            generation: 3,
+            files: Some(1),
+            unread_files: Some(0),
+            reload: "none",
+            error: None,
+            elapsed_ms: None,
+            failed_age_ms: None,
+            attempts: 0,
+            retry_after_ms: None,
+            watch: None,
+        };
+        let retry = cancellable_answer(
+            CallOutcome::Superseded,
+            "diagnostics file",
+            std::time::Instant::now(),
+            || tools::diagnostics::loading(&report),
+        )
+        .expect("a superseded read is not an error");
+        assert_eq!(retry.structured_content.unwrap()["status"], "loading");
+
+        let reason = "the owner's refusal".to_owned();
+        let refusal = cancellable_answer(
+            CallOutcome::Frozen(reason.clone()),
+            "diagnostics file",
+            std::time::Instant::now(),
+            || tools::diagnostics::loading(&report),
+        )
+        .expect_err("a frozen owner's refusal is an error");
+        assert_eq!(refusal.message, reason);
     }
 }
 
@@ -4861,8 +4900,9 @@ mod graph_supersession_contract {
             }
         }
         drop(held);
-        // PendingWrite is a defensive resident-call outcome (normal reads hold its writer
-        // lock). Exercise its actual retry renderer and the graph boundary with live graph evidence.
+        // A resident read meets PendingWrite when a file changed on disk after its revision
+        // was recorded. Exercise its actual retry renderer and the graph boundary with live
+        // graph evidence.
         let retry = cancellable_answer(
             crate::diagnostics_state::CallOutcome::Superseded,
             "graph resolve",

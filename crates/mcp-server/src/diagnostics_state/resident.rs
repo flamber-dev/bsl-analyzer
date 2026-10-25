@@ -894,8 +894,9 @@ impl DiagnosticsResident {
                             match caught {
                                 Ok(diags) => Some(diags),
                                 // Only the request's own cancellation may degrade to a skipped
-                                // file. A pending write cannot exist under the resident mutex
-                                // and a propagated panic is a real defect in a sibling worker —
+                                // file. A pending write means a file changed on disk after its
+                                // revision was recorded — the whole read is owed a retry — and a
+                                // propagated panic is a real defect in a sibling worker —
                                 // re-raise both instead of hiding them behind valid aggregates.
                                 Err(salsa::Cancelled::Local) => None,
                                 Err(other) => std::panic::resume_unwind(Box::new(other)),
@@ -1366,7 +1367,11 @@ fn batch_needs_rebuild(
 /// cannot express. A `needs_rebuild` answer leaves the resident untouched; `moved` is
 /// whether any Salsa input actually changed. `fp_of` yields the on-disk fingerprint of a
 /// `modified_bsl` path so an already-current body is skipped. The caller owns the
-/// drift-baseline update (full rebase vs incremental).
+/// drift-baseline update (full rebase vs incremental), and lays the third answer over it:
+/// the bodies whose bytes, read here, differ from what the scan saw, each with the
+/// fingerprint of the bytes actually applied. A baseline that kept the scan's fingerprint
+/// for such a body would read a later return to the scanned bytes as "no drift", and the
+/// body's revision would describe bytes no longer on disk for good.
 pub(super) fn apply_resident_changes(
     resident: &mut DiagnosticsResident,
     xml_paths: &[PathBuf],
@@ -1375,7 +1380,7 @@ pub(super) fn apply_resident_changes(
     removed_bsl: &[String],
     fp_of: impl Fn(&str) -> Option<u64>,
     stats: &HashMap<String, u64>,
-) -> (bool, bool) {
+) -> (bool, bool, Vec<(String, u64)>) {
     use ide_host_core::{apply_source_batch, BatchTextSource, SourceBatchChange, VfsWrite};
     use rustc_hash::FxHashSet;
 
@@ -1387,15 +1392,16 @@ pub(super) fn apply_resident_changes(
     let xml_outside_roots =
         xml_paths.iter().any(|p| !config_roots.iter().any(|(_, root)| p.starts_with(root)));
     if xml_outside_roots {
-        return (true, false);
+        return (true, false, Vec::new());
     }
     if batch_needs_rebuild(resident, added_bsl, modified_bsl, removed_bsl, &fp_of, stats) {
-        return (true, false);
+        return (true, false, Vec::new());
     }
 
     let mut moved = false;
     let mut became_holes: Vec<PathBuf> = Vec::new();
     let mut changed_membership_paths: Vec<PathBuf> = Vec::new();
+    let mut read_past_scan: Vec<(String, u64)> = Vec::new();
     let mut phase = 0;
     let (mut added, mut removed, mut modified) = (0, 0, 0);
 
@@ -1418,7 +1424,13 @@ pub(super) fn apply_resident_changes(
                     // Read BEFORE interning: a pending unreadable path has no FileId or
                     // FileSet entry, and its next attempt still passes the admission gate.
                     let text = match base_db::read_disk_text(Path::new(path)) {
-                        Ok(text) => text,
+                        Ok(text) => {
+                            let applied = crate::graph::scan::fingerprint_of_bytes(text.as_bytes());
+                            if fp_of(path) != Some(applied) {
+                                read_past_scan.push((path.clone(), applied));
+                            }
+                            text
+                        }
                         Err(_) => {
                             let inserted =
                                 holes.insert(path.clone(), HoleOrigin::Pending).is_none();
@@ -1485,6 +1497,10 @@ pub(super) fn apply_resident_changes(
                     let vfs_path = VfsPath::new(PathBuf::from(path));
                     match base_db::read_disk_text(Path::new(path)) {
                         Ok(text) => {
+                            let applied = crate::graph::scan::fingerprint_of_bytes(text.as_bytes());
+                            if applied != fp {
+                                read_past_scan.push((path.clone(), applied));
+                            }
                             return Some(SourceBatchChange::Upsert {
                                 file_id,
                                 path: vfs_path,
@@ -1584,7 +1600,7 @@ pub(super) fn apply_resident_changes(
     paths.extend(metadata_paths);
     resident.db.publish_change(source_effects.changed_file_ids, paths, metadata_changed);
 
-    (false, moved)
+    (false, moved, read_past_scan)
 }
 
 #[cfg(test)]
@@ -1841,7 +1857,11 @@ mod tests {
             let result =
                 apply_resident_changes(resident, &[], &added, &[], &[], |_| Some(1), &stats);
 
-            assert_eq!(result, (true, false), "an existing path/id collision requests rebuild");
+            assert_eq!(
+                result,
+                (true, false, Vec::new()),
+                "an existing path/id collision requests rebuild"
+            );
             assert_eq!(resident.by_path.get(&key).copied(), by_path_before);
             let database = resident.db.database();
             let source_root_after =
@@ -1866,7 +1886,7 @@ mod tests {
         });
 
         assert!(
-            matches!(outcome, ResidentOutcome::Ready((true, false), _)),
+            matches!(outcome, ResidentOutcome::Ready((true, false, _), _)),
             "the resident reports rebuild required without a partial source mutation"
         );
     }
@@ -1900,7 +1920,7 @@ mod tests {
         let (rebuild, applied, before, after) = {
             let resident = &mut resident;
             let before = resident.db.snapshot().generation;
-            let (rebuild, _) = apply_resident_changes(
+            let (rebuild, _, _) = apply_resident_changes(
                 resident,
                 &[],
                 std::slice::from_ref(&added),
@@ -1942,7 +1962,7 @@ mod tests {
         assert_eq!(setting(&resident), Some(false));
 
         write(root, "Configuration.xml", &xml("true"));
-        let (rebuild, _) = apply_resident_changes(
+        let (rebuild, _, _) = apply_resident_changes(
             &mut resident,
             &[root.join("Configuration.xml")],
             &[],
@@ -1976,7 +1996,7 @@ mod tests {
         assert!(resident.db.env_options().managed_run_mode);
 
         write(root, "Configuration.xml", &xml("OrdinaryApplication"));
-        let (rebuild, _) = apply_resident_changes(
+        let (rebuild, _, _) = apply_resident_changes(
             &mut resident,
             &[root.join("Configuration.xml")],
             &[],
@@ -2010,7 +2030,7 @@ mod tests {
         assert!(!resident.config().ordinary_app_support);
 
         write(root, "Configuration.xml", &xml("OrdinaryApplication"));
-        let (rebuild, _) = apply_resident_changes(
+        let (rebuild, _, _) = apply_resident_changes(
             &mut resident,
             &[root.join("Configuration.xml")],
             &[],
@@ -2079,7 +2099,7 @@ mod tests {
         let (rebuild, before, after) = {
             let resident = &mut resident;
             let before = resident_view(resident, &added);
-            let (rebuild, _) = apply_resident_changes(
+            let (rebuild, _, _) = apply_resident_changes(
                 resident,
                 &[],
                 std::slice::from_ref(&added),

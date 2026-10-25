@@ -23,6 +23,7 @@ use vfs::FileId;
 
 use crate::builtin;
 use crate::db::HirDatabase;
+use crate::definite_init;
 use crate::lower::TyLoweringContext;
 use crate::method_resolution;
 
@@ -533,6 +534,26 @@ pub enum InferenceDiagnostic {
         expr: ExprId,
         category: bsl_platform::security::Category,
     },
+    /// A read of an implicit local that some executable path reaches with no
+    /// assignment to it; `path` names what that path does.
+    UninitializedRead {
+        expr: ExprId,
+        name: Name,
+        path: UninitializedPath,
+    },
+}
+
+/// The kind of path on which a read finds its variable unassigned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UninitializedPath {
+    /// The first pass of the enclosing loop: only assignments made on later
+    /// passes reach the read.
+    FirstIteration,
+    /// The loop before the read may run zero times.
+    LoopNotRun,
+    /// A branch of an `Если` before the read assigns nothing.
+    Branch,
+    OtherPath,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -625,6 +646,15 @@ pub struct InferenceContext<'db> {
     /// name, one memo per declaration.
     local_symbols: Option<Arc<ModuleInterface>>,
 
+    /// The extension module an effective `&ИзменениеИКонтроль` module was spliced from,
+    /// present for the bodies the extension compiles — the `&ИзменениеИКонтроль` methods,
+    /// whose `#Вставка` code and kept base lines both run in the extension — and `None` for
+    /// the base module's top-level code, which the extension does not contain. A same-module
+    /// name that misses in `local_symbols` (the base's methods) retries against this
+    /// module's own declarations. Distinct from `weaving_base`, whose
+    /// meaning is "the base module" and which gates base-only behaviour.
+    effective_extension: Option<hir_def::ModuleId>,
+
     /// Effective return types of the module's own methods, keyed by `MethodId.local_id`,
     /// present only on the SECOND pass of effective inference. A bare same-module call to
     /// a `&ИзменениеИКонтроль` target must see its *changed* body's return, not the base
@@ -700,6 +730,10 @@ pub struct InferenceContext<'db> {
     /// dispatch consumes the same verdict so an absent root is not also reported
     /// as `UnresolvedMethodCall::ReceiverNotResolved`.
     bare_name_verdicts: FxHashMap<ExprId, BareNameVerdict>,
+
+    /// Bare reads the cascade resolved as a local of this body; only these are
+    /// judged by the definite-initialization check.
+    local_reads: FxHashSet<ExprId>,
 
     /// Calls whose callee module has a body that exists but could not be read.
     /// Resolution carries on past it, so the receiver keeps whatever type its
@@ -994,18 +1028,12 @@ impl<'db> InferenceContext<'db> {
         with_body_env: bool,
     ) -> Self {
         let opts = db.env_options();
-        fn implicit_assignment_name(body: &Body, target: ExprId) -> Option<NormName> {
-            match body.expr(target) {
-                Expr::Path(name) => Some(NormName::intern(name.as_str())),
-                Expr::Index { base, .. } => implicit_assignment_name(body, ExprId::from_idx(*base)),
-                _ => None,
-            }
-        }
         let assignment_target_names = body
             .stmts_iter()
             .filter_map(|(_, stmt)| {
                 let Stmt::Assign { target, .. } = stmt else { return None };
-                implicit_assignment_name(body, ExprId::from_idx(*target))
+                let (_, name) = assignment_target_base(body, ExprId::from_idx(*target))?;
+                Some(NormName::intern(name.as_str()))
             })
             .collect();
         let possible_env = if !with_body_env {
@@ -1043,6 +1071,7 @@ impl<'db> InferenceContext<'db> {
             db,
             context_file_id: file_id,
             local_symbols: None,
+            effective_extension: None,
             local_effective_returns: None,
             weaving_base: None,
             proceed_return: None,
@@ -1062,6 +1091,7 @@ impl<'db> InferenceContext<'db> {
             implicit_database_reads: rustc_hash::FxHashSet::default(),
             assignment_targets: rustc_hash::FxHashSet::default(),
             bare_name_verdicts: FxHashMap::default(),
+            local_reads: FxHashSet::default(),
             calls_with_unread_target: rustc_hash::FxHashSet::default(),
             call_arg_bindings: Vec::new(),
             return_expr_ids: Vec::new(),
@@ -1099,10 +1129,13 @@ impl<'db> InferenceContext<'db> {
     /// Inference over an effective `&ИзменениеИКонтроль` module: local bodies/symbols come
     /// from the spliced effective text (`local_symbols`), while configuration / metadata /
     /// cross-module resolution keeps `context_file_id = base_file`. Identical to [`Self::new`]
-    /// apart from same-module method/variable lookups, which route to `local_symbols`.
+    /// apart from same-module method/variable lookups, which route to `local_symbols` and,
+    /// on a miss, to the declarations of the extension file `ext_file_id`. Pass `None` for a
+    /// body the extension does not compile: the base module's own top-level code.
     pub fn new_effective(
         db: &'db dyn HirDatabase,
         base_file_id: FileId,
+        ext_file_id: Option<FileId>,
         local_symbols: Arc<ModuleInterface>,
         owner: DefWithBodyId,
         body: &Arc<Body>,
@@ -1113,6 +1146,7 @@ impl<'db> InferenceContext<'db> {
         // checks rather than misattribute them.
         let mut ctx = Self::new_impl(db, base_file_id, owner, body, false);
         ctx.local_symbols = Some(local_symbols);
+        ctx.effective_extension = ext_file_id.map(hir_def::ModuleId::new);
         ctx
     }
 
@@ -1297,7 +1331,12 @@ impl<'db> InferenceContext<'db> {
     /// `TypeKind::Unknown` call arm performs.
     fn bare_module_method_exists(&self, name: &Name) -> bool {
         let declared = match &self.local_symbols {
-            Some(symbols) => symbols.find_method(name).is_some(),
+            Some(symbols) => {
+                symbols.find_method(name).is_some()
+                    || self
+                        .effective_extension
+                        .is_some_and(|ext| self.db.interface_method_named(ext, name).is_some())
+            }
             None => {
                 let module_id = hir_def::ModuleId::new(self.context_file_id);
                 self.db.interface_method_named(module_id, name).is_some()
@@ -1408,6 +1447,7 @@ impl<'db> InferenceContext<'db> {
             InferenceDiagnostic::PlatformMemberHiddenByCompatibilityMode { expr, .. } => *expr,
             InferenceDiagnostic::ModuleAccessibility { expr, .. } => *expr,
             InferenceDiagnostic::GuardedCall { expr, .. } => *expr,
+            InferenceDiagnostic::UninitializedRead { expr, .. } => *expr,
         };
         if self.body.is_recovered(key) {
             return;
@@ -1696,10 +1736,12 @@ impl<'db> InferenceContext<'db> {
     /// owner takes it. Shadowing is preprocessor-blind, like every other
     /// shadowing decision in inference.
     fn manager_collection_shadowed(&mut self, name: &Name) -> bool {
+        self.body_declares_binding(name) || self.bare_global_claimed(name)
+    }
+
+    /// `bare_global_name_claim` found an owner of `name` outside the body.
+    fn bare_global_claimed(&mut self, name: &Name) -> bool {
         let key = NormName::intern(name.as_str());
-        if self.body_declares_binding(name) {
-            return true;
-        }
         if let Some(cached) = self.shadowed_root_names.get(&key) {
             return *cached;
         }
@@ -2146,9 +2188,11 @@ impl<'db> InferenceContext<'db> {
     fn get_resolver(&self) -> Resolver {
         let module_id = hir_def::ModuleId { file_id: self.context_file_id };
         match &self.local_symbols {
-            Some(symbols) => {
-                Resolver::with_builtins_and_workspace_effective(module_id, Arc::clone(symbols))
-            }
+            Some(symbols) => Resolver::with_builtins_and_workspace_effective(
+                module_id,
+                Arc::clone(symbols),
+                self.effective_extension,
+            ),
             None => match self.weaving_base {
                 Some(base) => Resolver::with_builtins_and_workspace_weaving(module_id, base),
                 None => Resolver::with_builtins_and_workspace(module_id),
@@ -2184,6 +2228,107 @@ impl<'db> InferenceContext<'db> {
         let is_manager_collection = bsl_metadata::MdoType::from_plural(name.as_str())
             .is_some_and(|mdo| mdo.manager_type_prefix().is_some());
         !is_manager_collection || self.manager_collection_shadowed(name)
+    }
+
+    /// A name with an owner outside the body: a write to it does not create a
+    /// local, so its value is not this body's to initialize.
+    fn owned_outside_body(&mut self, name: &Name) -> bool {
+        !self.assignment_can_declare_implicit_local(name)
+            || self.bare_global_claimed(name)
+            || self.global_read_export(name).is_some()
+            || is_self_name(&name.as_str().fold_lower())
+    }
+
+    /// How the call holding `arg` passes it, from the `Знач` flag of the parameter
+    /// at the argument's position. Known only when the call settles on one user
+    /// method: the unique candidate, or the sole survivor whose argument types are
+    /// undecided (an undocumented parameter leaves the selection `Ambiguous`).
+    fn argument_passing(&self, arg: ExprId) -> definite_init::ArgPassing {
+        use crate::call_resolution::{CallSelection, CandidateId};
+        use definite_init::ArgPassing;
+
+        let Some((binding, position)) = self.call_arg_bindings.iter().find_map(|binding| {
+            binding.args.iter().position(|a| *a == arg).map(|position| (binding, position))
+        }) else {
+            return ArgPassing::Unknown;
+        };
+        let candidate = match &binding.candidate.resolution.selection {
+            CallSelection::Unique { candidate } => *candidate,
+            CallSelection::Ambiguous { candidates } if candidates.len() == 1 => candidates[0],
+            _ => return ArgPassing::Unknown,
+        };
+        let CandidateId::User { method, .. } = candidate else {
+            return ArgPassing::Unknown;
+        };
+        let Some(decl) = self.db.interface_method(hir_def::MethodId::from(method)) else {
+            return ArgPassing::Unknown;
+        };
+        match decl.params.get(position) {
+            Some(param) if param.is_val => ArgPassing::ByVal,
+            Some(_) => ArgPassing::ByRef,
+            None => ArgPassing::Unknown,
+        }
+    }
+
+    /// Reports every local read that some executable path reaches with the
+    /// variable unassigned. A body that may be missing statements or edges, or
+    /// whose analysis did not converge, proves nothing and reports nothing.
+    fn check_definite_init(&mut self) {
+        use dataflow::definite_init::analyze_definite_init;
+
+        if self.local_reads.is_empty() || definite_init::hir_suppressed(&self.body) {
+            return;
+        }
+        let body = Arc::clone(&self.body);
+        let sources = definite_init::tracked_name_sources(
+            &body,
+            self.implicit_locals.values().map(|info| &info.name),
+        );
+        let names = sources.into_iter().filter(|name| !self.owned_outside_body(name)).collect();
+        let tracked = definite_init::Tracked::new(&body, names);
+        if tracked.width() == 0 {
+            return;
+        }
+        let definite_init::Collected { events, during, mut candidates } =
+            definite_init::collect(&body, &tracked, &self.local_reads, &|arg| {
+                self.argument_passing(arg)
+            });
+        if candidates.is_empty()
+            || (events.stmt.is_empty() && events.header.is_empty() && events.loop_var.is_empty())
+        {
+            return;
+        }
+        let cfg =
+            Arc::new(cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body));
+        let Some(result) = analyze_definite_init(
+            cfg,
+            (*body).clone(),
+            Arc::new(events),
+            dataflow::DEFAULT_MAX_ITERATIONS,
+        ) else {
+            return;
+        };
+        candidates.sort_by_key(|candidate| candidate.expr.into_raw().into_u32());
+        for candidate in candidates {
+            let unassigned = result
+                .state_before(candidate.point)
+                .is_some_and(|state| state.is_initialized(candidate.bit) == Some(false));
+            if !unassigned
+                || during.get(&candidate.point).is_some_and(|bits| bits.contains(&candidate.bit))
+            {
+                continue;
+            }
+            let Some(witness) = result.witness(candidate.point, candidate.bit) else {
+                continue;
+            };
+            let path =
+                definite_init::path_kind(&body, &result, &witness, candidate.owner, candidate.bit);
+            self.push_inference_diagnostic(InferenceDiagnostic::UninitializedRead {
+                expr: candidate.expr,
+                name: candidate.name,
+                path,
+            });
+        }
     }
 
     /// Whether an implicit assignment actually reaches this read. The assignment
@@ -3046,6 +3191,7 @@ impl<'db> InferenceContext<'db> {
             self.infer_expr(expr_id);
         }
         self.body_env = walk_env;
+        self.check_definite_init();
 
         debug!(
             "inferred {} expression types, {} var types, {} diagnostics",
@@ -3761,6 +3907,17 @@ impl<'db> InferenceContext<'db> {
             BareNameUse::ReadValue
         };
         let resolution = self.resolve_bare_name(name, expr_id, usage);
+        if usage == BareNameUse::ReadValue
+            && matches!(
+                resolution,
+                BareNameResolution::Resolved {
+                    origin: BareNameOrigin::FlowLocal | BareNameOrigin::UserBinding,
+                    ..
+                }
+            )
+        {
+            self.local_reads.insert(expr_id);
+        }
         let verdict = match &resolution {
             BareNameResolution::Resolved { .. } => BareNameVerdict::Resolved,
             BareNameResolution::Absent => BareNameVerdict::Absent,
@@ -5282,6 +5439,7 @@ impl<'db> InferenceContext<'db> {
         let effective_ret = self
             .local_effective_returns
             .as_ref()
+            .filter(|_| method.id.module.file_id == self.context_file_id)
             .and_then(|m| m.get(&method.id.local_id).copied())
             .filter(|ret| !self.is_unknown(*ret));
         let sig =
@@ -5330,7 +5488,12 @@ impl<'db> InferenceContext<'db> {
         // sibling that the extension does not define falls back to the paired
         // base module's declarations (the extension shadows the base).
         match &self.local_symbols {
-            Some(symbols) => symbols.find_method_shared(NormName::intern(name.as_str())).cloned(),
+            Some(symbols) => {
+                symbols.find_method_shared(NormName::intern(name.as_str())).cloned().or_else(|| {
+                    self.effective_extension
+                        .and_then(|ext| self.db.interface_method_named(ext, name))
+                })
+            }
             None => {
                 let module_id = hir_def::ModuleId::new(self.context_file_id);
                 self.db.interface_method_named(module_id, name)
@@ -5853,6 +6016,17 @@ fn const_eval_literal_index(expr: &Expr) -> Option<usize> {
     Some(f as usize)
 }
 
+/// The base `Expr::Path` of an assignment target: the target itself, or the
+/// root of its `Index` chain (`Н[…][…] = …`). A field anywhere in the chain
+/// leaves no base.
+pub(crate) fn assignment_target_base(body: &Body, target: ExprId) -> Option<(ExprId, &Name)> {
+    match body.expr(target) {
+        Expr::Path(name) => Some((target, name)),
+        Expr::Index { base, .. } => assignment_target_base(body, ExprId::from_idx(*base)),
+        _ => None,
+    }
+}
+
 /// Spellings that denote the module's own object or form, both languages.
 fn is_self_name(name_lower: &str) -> bool {
     matches!(name_lower, "этотобъект" | "thisobject" | "этаформа" | "thisform")
@@ -6060,8 +6234,8 @@ pub fn infer_effective<'db>(
     eid: EffectiveModuleId<'db>,
 ) -> Arc<InferenceResult> {
     let base_file = eid.base_file(db);
-    let _p =
-        tracing::info_span!("infer_effective", ?base_file, ext_file = ?eid.ext_file(db)).entered();
+    let ext_file = eid.ext_file(db);
+    let _p = tracing::info_span!("infer_effective", ?base_file, ?ext_file).entered();
 
     let module_bodies = hir_def::effective_module::module_bodies_effective(db, eid);
     let interface = hir_def::effective_module::module_interface_effective(db, eid);
@@ -6074,7 +6248,7 @@ pub fn infer_effective<'db>(
     // therefore output-identical, while avoiding a re-inference of the whole — often large —
     // base module twice per extension file (the dominant cost on heavily-extended configs).
     let changed_ids: rustc_hash::FxHashSet<hir_def::MethodKey> = {
-        let ext_parse = db.parse(eid.ext_file(db));
+        let ext_parse = db.parse(ext_file);
         let changed_targets: rustc_hash::FxHashSet<String> = ext_parse
             .syntax_node()
             .children()
@@ -6107,6 +6281,7 @@ pub fn infer_effective<'db>(
         let mut ctx = InferenceContext::new_effective(
             db,
             base_file,
+            Some(ext_file),
             interface.clone(),
             DefWithBodyId::Method(local_id),
             &Arc::new(body.clone()),
@@ -6137,6 +6312,7 @@ pub fn infer_effective<'db>(
         let mut ctx = InferenceContext::new_effective(
             db,
             base_file,
+            None,
             interface.clone(),
             DefWithBodyId::ModuleCode,
             &Arc::new(body.clone()),
@@ -6153,6 +6329,7 @@ pub fn infer_effective<'db>(
         let mut ctx = InferenceContext::new_effective(
             db,
             base_file,
+            Some(ext_file),
             interface.clone(),
             DefWithBodyId::Method(local_id),
             &Arc::new(body.clone()),

@@ -12,23 +12,25 @@ enum SnapshotAttempt {
     /// and an UNEXPECTED read panic (already logged at error): a genuine invariant bug will not
     /// clear on a retry, so it degrades straight to the caller's disk read.
     Unavailable,
-    /// A read unwound on an EXPECTED drift race (cancellation or `file_text` revision/disk-read
-    /// panic). The caller retries once on a fresh snapshot.
+    /// A read unwound on an EXPECTED drift race (a `salsa::Cancelled`, which a disk read that
+    /// drifted from its revision raises too, or a `file_text` disk-read panic). The caller
+    /// retries once on a fresh snapshot.
     Unwound,
 }
 
 /// Classify a caught unwind from an unlocked resident snapshot read. Two payloads are EXPECTED on
 /// the drift hot path and logged at debug: a `salsa::Cancelled` (a concurrent `set_file_text`
-/// cancelled the cloned handle's in-flight query) and `file_text_query`'s own revision/disk-read
-/// panic (the file's bytes changed between the recorded revision and this disk re-read). ANY OTHER
+/// cancelled the cloned handle's in-flight query, or the file's bytes changed between the recorded
+/// revision and this disk re-read — `file_text_query` unwinds that as `PendingWrite`) and
+/// `file_text_query`'s own disk-read panic (the file was deleted or became unreadable). ANY OTHER
 /// payload is a real invariant bug, not a drift race, so it is logged at error with its message —
 /// never masked as a race — while the read still degrades to `Unavailable` rather than taking down
 /// the query thread.
 ///
-/// The revision panic also fires the process-global panic hook, printing a backtrace to stderr on
-/// every genuine drift race. Swapping the hook (`set_hook`/`update_hook`) is process-global and
-/// would race other threads' panics, so it is deliberately NOT done here: the stderr backtrace is
-/// accepted as expected noise on a drift race.
+/// The disk-read panic also fires the process-global panic hook, printing a backtrace to stderr.
+/// Swapping the hook (`set_hook`/`update_hook`) is process-global and would race other threads'
+/// panics, so it is deliberately NOT done here: the stderr backtrace is accepted as expected noise
+/// on that race. The revision drift is unwound without the hook.
 fn classify_snapshot_unwind(
     path: &Path,
     payload: Box<dyn std::any::Any + Send>,
@@ -174,7 +176,7 @@ mod tests {
 
     /// A resident write racing an unlocked snapshot read: the file changes on disk while the
     /// resident still records the OLD content revision (no drift poll re-keyed it), so the
-    /// cloned `file_text` read trips `assert_revision` and unwinds. `snapshot_text_and_parse`
+    /// cloned `file_text` read trips `verify_disk_revision` and unwinds. `snapshot_text_and_parse`
     /// must catch it, retry once on a fresh snapshot, and return `None` — never propagate the
     /// panic. Reverting the `catch_unwind` in `try_snapshot_once` makes this test panic.
     #[test]
@@ -197,18 +199,27 @@ mod tests {
         );
     }
 
-    /// The panic classifier separates an EXPECTED drift race (a `file_text` revision/disk panic,
-    /// which the caller retries once) from a genuine invariant bug (any other payload, which
-    /// degrades straight to unavailable and is logged at error, never masked as a race).
+    /// The panic classifier separates an EXPECTED drift race (a pending write or a `file_text`
+    /// disk-read panic, which the caller retries once) from a genuine invariant bug (any other
+    /// payload, which degrades straight to unavailable and is logged at error, never masked as a
+    /// race).
     #[test]
     fn snapshot_unwind_classification_separates_drift_from_bugs() {
         let path = Path::new("/ws/M.bsl");
 
-        let drift: Box<dyn std::any::Any + Send> =
-            Box::new("file_text revision mismatch for FileId(1): content changed".to_owned());
+        let drift: Box<dyn std::any::Any + Send> = Box::new(salsa::Cancelled::PendingWrite);
         assert!(
             matches!(classify_snapshot_unwind(path, drift), SnapshotAttempt::Unwound),
-            "a file_text revision panic is an expected drift race → retry"
+            "a disk read that drifted from its revision is an expected drift race → retry"
+        );
+
+        let unreadable: Box<dyn std::any::Any + Send> = Box::new(
+            "file_text: cannot read \"/ws/M.bsl\" for FileId(1): No such file or directory"
+                .to_owned(),
+        );
+        assert!(
+            matches!(classify_snapshot_unwind(path, unreadable), SnapshotAttempt::Unwound),
+            "a file_text disk-read panic is an expected drift race → retry"
         );
 
         let bug: Box<dyn std::any::Any + Send> = Box::new("index out of bounds: len 0".to_owned());
