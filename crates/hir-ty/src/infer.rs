@@ -495,6 +495,14 @@ pub enum InferenceDiagnostic {
         visible_from: bsl_platform::PlatformVersion,
     },
 
+    /// `Новый <Имя>` names a type the platform does not have. The platform
+    /// refuses to compile the whole module on it («Тип не определен»). `expr` is
+    /// the constructor expression.
+    UnknownTypeInNew {
+        expr: ExprId,
+        name: Name,
+    },
+
     /// A resolved platform member is not available in some of the execution
     /// environments this body runs in (`missing` — the EDT-style
     /// "[Web client]" qualifier set).
@@ -1394,6 +1402,7 @@ impl<'db> InferenceContext<'db> {
             InferenceDiagnostic::MissedRequiredParameterCommonModule { expr, .. } => *expr,
             InferenceDiagnostic::MissedRequiredParameterManagerModule { expr, .. } => *expr,
             InferenceDiagnostic::RedundantAccessToObjectThreeLevel { expr, .. } => *expr,
+            InferenceDiagnostic::UnknownTypeInNew { expr, .. } => *expr,
             InferenceDiagnostic::UnavailableInEnvironment { expr, .. } => *expr,
             InferenceDiagnostic::PlatformMemberNewerThanMinVersion { expr, .. } => *expr,
             InferenceDiagnostic::PlatformMemberHiddenByCompatibilityMode { expr, .. } => *expr,
@@ -1529,6 +1538,40 @@ impl<'db> InferenceContext<'db> {
             name: name.clone(),
             member_kind,
             missing,
+        });
+    }
+
+    /// Report `Новый <Имя>` whose name the platform does not know. Silent unless the
+    /// served help lists the platform's types in full and is not older than the
+    /// project's target release (a newer release may add types the list lacks),
+    /// and where nothing compiles the code.
+    fn check_unknown_constructed_type(&mut self, expr: ExprId, name: &Name) {
+        let raw = name.as_str();
+        if raw.is_empty()
+            || raw.contains('.')
+            || self.in_uncompiled_branch
+            || self.in_dead_branch
+            || self.module_compiles_nowhere()
+            || !TyLoweringContext::bare_name_is_unmodelled(raw)
+            || crate::platform_type_name::is_known_non_corpus_type_name(raw)
+            || crate::platform_type_name::is_legacy_platform_type_name(raw)
+        {
+            return;
+        }
+        let platform = bsl_platform::PlatformDataInner::instance();
+        if !platform.serves_complete_type_list()
+            || platform.get_type(raw).is_some()
+            || !platform.get_constructors(raw).is_empty()
+        {
+            return;
+        }
+        let served = platform.help_origin().and_then(|origin| origin.platform_version.as_deref());
+        if !served_help_covers_target(served, self.db.target_platform_version().as_deref()) {
+            return;
+        }
+        self.push_inference_diagnostic(InferenceDiagnostic::UnknownTypeInNew {
+            expr,
+            name: name.clone(),
         });
     }
 
@@ -3628,6 +3671,7 @@ impl<'db> InferenceContext<'db> {
                             crate::min_platform::constructed_type(name.as_str())
                         });
                     }
+                    self.check_unknown_constructed_type(expr_id, name);
                     let ctors = platform.get_constructors(name.as_str());
                     if !ctors.is_empty() {
                         if let Ok(candidates) = builtin::candidates::constructor_candidates(
@@ -5781,6 +5825,23 @@ impl<'db> InferenceContext<'db> {
     }
 }
 
+/// Whether help of the `served` release lists every type of the project's
+/// `target` release. A set target needs a served release that is known and not
+/// older: an unversioned corpus, or a target that does not parse, may be older
+/// than the platform the project compiles on.
+fn served_help_covers_target(served: Option<&str>, target: Option<&str>) -> bool {
+    let Some(target) = target else {
+        return true;
+    };
+    match (
+        served.and_then(bsl_platform::PlatformVersion::parse_release),
+        bsl_platform::PlatformVersion::parse_release(target),
+    ) {
+        (Some(served), Some(target)) => !target.release_newer_than(served),
+        _ => false,
+    }
+}
+
 fn const_eval_literal_index(expr: &Expr) -> Option<usize> {
     let Expr::Literal(Literal::Number(n)) = expr else {
         return None;
@@ -6301,6 +6362,17 @@ pub fn type_of_expr_query(
 mod tests {
     use super::*;
     use bsl_types::testing::InMemoryDb;
+
+    #[test]
+    fn served_help_covers_only_a_target_it_is_known_not_to_predate() {
+        assert!(served_help_covers_target(Some("8.3.27.2214"), None));
+        assert!(served_help_covers_target(None, None));
+        assert!(served_help_covers_target(Some("8.3.27.2214"), Some("8.3.27")));
+        assert!(served_help_covers_target(Some("8.3.27.2214"), Some("8.3.24")));
+        assert!(!served_help_covers_target(Some("8.3.27.2214"), Some("8.3.28")));
+        assert!(!served_help_covers_target(None, Some("8.3.27")), "unversioned help");
+        assert!(!served_help_covers_target(Some("8.3.27.2214"), Some("8.3.x")), "target unparsed");
+    }
 
     #[test]
     fn t12_function_facet_synthesizes_candidate_with_argument_diagnostics() {

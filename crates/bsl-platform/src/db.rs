@@ -454,6 +454,14 @@ impl PlatformDataInner {
         }
     }
 
+    /// Whether the served help lists the platform's types in full, so a type name
+    /// it does not know is evidence that the name is not a platform type. False
+    /// when nothing is served, the served source degraded from the requested one
+    /// (`help_missing_reason`), or the snapshot holds no types.
+    pub fn serves_complete_type_list(&self) -> bool {
+        self.origin.is_some() && self.missing_reason.is_none() && !self.types.is_empty()
+    }
+
     pub fn get_type(&self, name: &str) -> Option<&PlatformType> {
         let key: SmolStr = name.fold_lower().into();
         let idx = *self.types_by_name.get(&key)?;
