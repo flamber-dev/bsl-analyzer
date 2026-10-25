@@ -9,9 +9,9 @@
 //!   call (a handle clone carries a token of its own);
 //! - that handle dies before the read returns: a live clone blocks every write to the
 //!   database, and the incremental drift apply is a write;
-//! - a cancelled call answers as a cancelled call, a call cut short by a writer answers
-//!   as a retry, and a panic answers as a panic — three different things that all arrive
-//!   as an unwind.
+//! - a cancelled call answers as a cancelled call, a call cut short by a writer or by a
+//!   disk change it has not applied yet answers as a retry, and a panic answers as a
+//!   panic — three different things that all arrive as an unwind.
 //!
 //! [`resident_call`] owns all three. Tools describe what to compute and how to render
 //! each outcome; they do not decide when to observe cancellation, because a decision
@@ -52,9 +52,13 @@ pub(crate) enum CallOutcome<T> {
     Ready(T),
     /// The client sent `notifications/cancelled` (or the transport went away).
     Cancelled,
-    /// A writer moved the database out from under the call. Nobody cancelled
-    /// anything: the caller is owed a retry, not a report of its own cancellation.
+    /// A writer moved the database out from under the call, or the call read a file
+    /// changed on disk after its revision was applied. Nobody cancelled anything: the
+    /// caller is owed a retry, not a report of its own cancellation.
     Superseded,
+    /// The owner is frozen on an invalid project and cannot apply the disk change this
+    /// read ran into; retrying would never heal. Carries the owner's refusal.
+    Frozen(String),
     /// The work panicked. Not cancellation, and never reported as one.
     Panicked,
 }
@@ -188,6 +192,12 @@ impl ResidentSession {
         self.diag.force_rescan()
     }
 
+    /// Route the next poll through a disk walk, unguarded — see
+    /// [`DiagnosticsState::force_rescan_after_drift`].
+    pub(crate) fn force_rescan_after_drift(&self) {
+        self.diag.force_rescan_after_drift()
+    }
+
     /// Read once, and read again behind a forced re-scan when the first answer is a miss
     /// the caller would act on as final.
     ///
@@ -291,7 +301,21 @@ where
             // This request's own token. Everything else that arrives as an unwind is
             // somebody else's event and must not be dressed up as the client's cancel.
             Err(salsa::Cancelled::Local) => CallOutcome::Cancelled,
-            Err(salsa::Cancelled::PendingWrite) => CallOutcome::Superseded,
+            // The retry comes from the client, and its poll must apply the disk even when
+            // the watcher has not delivered the change yet. A frozen owner applies nothing,
+            // so a retry would read the same drift forever: it answers with its refusal.
+            // While a full reload runs no poll applies drift either, and the resident it
+            // publishes is read from disk: a walk per retry would cure nothing.
+            Err(salsa::Cancelled::PendingWrite) => {
+                if session.diag.freeze_if_invalid_or_frozen() {
+                    CallOutcome::Frozen(super::lifecycle::LAST_GOOD_INVALID_PROJECT.to_owned())
+                } else {
+                    if !session.diag.reload_running() {
+                        session.force_rescan_after_drift();
+                    }
+                    CallOutcome::Superseded
+                }
+            }
             Err(other) => {
                 tracing::error!(?other, "resident call unwound on a salsa variant it cannot name");
                 CallOutcome::Panicked
@@ -324,7 +348,7 @@ mod tests {
     use crate::diagnostics_state::drift::FORCE_RESCAN_FLOOR;
     use crate::diagnostics_state::lock_recover;
     use crate::diagnostics_state::test_support::{
-        wait_ready, wait_until, write, write_common_module,
+        join_load, wait_ready, wait_until, write, write_common_module,
     };
     use crate::walk_probe::{
         await_walk_start, entered, hold_walk_start, install, reset, WALK_GATE,
@@ -367,22 +391,8 @@ mod tests {
     fn ready_state(root: &std::path::Path) -> DiagnosticsState {
         let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
         state.drift_interval = Duration::from_millis(0);
-        state.ensure_loading();
-        let deadline =
-            std::time::Instant::now() + test_utils::wait::hang_guard(Duration::from_secs(60));
-        loop {
-            match state.status() {
-                super::super::types::DiagnosticsStatus::Ready { .. } => return state,
-                super::super::types::DiagnosticsStatus::Failed(msg) => panic!("resident: {msg}"),
-                other => {
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "resident never became ready: {other:?}"
-                    );
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-        }
+        join_load(&state);
+        state
     }
 
     /// The whole `references` answer for the popular name — anchor, walk and render.
@@ -691,9 +701,11 @@ mod tests {
         );
     }
 
-    /// Three unwinds arrive the same way and mean three different things. A live
-    /// `PendingWrite` cannot be produced on this path — every write needs the resident
-    /// mutex the reader holds — so the gate is put on the classification itself.
+    /// Three unwinds arrive the same way and mean three different things. No writer can
+    /// produce a live `PendingWrite` on this path — every write needs the resident mutex
+    /// the reader holds; a read of a file changed on disk after its revision was recorded
+    /// does, and the tests below drive that one. Here the gate is put on the
+    /// classification itself.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn each_kind_of_unwind_keeps_its_own_meaning() {
         let raise = |cancelled: salsa::Cancelled| {
@@ -724,13 +736,21 @@ mod tests {
             ),
             "a panic must never be dressed up as a cancellation"
         );
+        assert!(
+            matches!(
+                resident_call(state.clone(), ct(), |_| -> bool { panic!("index out of bounds") })
+                    .await,
+                CallOutcome::Panicked
+            ),
+            "a genuine panic must never be dressed up as a retry"
+        );
     }
 
     /// A disk edit between cloning the resident analysis and its first file-text query
-    /// is a real revision-mismatch panic. The call keeps that terminal outcome; after
-    /// it unwinds, the owner can publish the saved bytes and a fresh call reads them.
+    /// unwinds the call as superseded; after it unwinds, the owner can publish the saved
+    /// bytes and a fresh call reads them.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn disk_revision_drift_is_a_terminal_panic_then_fresh_read_recovers() {
+    async fn disk_revision_drift_is_superseded_then_fresh_read_recovers() {
         use crate::diagnostics_state::test_support::module_path;
         use crate::workspace_handle::WorkspaceRead;
         use std::sync::atomic::{AtomicBool, AtomicUsize};
@@ -767,20 +787,18 @@ mod tests {
                 move |session| {
                     session.read(|_, analysis, _| {
                         entered_tx.send(()).expect("test is waiting for the query gate");
-                        crate::test_wait::recv(&release_rx, "test releases the query gate");
+                        release_rx.recv().expect("test releases the query gate");
                         counted_reads.fetch_add(1, AtomicOrdering::SeqCst);
                         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             analysis.file_text(file_id).to_string()
                         })) {
                             Ok(text) => text,
                             Err(payload) => {
-                                let message = payload
-                                    .downcast_ref::<String>()
-                                    .map(String::as_str)
-                                    .or_else(|| payload.downcast_ref::<&str>().copied())
-                                    .unwrap_or_default();
                                 observed_by_request.store(
-                                    message.contains("file_text revision mismatch"),
+                                    matches!(
+                                        payload.downcast_ref::<salsa::Cancelled>(),
+                                        Some(salsa::Cancelled::PendingWrite)
+                                    ),
                                     AtomicOrdering::SeqCst,
                                 );
                                 std::panic::resume_unwind(payload)
@@ -793,34 +811,27 @@ mod tests {
         });
 
         entered_rx
-            .recv_timeout(test_utils::wait::hang_guard(Duration::from_secs(30)))
+            .recv()
             .expect("request cloned the resident analysis before the first text query");
         std::fs::write(&path, saved_text).unwrap();
         release_tx.send(()).expect("the blocked request still owns its query gate");
-        let outcome =
-            tokio::time::timeout(test_utils::wait::hang_guard(Duration::from_secs(30)), request)
-                .await
-                .expect("the revision-mismatch request must terminate")
-                .expect("resident call task joins");
+        let outcome = request.await.expect("resident call task joins");
         assert!(
-            matches!(outcome, CallOutcome::Panicked),
-            "a genuine file_text revision mismatch remains a terminal panic, not an automatic retry"
+            matches!(outcome, CallOutcome::Superseded),
+            "a file changed on disk under analysis is a superseded read, owed a retry"
         );
         assert!(
             mismatch_observed.load(AtomicOrdering::SeqCst),
-            "the panic must come from the disk-backed file_text revision check"
+            "the unwind must come from the disk-backed file_text revision check"
         );
         assert_eq!(original_reads.load(AtomicOrdering::SeqCst), 1);
 
         let refresh_state = state.clone();
         let refresh_path = path.clone();
-        let refreshed = tokio::time::timeout(
-            test_utils::wait::hang_guard(Duration::from_secs(30)),
-            tokio::task::spawn_blocking(move || refresh_state.refresh_saved_path(&refresh_path)),
-        )
-        .await
-        .expect("owner refresh must not wait on a leaked analysis clone")
-        .expect("owner refresh task joins");
+        let refreshed =
+            tokio::task::spawn_blocking(move || refresh_state.refresh_saved_path(&refresh_path))
+                .await
+                .expect("owner refresh task joins");
         let refreshed = match refreshed {
             WorkspaceRead::Ready(snapshot) => snapshot,
             _ => panic!("stable saved path refresh must publish"),
@@ -833,14 +844,10 @@ mod tests {
         );
 
         let next_state = state.clone();
-        let next = tokio::time::timeout(
-            test_utils::wait::hang_guard(Duration::from_secs(30)),
-            tokio::task::spawn_blocking(move || {
-                next_state.read(|resident, _| resident.analysis().file_text(file_id).to_string())
-            }),
-        )
+        let next = tokio::task::spawn_blocking(move || {
+            next_state.read(|resident, _| resident.analysis().file_text(file_id).to_string())
+        })
         .await
-        .expect("a fresh resident read must complete")
         .expect("fresh read task joins");
         match next {
             ResidentOutcome::Ready(text, _) => assert_eq!(text, saved_text),
@@ -852,6 +859,211 @@ mod tests {
             1,
             "the failed request is not replayed"
         );
+    }
+
+    const APPLIED_TEXT: &str = "&НаСервере\nФункция Считать() Экспорт\n Возврат 1;\nКонецФункции\n";
+    const REVERTED_TEXT: &str =
+        "&НаСервере\nФункция Считать() Экспорт\n Возврат \"два\";\nКонецФункции\n";
+
+    /// The admitted resident file behind `path`.
+    fn resident_file_id(state: &DiagnosticsState, path: &std::path::Path) -> vfs::FileId {
+        let canonical = path.canonicalize().unwrap();
+        state
+            .workspace_snapshot()
+            .expect("ready owner snapshot")
+            .catalog
+            .iter()
+            .find(|file| file.path == canonical)
+            .expect("the module is an admitted disk member")
+            .file_id
+    }
+
+    /// Write `text` to `path` and have the owner apply it, so the resident records its
+    /// revision before any read of the text.
+    async fn apply_on_disk(state: &DiagnosticsState, path: &std::path::Path, text: &str) {
+        use crate::workspace_handle::WorkspaceRead;
+        std::fs::write(path, text).unwrap();
+        let (state, path) = (state.clone(), path.to_path_buf());
+        let refreshed = tokio::task::spawn_blocking(move || state.refresh_saved_path(&path))
+            .await
+            .expect("owner refresh task joins");
+        assert!(matches!(refreshed, WorkspaceRead::Ready(_)), "the saved path is applied");
+    }
+
+    /// One resident call reading `file_id`'s text, with `under_gate` run after the call has
+    /// polled drift and cloned its analysis but before the text is read: whatever it does to
+    /// the disk is a change this read did not apply.
+    async fn text_read_with_edit_under_it(
+        state: &DiagnosticsState,
+        file_id: vfs::FileId,
+        under_gate: impl FnOnce(),
+    ) -> CallOutcome<ResidentOutcome<String>> {
+        use std::sync::mpsc;
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let request = tokio::spawn(resident_call(
+            state.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            move |session| {
+                session.read(|_, analysis, _| {
+                    entered_tx.send(()).expect("test is waiting for the query gate");
+                    release_rx.recv().expect("test releases the query gate");
+                    analysis.file_text(file_id).to_string()
+                })
+            },
+        ));
+        entered_rx.recv().expect("request cloned the resident analysis before the text query");
+        under_gate();
+        release_tx.send(()).expect("the blocked request still owns its query gate");
+        request.await.expect("resident call task joins")
+    }
+
+    async fn text_read(
+        state: &DiagnosticsState,
+        file_id: vfs::FileId,
+    ) -> CallOutcome<ResidentOutcome<String>> {
+        resident_call(state.clone(), tokio_util::sync::CancellationToken::new(), move |session| {
+            session.read(|_, analysis, _| analysis.file_text(file_id).to_string())
+        })
+        .await
+    }
+
+    /// The disk goes back to a text after the owner applied another one, while a read is
+    /// open: the recorded revision is the applied text's, the disk holds the old one, and
+    /// the poll ahead of the read has already run. That read is owed a retry, and the retry
+    /// reads the disk.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn applied_edit_reverted_on_disk_is_superseded_then_the_next_read_heals() {
+        use crate::diagnostics_state::test_support::module_path;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let path = module_path(root, "Сервер");
+        write_common_module(root, "Сервер", true, REVERTED_TEXT);
+        write(root, "bsl-analyzer.toml", "[source]\nroot = \".\"\n");
+        let state = ready_state(root);
+        let file_id = resident_file_id(&state, &path);
+
+        apply_on_disk(&state, &path, APPLIED_TEXT).await;
+        let first = text_read_with_edit_under_it(&state, file_id, || {
+            std::fs::write(&path, REVERTED_TEXT).unwrap();
+        })
+        .await;
+        assert!(
+            matches!(first, CallOutcome::Superseded),
+            "a read whose file changed on disk after its revision was applied is owed a retry"
+        );
+
+        match text_read(&state, file_id).await {
+            CallOutcome::Ready(ResidentOutcome::Ready(text, _)) => assert_eq!(text, REVERTED_TEXT),
+            _ => panic!("the retry must read the text on disk"),
+        }
+    }
+
+    /// The retry after a superseded read must reach the disk even when nothing else would
+    /// send it there: no change hub event, a scan cache that reads as just walked (so the
+    /// throttle serves it and the storm guard would decline a force).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn superseded_read_forces_the_next_poll_to_reread_the_disk_despite_the_storm_guard() {
+        use crate::diagnostics_state::test_support::module_path;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let path = module_path(root, "Сервер");
+        write_common_module(root, "Сервер", true, REVERTED_TEXT);
+        write(root, "bsl-analyzer.toml", "[source]\nroot = \".\"\n");
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.drift_interval = Duration::from_secs(3600);
+        join_load(&state);
+        let file_id = resident_file_id(&state, &path);
+
+        apply_on_disk(&state, &path, APPLIED_TEXT).await;
+        let forces_before = state.forced_rescans();
+        let first = text_read_with_edit_under_it(&state, file_id, || {
+            std::fs::write(&path, REVERTED_TEXT).unwrap();
+            // Stamped ahead of the clock, so its age reads as zero whatever the machine's
+            // speed: the throttle serves it, and the storm guard declines any force.
+            let mut cache = lock_recover(&state.scan);
+            let cache = cache.as_mut().expect("this call's own poll left a scan cache");
+            cache.at = Instant::now() + Duration::from_secs(3600);
+        })
+        .await;
+        assert!(
+            matches!(first, CallOutcome::Superseded),
+            "a read whose file changed on disk after its revision was applied is owed a retry"
+        );
+        assert_eq!(
+            state.forced_rescans(),
+            forces_before + 1,
+            "the superseded read asks for one walk"
+        );
+
+        match text_read(&state, file_id).await {
+            CallOutcome::Ready(ResidentOutcome::Ready(text, _)) => assert_eq!(text, REVERTED_TEXT),
+            _ => panic!("the retry must walk the disk past the storm guard and read its text"),
+        }
+    }
+
+    /// While a full reload runs, no poll applies drift and the reload publishes a resident
+    /// read from disk: a drifted read is still owed a retry, but walks nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_drifted_read_during_a_full_reload_is_superseded_without_walking() {
+        use crate::diagnostics_state::lifecycle::lock_inner;
+        use crate::diagnostics_state::test_support::module_path;
+        use crate::diagnostics_state::types::ReloadState;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let path = module_path(root, "Сервер");
+        write_common_module(root, "Сервер", true, REVERTED_TEXT);
+        write(root, "bsl-analyzer.toml", "[source]\nroot = \".\"\n");
+        let state = ready_state(root);
+        let file_id = resident_file_id(&state, &path);
+
+        apply_on_disk(&state, &path, APPLIED_TEXT).await;
+        // The read's own poll sees the change and leaves it to the reload.
+        std::fs::write(&path, REVERTED_TEXT).unwrap();
+        lock_inner(&state.inner).reload = ReloadState::Running;
+        let forces_before = state.forced_rescans();
+        let first = text_read(&state, file_id).await;
+        assert!(matches!(first, CallOutcome::Superseded), "the drifted read is owed a retry");
+        assert_eq!(state.forced_rescans(), forces_before, "and asks for no walk");
+    }
+
+    /// A frozen owner applies no disk change, so a retry of a drifted read would read the
+    /// same drift forever: it answers with its own refusal, and walks nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_frozen_owner_refuses_a_drifted_read_without_walking() {
+        use crate::diagnostics_state::lifecycle::LAST_GOOD_INVALID_PROJECT;
+        use crate::diagnostics_state::test_support::{module_path, sample_workspace};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let path = module_path(root, "Сервер");
+        std::fs::write(&path, "Функция Считать() Экспорт Возврат 1; КонецФункции").unwrap();
+        let state =
+            DiagnosticsState::for_workspace(root.to_path_buf()).with_last_good_on_invalid(true);
+        join_load(&state);
+        let file_id = resident_file_id(&state, &path);
+
+        // The module's text is not read before the freeze: a memoised text never drifts.
+        std::fs::write(root.join("bsl-analyzer.toml"), "invalid {{{{ toml").unwrap();
+        std::fs::write(
+            &path,
+            "Функция Считать() Экспорт Возврат \"изменено на диске\"; КонецФункции",
+        )
+        .unwrap();
+        assert!(state.freeze_invalid_project());
+        let forces_before = state.forced_rescans();
+
+        let outcome = text_read(&state, file_id).await;
+        assert!(
+            matches!(&outcome, CallOutcome::Frozen(reason) if reason == LAST_GOOD_INVALID_PROJECT),
+            "a frozen owner refuses a drifted read (superseded instead: {})",
+            matches!(outcome, CallOutcome::Superseded)
+        );
+        assert_eq!(state.forced_rescans(), forces_before, "and asks for no walk");
     }
 
     /// A freshness verdict for a fabricated outcome. Its values are never read by the

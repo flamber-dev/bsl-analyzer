@@ -191,7 +191,20 @@ pub fn spawn_workspace_batch(state: &mut GlobalState) {
         }
     }
 
+    if workspace_batch_parked(state) {
+        return;
+    }
     dispatch_next_chunk(state);
+}
+
+/// Whether the active sweep waits for the revision to move before its chunk is
+/// dispatched again — see [`WorkspaceBatchPlan::parked_at`].
+pub(crate) fn workspace_batch_parked(state: &GlobalState) -> bool {
+    state
+        .workspace_batch_plan
+        .as_ref()
+        .and_then(|plan| plan.parked_at)
+        .is_some_and(|parked_at| parked_at == state.analysis_host.request_revision())
 }
 
 /// Enumerate the in-scope closed file set and freeze it into a fresh sweep plan. Returns
@@ -280,6 +293,8 @@ fn build_batch_plan(state: &mut GlobalState) -> Option<WorkspaceBatchPlan> {
         mem_budget_mb: batch_mem_budget_mb(),
         chunks_since_trim: 0,
         chunk_retries: 0,
+        dispatched_revision: state.analysis_host.request_revision(),
+        parked_at: None,
         started_at: Instant::now(),
         analysis_guard,
     })
@@ -323,6 +338,11 @@ fn dispatch_next_chunk(state: &mut GlobalState) {
     };
 
     let analysis = state.analysis_host.analysis();
+    {
+        let plan = state.workspace_batch_plan.as_mut().expect("plan present when dispatching");
+        plan.dispatched_revision = salsa::plumbing::current_revision(analysis.database());
+        plan.parked_at = None;
+    }
     #[cfg(test)]
     let cancellation_baseline =
         analysis.database().salsa_event_global().map_or(0, |events| events.set_cancellation);
@@ -409,9 +429,10 @@ fn dispatch_next_chunk(state: &mut GlobalState) {
 }
 
 /// Compute one chunk's diagnostics on the worker's snapshot. Each closed file has no
-/// overlay, so its text is read disk-backed from the db; that read can panic if the file
-/// was deleted or rewritten mid-sweep, which is caught and skips just that file (mirroring
-/// the pull sweep), while a `salsa::Cancelled` keeps unwinding to abort the whole chunk.
+/// overlay, so its text is read disk-backed from the db; that read panics if the file was
+/// deleted or made unreadable mid-sweep, which is caught and skips just that file (mirroring
+/// the pull sweep), while a `salsa::Cancelled` — including `PendingWrite` for a file
+/// rewritten mid-sweep — keeps unwinding to abort the whole chunk, which is retried.
 fn compute_chunk(
     analysis: &ide::Analysis,
     chunk: &[vfs::FileId],

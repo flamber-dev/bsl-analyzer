@@ -16,7 +16,7 @@ use crate::{ParseOutcome, ParseSnapshot, SourceDatabase};
 /// out-of-Salsa metadata bootstrap that computes content revisions. Routing both
 /// through this function guarantees the bootstrap's `content_revision(read_disk_text(p))`
 /// hash matches what `file_text_query` recomputes on a later disk re-read, so a
-/// disk-backed file never spuriously fails [`assert_revision`].
+/// disk-backed file never spuriously fails [`verify_disk_revision`].
 pub fn read_disk_text(path: &Path) -> std::io::Result<String> {
     std::fs::read_to_string(path)
 }
@@ -28,7 +28,7 @@ pub fn read_disk_text(path: &Path) -> std::io::Result<String> {
 /// it stores (and the content revision derived from it) byte-identical to what
 /// [`file_text_query`] recomputes on a later disk re-read. Stripping anything
 /// here desyncs the recorded revision from the on-read hash and trips
-/// [`assert_revision`]. The lexer consumes a leading BOM as its own token, so
+/// [`verify_disk_revision`]. The lexer consumes a leading BOM as its own token, so
 /// preserving it is correct and keeps text offsets aligned with the editor's
 /// document.
 pub fn decode_disk_bytes(bytes: &[u8]) -> Option<String> {
@@ -179,8 +179,10 @@ pub fn set_parse_lru_sweep_mode(db: &mut dyn SourceDatabase, sweep: bool) {
 /// (open editor buffers, test fixtures); otherwise reads the file from disk and
 /// verifies the bytes hash to the recorded revision before returning. The
 /// hash-verify makes the disk read a pure function of the revision, so the memo
-/// is LRU-evictable and re-derives soundly. A mismatch (the file changed under a
-/// running analysis, or a deleted/unreadable file) is a hard error, never a
+/// is LRU-evictable and re-derives soundly. Disk bytes that no longer match the
+/// revision unwind the read as `salsa::Cancelled::PendingWrite`: the change is a
+/// write not applied yet, and the reader retries once it is. A deleted/unreadable
+/// file and an overlay out of step with its revision panic. Neither case returns a
 /// silently-mixed result.
 #[salsa::tracked(lru = 512, heap_size = crate::queries::heap_estimate::file_text_heap, returns(ref))]
 pub fn file_text_query<'db>(db: &'db dyn SourceDatabase, input: FileIdInput<'db>) -> Arc<str> {
@@ -190,7 +192,8 @@ pub fn file_text_query<'db>(db: &'db dyn SourceDatabase, input: FileIdInput<'db>
 
 /// The text [`file_text_query`] returns, read without leaving a memo behind: the
 /// overlay when one is registered, otherwise the disk bytes verified against the
-/// file's content revision. The inputs it reads become dependencies of the calling
+/// file's content revision — a mismatch unwinds as `salsa::Cancelled::PendingWrite`,
+/// see [`file_text_query`]. The inputs it reads become dependencies of the calling
 /// query. For a query that scans every file of a source root once: routed through
 /// [`file_text_query`], each scanned text stays pinned until the next LRU trim, so
 /// the scan alone holds the whole root's source in memory.
@@ -208,8 +211,28 @@ pub fn file_text_unmemoized(db: &dyn SourceDatabase, file_id: FileId) -> Cow<'_,
         tracing::error!(?file_id, ?path, %err, "file_text: disk read failed");
         panic!("file_text: cannot read {path:?} for {file_id:?}: {err}")
     });
-    assert_revision(file_id, &text, want);
+    verify_disk_revision(file_id, &path, &text, want);
     Cow::Owned(text)
+}
+
+/// The disk changed after its revision was recorded: the read is superseded by a write
+/// the database has not applied yet. Unwound the way salsa unwinds its own cancellation —
+/// `resume_unwind` skips the panic hook — so every reader that already retries a pending
+/// write retries this one.
+fn verify_disk_revision(file_id: FileId, path: &Path, text: &str, want: u64) {
+    let got = content_revision(text);
+    if got != want {
+        // No panic message carries the values any more, and they are what tells an
+        // empty read (a truncate-then-write caught halfway) from a real edit.
+        tracing::warn!(
+            ?file_id,
+            ?path,
+            recorded = want,
+            on_read = got,
+            "file_text: disk changed under analysis; the read is superseded"
+        );
+        std::panic::resume_unwind(Box::new(salsa::Cancelled::PendingWrite));
+    }
 }
 
 fn assert_revision(file_id: FileId, text: &str, want: u64) {

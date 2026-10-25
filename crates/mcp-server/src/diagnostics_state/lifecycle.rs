@@ -688,6 +688,10 @@ impl DiagnosticsState {
         lock_inner(&self.inner).invalid_configuration.is_some()
     }
 
+    pub(super) fn reload_running(&self) -> bool {
+        lock_inner(&self.inner).reload == ReloadState::Running
+    }
+
     pub(super) fn freeze_if_invalid_or_frozen(&self) -> bool {
         self.had_invalid_configuration() || self.freeze_invalid_project()
     }

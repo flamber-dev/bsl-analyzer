@@ -213,6 +213,7 @@ async fn local_block(
         CallOutcome::Superseded => {
             "метаданные изменились во время чтения, повторите вызов".to_string()
         }
+        CallOutcome::Frozen(reason) => reason,
         CallOutcome::Panicked => "чтение метаданных workspace прервано".to_string(),
     };
 
