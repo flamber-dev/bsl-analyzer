@@ -3581,6 +3581,266 @@ fn test_workspace_call_graph_query_ref_links_method_to_mdo() {
     assert!(!qref.crosses_client_to_server);
 }
 
+/// A query that dereferences past the first hop reads every object and declared
+/// attribute it passes. The shape is a typical warehouse check
+/// (`Товары.ЕдиницаИзмерения.ТипИзмеряемойВеличины` over `Справочник.Номенклатура КАК
+/// Товары`): the method reads `Номенклатура.ЕдиницаИзмерения`, and through it the
+/// package catalog and its `ТипИзмеряемойВеличины`.
+#[test]
+fn test_workspace_call_graph_query_ref_follows_a_dereference_chain() {
+    use bsl_metadata::MdoType;
+    use hir::call_graph::{EdgeKind, GraphNode};
+    use hir::ConfigsDatabase;
+
+    let catalog = |uuid: u8, name: &str, attribute: &str, ty: &str| {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:xs="http://www.w3.org/2001/XMLSchema" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-0000000000{uuid:02}">
+        <Properties>
+            <Name>{name}</Name>
+        </Properties>
+        <ChildObjects>
+            <Attribute uuid="00000000-0000-0000-0000-0000000001{uuid:02}">
+                <Properties>
+                    <Name>{attribute}</Name>
+                    <Type><v8:Type>{ty}</v8:Type></Type>
+                </Properties>
+            </Attribute>
+        </ChildObjects>
+    </Catalog>
+</MetaDataObject>"#
+        )
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("src/cf");
+    std::fs::create_dir_all(root.join("Catalogs")).unwrap();
+    std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+    std::fs::write(
+        root.join("Catalogs/Номенклатура.xml"),
+        catalog(1, "Номенклатура", "ЕдиницаИзмерения", "cfg:CatalogRef.УпаковкиЕдиницыИзмерения"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("Catalogs/УпаковкиЕдиницыИзмерения.xml"),
+        catalog(2, "УпаковкиЕдиницыИзмерения", "ТипИзмеряемойВеличины", "xs:string"),
+    )
+    .unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![(None, root.clone())], None);
+    let file_id = FileId(0);
+    let file_path = root.join("CommonModules/Отчеты/Ext/Module.bsl");
+    let mut file_set = FileSet::new();
+    file_set.insert(file_id, VfsPath::new(file_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file_id, SourceRootId(0));
+    db.set_file_text(
+        file_id,
+        "Процедура Считать() Экспорт\n\
+         Запрос = \"ВЫБРАТЬ Товары.ЕдиницаИзмерения.ТипИзмеряемойВеличины КАК Тип \
+         ИЗ Справочник.Номенклатура КАК Товары\";\n\
+         КонецПроцедуры",
+    );
+
+    let graph = db.workspace_call_graph(SourceRootId(0));
+    let mut read: Vec<String> = graph
+        .edges()
+        .filter(|e| e.kind == EdgeKind::QueryRef)
+        .map(|e| match &e.to {
+            GraphNode::Mdo { mdo_type: MdoType::Catalog, object_name } => {
+                object_name.as_str().to_string()
+            }
+            GraphNode::Attribute { mdo_type: MdoType::Catalog, object_name, attr_name } => {
+                format!("{}.{}", object_name.as_str(), attr_name.as_str())
+            }
+            other => panic!("unexpected query_ref target: {other:?}"),
+        })
+        .collect();
+    read.sort();
+    assert_eq!(
+        read,
+        [
+            "Номенклатура",
+            "Номенклатура.ЕдиницаИзмерения",
+            "УпаковкиЕдиницыИзмерения",
+            "УпаковкиЕдиницыИзмерения.ТипИзмеряемойВеличины",
+        ]
+    );
+}
+
+/// Past the first hop a dereference chain follows the same rules as the first hop: a
+/// standard attribute (`Наименование`, `Ссылка`, `Родитель`, in either language) is
+/// not a read of a declared attribute, yet a standard reference still leads on; and a
+/// reference typed through a defined type leads to the object the defined type names.
+#[test]
+fn test_workspace_call_graph_query_ref_dereference_chain_standard_and_defined_types() {
+    use bsl_metadata::MdoType;
+    use hir::call_graph::{EdgeKind, GraphNode};
+    use hir::ConfigsDatabase;
+
+    let catalog = |uuid: u8, name: &str, attributes: &[(&str, &str)]| {
+        let attributes: String = attributes
+            .iter()
+            .enumerate()
+            .map(|(i, (attribute, ty))| {
+                // A configuration dump names a defined type as a type set, not a type.
+                let element = if ty.starts_with("cfg:DefinedType.") { "TypeSet" } else { "Type" };
+                format!(
+                    r#"
+            <Attribute uuid="00000000-0000-0000-0000-0000000001{uuid:01}{i:01}">
+                <Properties>
+                    <Name>{attribute}</Name>
+                    <Type><v8:{element}>{ty}</v8:{element}></Type>
+                </Properties>
+            </Attribute>"#
+                )
+            })
+            .collect();
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:xs="http://www.w3.org/2001/XMLSchema" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-0000000000{uuid:02}">
+        <Properties>
+            <Name>{name}</Name>
+            <Hierarchical>true</Hierarchical>
+            <DescriptionLength>25</DescriptionLength>
+        </Properties>
+        <ChildObjects>{attributes}
+        </ChildObjects>
+    </Catalog>
+</MetaDataObject>"#
+        )
+    };
+    let defined_type = |uuid: u8, name: &str, ty: &str| {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" version="2.10">
+    <DefinedType uuid="00000000-0000-0000-0000-0000000002{uuid:02}">
+        <Properties>
+            <Name>{name}</Name>
+            <Type><v8:Type>{ty}</v8:Type></Type>
+        </Properties>
+    </DefinedType>
+</MetaDataObject>"#
+        )
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("src/cf");
+    std::fs::create_dir_all(root.join("Catalogs")).unwrap();
+    std::fs::create_dir_all(root.join("DefinedTypes")).unwrap();
+    std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+    std::fs::write(
+        root.join("Catalogs/Номенклатура.xml"),
+        catalog(
+            1,
+            "Номенклатура",
+            &[
+                ("ЕдиницаИзмерения", "cfg:CatalogRef.УпаковкиЕдиницыИзмерения"),
+                ("Упаковка", "cfg:DefinedType.ЕдиницаХранения"),
+            ],
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("Catalogs/УпаковкиЕдиницыИзмерения.xml"),
+        catalog(2, "УпаковкиЕдиницыИзмерения", &[("ТипИзмеряемойВеличины", "xs:string")]),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("Catalogs/Заказы.xml"),
+        catalog(3, "Заказы", &[("Товар", "cfg:DefinedType.Товар")]),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("DefinedTypes/ЕдиницаХранения.xml"),
+        defined_type(1, "ЕдиницаХранения", "cfg:CatalogRef.УпаковкиЕдиницыИзмерения"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("DefinedTypes/Товар.xml"),
+        defined_type(2, "Товар", "cfg:CatalogRef.Номенклатура"),
+    )
+    .unwrap();
+
+    let reads = |query: &str| -> Vec<String> {
+        let mut db = RootDatabaseImpl::new();
+        db.set_all_config_paths(vec![(None, root.clone())], None);
+        let file_id = FileId(0);
+        let file_path = root.join("CommonModules/Отчеты/Ext/Module.bsl");
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new(file_path.to_string_lossy().as_ref()));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, SourceRootId(0));
+        db.set_file_text(
+            file_id,
+            &format!("Процедура Считать() Экспорт\nЗапрос = \"{query}\";\nКонецПроцедуры"),
+        );
+        let graph = db.workspace_call_graph(SourceRootId(0));
+        let mut read: Vec<String> = graph
+            .edges()
+            .filter(|e| e.kind == EdgeKind::QueryRef)
+            .map(|e| match &e.to {
+                GraphNode::Mdo { mdo_type: MdoType::Catalog, object_name } => {
+                    object_name.as_str().to_string()
+                }
+                GraphNode::Attribute { mdo_type: MdoType::Catalog, object_name, attr_name } => {
+                    format!("{}.{}", object_name.as_str(), attr_name.as_str())
+                }
+                other => panic!("unexpected query_ref target: {other:?}"),
+            })
+            .collect();
+        read.sort();
+        read
+    };
+
+    assert_eq!(
+        reads("ВЫБРАТЬ Т.ЕдиницаИзмерения.Наименование КАК Имя ИЗ Справочник.Номенклатура КАК Т"),
+        ["Номенклатура", "Номенклатура.ЕдиницаИзмерения", "УпаковкиЕдиницыИзмерения"],
+        "a standard attribute past the first hop is not a declared read"
+    );
+    for standard_ref in ["Ссылка", "Ref"] {
+        assert_eq!(
+            reads(&format!(
+                "ВЫБРАТЬ Т.ЕдиницаИзмерения.{standard_ref}.ТипИзмеряемойВеличины КАК Тип \
+                 ИЗ Справочник.Номенклатура КАК Т"
+            )),
+            [
+                "Номенклатура",
+                "Номенклатура.ЕдиницаИзмерения",
+                "УпаковкиЕдиницыИзмерения",
+                "УпаковкиЕдиницыИзмерения.ТипИзмеряемойВеличины",
+            ],
+            "a standard reference `{standard_ref}` leads on without being a declared read"
+        );
+    }
+    assert_eq!(
+        reads("ВЫБРАТЬ Т.Упаковка.ТипИзмеряемойВеличины КАК Тип ИЗ Справочник.Номенклатура КАК Т"),
+        [
+            "Номенклатура",
+            "Номенклатура.Упаковка",
+            "УпаковкиЕдиницыИзмерения",
+            "УпаковкиЕдиницыИзмерения.ТипИзмеряемойВеличины",
+        ],
+        "the first hop is a reference through a defined type"
+    );
+    assert_eq!(
+        reads(
+            "ВЫБРАТЬ Т.Товар.Родитель.Упаковка.ТипИзмеряемойВеличины КАК Тип \
+             ИЗ Справочник.Заказы КАК Т"
+        ),
+        [
+            "Заказы",
+            "Заказы.Товар",
+            "Номенклатура",
+            "Номенклатура.Упаковка",
+            "УпаковкиЕдиницыИзмерения",
+            "УпаковкиЕдиницыИзмерения.ТипИзмеряемойВеличины",
+        ],
+        "a defined-type first hop, a standard `Родитель`, then a defined-type hop"
+    );
+}
+
 /// A query that names an object only through `ЗНАЧЕНИЕ` or `ВЫРАЗИТЬ` reads it: the
 /// method gets a `query_ref` edge to each declared object it names that way, and none to
 /// an object the configuration does not declare.

@@ -882,12 +882,15 @@ pub(crate) fn collect_module_query_refs(
         };
         let mut resolved = Vec::new();
         let mut attrs = Vec::new();
+        let mut chains = Vec::new();
         let mut referenced = Vec::new();
         for query in package.queries() {
             query.hir.collect_resolved_tables(&mut resolved);
             query.hir.collect_resolved_attributes(&mut attrs);
+            query.hir.collect_dereference_chains(&mut chains);
             query.hir.collect_referenced_objects(&mut referenced);
         }
+        let dereferenced = resolve_dereference_chains(db, module.file_id, chains, &mut attrs);
         // An object named by `ЗНАЧЕНИЕ`/`ВЫРАЗИТЬ` is a read only when the configuration
         // declares it; the declared spelling joins the FROM tables below.
         let named = referenced.into_iter().filter_map(|(mdo_type, name)| {
@@ -903,11 +906,69 @@ pub(crate) fn collect_module_query_refs(
                 }
                 sdbl_hir::ResolvedTable::TempTable { .. } => None,
             })
+            .chain(dereferenced)
             .chain(named)
             .collect();
         sites.push(QueryRefSite { from, tables, attrs });
     }
     ModuleQueryRefs { sites }
+}
+
+/// Follow each dereference chain through the configuration: every object it passes is
+/// read, and every declared attribute it names is read. A standard attribute (`Код`,
+/// `Ссылка`, `Родитель`) is not a declared read, the same as on the first hop, but a
+/// standard reference still leads on. A hop stops the chain when the object is not
+/// declared, when the name is none of its attributes (a tabular section), or when the
+/// attribute is not a single reference type, directly or through a defined type, the
+/// next name could belong to.
+fn resolve_dereference_chains(
+    db: &dyn crate::configs::ConfigsDatabase,
+    file_id: FileId,
+    chains: Vec<(MdoType, String, Vec<String>)>,
+    attrs: &mut Vec<(MdoType, String, String)>,
+) -> Vec<(MdoType, String)> {
+    use bsl_metadata::{is_standard_attribute_name, AttributeType};
+
+    let resolver = crate::sdbl_cache::DbSdblResolver::new(db, file_id);
+    let mut tables = Vec::new();
+    for (mut mdo_type, mut name, hops) in chains {
+        for hop in hops {
+            let Some(object) = db.resolve_metadata_object(file_id, mdo_type, &name) else {
+                break;
+            };
+            tables.push((mdo_type, object.name.clone()));
+            let Some(attribute) = object.attributes.iter().find(|attribute| {
+                stdx::case::eq_ignore_case(&attribute.name, &hop)
+                    || attribute
+                        .name_en
+                        .as_deref()
+                        .is_some_and(|name_en| stdx::case::eq_ignore_case(name_en, &hop))
+            }) else {
+                break;
+            };
+            let is_standard = is_standard_attribute_name(&attribute.name)
+                || attribute.name_en.as_deref().is_some_and(is_standard_attribute_name);
+            if !is_standard {
+                attrs.push((mdo_type, object.name.clone(), attribute.name.clone()));
+            }
+            let next = match &attribute.attr_type {
+                AttributeType::DefinedType { name } => bsl_metadata::resolve_defined_type_terminal(
+                    &resolver,
+                    name,
+                    &mut std::collections::HashSet::new(),
+                ),
+                other => Some(other.clone()),
+            };
+            match next {
+                Some(AttributeType::Ref { mdo_type: next_type, name: next_name }) => {
+                    mdo_type = next_type;
+                    name = next_name;
+                }
+                _ => break,
+            }
+        }
+    }
+    tables
 }
 
 /// Project collected query reads ([`collect_module_query_refs`]) into `query_ref`
