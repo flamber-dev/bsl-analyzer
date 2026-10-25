@@ -2338,6 +2338,56 @@ fn collect_resolved_attributes_first_hop_skips_standard() {
     );
 }
 
+/// `ЗНАЧЕНИЕ(...)` and `ВЫРАЗИТЬ(... КАК ...)` name metadata objects outside the FROM
+/// clause; a typical warehouse query compares a series with
+/// `ЗНАЧЕНИЕ(Справочник.СерииНоменклатуры.ПустаяСсылка)` and casts a package with
+/// `ВЫРАЗИТЬ(Т.Упаковка КАК Справочник.УпаковкиЕдиницыИзмерения)`. A value that is not a
+/// metadata object (`ВидДвиженияНакопления.Приход`) names nothing.
+#[test]
+fn collect_referenced_objects_names_value_and_cast_targets() {
+    use crate::hir::SdblHir;
+    use bsl_metadata::MdoType;
+
+    let code = "ВЫБРАТЬ ВЫРАЗИТЬ(Т.Упаковка КАК Справочник.УпаковкиЕдиницыИзмерения) КАК Упаковка \
+                ИЗ Документ.Заказ.Товары КАК Т \
+                ГДЕ Т.Серия <> ЗНАЧЕНИЕ(Справочник.СерииНоменклатуры.ПустаяСсылка) \
+                  И Т.Ссылка.ВидДвижения = ЗНАЧЕНИЕ(ВидДвиженияНакопления.Приход) \
+                  И Т.Номенклатура В (ВЫБРАТЬ Н.Ссылка ИЗ Справочник.Номенклатура КАК Н \
+                    ГДЕ Н.ТипНоменклатуры = ЗНАЧЕНИЕ(Перечисление.ТипыНоменклатуры.Товар))";
+    let package = lower_sdbl_to_hir(&parser::parse_sdbl(code), None);
+    let mut objects: Vec<(MdoType, String)> = Vec::new();
+    for query in package.queries() {
+        SdblHir::collect_referenced_objects(&query.hir, &mut objects);
+    }
+    objects.sort();
+    let mut expected = vec![
+        (MdoType::Catalog, "УпаковкиЕдиницыИзмерения".to_string()),
+        (MdoType::Catalog, "СерииНоменклатуры".to_string()),
+        (MdoType::Enum, "ТипыНоменклатуры".to_string()),
+    ];
+    expected.sort();
+    assert_eq!(objects, expected);
+}
+
+/// A cast dereferenced through parentheses, `(ВЫРАЗИТЬ(... КАК Справочник.X)).Поле`, still
+/// names `Справочник.X`, while the column keeps the unknown type of the member it reads.
+#[test]
+fn collect_referenced_objects_names_parenthesized_cast_target() {
+    use crate::hir::SdblHir;
+    use bsl_metadata::MdoType;
+
+    let code = "ВЫБРАТЬ (ВЫРАЗИТЬ(Т.Упаковка КАК Справочник.УпаковкиЕдиницыИзмерения)).Наименование КАК Н \
+                ИЗ Документ.Заказ.Товары КАК Т";
+    let package = lower_sdbl_to_hir(&parser::parse_sdbl(code), None);
+    let mut objects: Vec<(MdoType, String)> = Vec::new();
+    for query in package.queries() {
+        SdblHir::collect_referenced_objects(&query.hir, &mut objects);
+    }
+    assert_eq!(objects, vec![(MdoType::Catalog, "УпаковкиЕдиницыИзмерения".to_string())]);
+    let field = &package.queries()[0].hir.select.fields[0];
+    assert_eq!(field.expr.ty(), &crate::types::SdblType::Unknown);
+}
+
 /// A virtual-table field reads the resource it is derived from. The shape is the one a
 /// typical warehouse configuration writes (`ТоварыНаСкладах.Остатки(...).ВНаличииОстаток`):
 /// the read must link to the declared resource `ВНаличии`, not to a `ВНаличииОстаток` the

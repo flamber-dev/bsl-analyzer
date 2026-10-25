@@ -1906,18 +1906,29 @@ fn rls_condition_objects(
     }
 
     let mut resolved = Vec::new();
+    let mut referenced = Vec::new();
     for query in package.queries() {
         query.hir.collect_resolved_tables(&mut resolved);
+        query.hir.collect_referenced_objects(&mut referenced);
     }
+    let tables = resolved.into_iter().filter_map(|table| match table {
+        sdbl_hir::ResolvedTable::Metadata { mdo_type, name, .. }
+        | sdbl_hir::ResolvedTable::Register { mdo_type, name, .. } => {
+            Some((*mdo_type, name.clone()))
+        }
+        sdbl_hir::ResolvedTable::TempTable { .. } => None,
+    });
+    // An object named by `ЗНАЧЕНИЕ`/`ВЫРАЗИТЬ` is read only when the configuration declares it.
+    let named = referenced.into_iter().filter_map(|(mdo_type, name)| {
+        config
+            .as_ref()?
+            .find_metadata_object(mdo_type, &name)
+            .map(|object| (mdo_type, object.name.clone()))
+    });
     let parent_lower = parent_name.fold_lower();
     let mut out = Vec::new();
     let mut seen: FxHashSet<(MdoType, String)> = FxHashSet::default();
-    for table in resolved {
-        let (mdo_type, name) = match table {
-            sdbl_hir::ResolvedTable::Metadata { mdo_type, name, .. }
-            | sdbl_hir::ResolvedTable::Register { mdo_type, name, .. } => (*mdo_type, name.clone()),
-            sdbl_hir::ResolvedTable::TempTable { .. } => continue,
-        };
+    for (mdo_type, name) in tables.chain(named) {
         // Skip the wrapper's own FROM table (the restricted object) — already linked directly.
         if mdo_type == parent_type && name.fold_lower() == parent_lower {
             continue;
@@ -2632,6 +2643,17 @@ mod role_rls_tests {
     fn rls_recovers_subquery_object_and_excludes_parent() {
         let found = objs("Контрагенты.Ссылка В (ВЫБРАТЬ Ссылка ИЗ Справочник.Организации)");
         // The subquery object is recovered; the wrapper's own FROM (the parent) is excluded.
+        assert_eq!(found, vec![(MdoType::Catalog, "Организации".to_string())]);
+    }
+
+    #[test]
+    fn rls_recovers_value_and_cast_objects() {
+        // An object named by `ЗНАЧЕНИЕ` or `ВЫРАЗИТЬ` is read like a subquery table; an
+        // undeclared one and the restricted object itself are not.
+        let found = objs(
+            "Контрагенты.Организация <> ЗНАЧЕНИЕ(Справочник.организации.ПустаяСсылка) \
+             И ВЫРАЗИТЬ(Контрагенты.Ссылка КАК Справочник.Контрагенты) <> ЗНАЧЕНИЕ(Справочник.Пропавший.ПустаяСсылка)",
+        );
         assert_eq!(found, vec![(MdoType::Catalog, "Организации".to_string())]);
     }
 
