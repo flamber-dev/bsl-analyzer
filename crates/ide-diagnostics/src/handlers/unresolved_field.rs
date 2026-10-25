@@ -623,6 +623,86 @@ mod tests {
         );
     }
 
+    /// A system enumeration lists exactly the values the platform defines, so a value it
+    /// does not have fails at run time ("Поле объекта не обнаружено") and is a defect of the
+    /// checked code, not a gap in the corpus. The valid values, the English spelling and a
+    /// different letter case must stay silent.
+    #[test]
+    fn a_miss_on_a_system_enumeration_value_is_reported() {
+        if !crate::test_utils::built_in_facts_are_served() {
+            return;
+        }
+        let code = r#"Процедура Тест()
+    Р = РежимДиалогаВопрос.НетТакогоЗначения;
+КонецПроцедуры"#;
+        let unresolved = unresolved_fields(code);
+        assert_eq!(unresolved.len(), 1, "expected one miss on the enum, got: {unresolved:?}");
+        assert!(
+            unresolved[0].message.contains("НетТакогоЗначения"),
+            "message must name the missing value, got: {}",
+            unresolved[0].message
+        );
+
+        let valid = r#"Процедура Тест()
+    А = РежимДиалогаВопрос.ДаНет;
+    Б = режимдиалогавопрос.даНет;
+    В = QuestionDialogMode.YesNo;
+КонецПроцедуры"#;
+        assert!(
+            unresolved_fields(valid).is_empty(),
+            "existing values must never be reported: {:?}",
+            unresolved_fields(valid)
+        );
+    }
+
+    /// `Символы` is a closed set of characters like a system enumeration: a name it does
+    /// not have is a run-time failure.
+    #[test]
+    fn a_miss_on_the_characters_collection_is_reported() {
+        if !crate::test_utils::built_in_facts_are_served() {
+            return;
+        }
+        let code = r#"Процедура Тест()
+    С = Символы.НетТакогоСимвола;
+КонецПроцедуры"#;
+        let unresolved = unresolved_fields(code);
+        assert_eq!(unresolved.len(), 1, "expected one miss on the characters, got: {unresolved:?}");
+        assert!(
+            unresolved[0].message.contains("НетТакогоСимвола"),
+            "message must name the missing member, got: {}",
+            unresolved[0].message
+        );
+
+        let valid = r#"Процедура Тест()
+    А = Символы.ПС;
+    Б = Символы.ВК;
+    В = символы.пс;
+    Г = Chars.LF;
+КонецПроцедуры"#;
+        assert!(
+            unresolved_fields(valid).is_empty(),
+            "existing members must never be reported: {:?}",
+            unresolved_fields(valid)
+        );
+    }
+
+    /// Only an attested enumeration is judged: the configuration's style items are values of
+    /// `ЦветаСтиля`, `ШрифтыСтиля` and `РамкиСтиля` that no platform list can contain, so a
+    /// read of one is never a miss.
+    #[test]
+    fn style_item_collections_stay_open() {
+        let code = r#"Процедура Тест()
+    А = ЦветаСтиля.ЛюбойЭлементСтиляКонфигурации;
+    Б = ШрифтыСтиля.ЛюбойШрифтКонфигурации;
+    В = РамкиСтиля.ЛюбаяРамкаКонфигурации;
+КонецПроцедуры"#;
+        assert!(
+            unresolved_fields(code).is_empty(),
+            "style items belong to the configuration: {:?}",
+            unresolved_fields(code)
+        );
+    }
+
     /// The gate: without an attestation the extract is not known to list every member,
     /// so the very same kind of miss proves nothing and stays silent. The receiver here
     /// is the spreadsheet document itself, whose surface is deliberately not attested —

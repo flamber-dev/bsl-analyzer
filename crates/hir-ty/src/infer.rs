@@ -2470,6 +2470,20 @@ impl<'db> InferenceContext<'db> {
             && !platform.is_ambiguous_type_name(&name)
     }
 
+    /// A system enumeration (`РежимДиалогаВопрос`, `Символы`) whose value list is attested as
+    /// complete. The bare name denotes it on every path, since the platform names it globally
+    /// and a local of that name is a different receiver, and a value it lacks fails at run
+    /// time instead of reading as an unknown shape.
+    fn is_attested_system_enum(&self, ty: TypeId) -> bool {
+        let TypeKind::PlatformObject(facet) = self.db.lookup_type(ty) else {
+            return false;
+        };
+        bsl_platform::PlatformGlobalCatalog::instance()
+            .lookup(&facet.name)
+            .is_some_and(|symbol| symbol.kind == bsl_platform::PlatformGlobalKind::SystemEnum)
+            && self.is_closed_platform_object(ty)
+    }
+
     /// The platform type name a receiver answers to when its member surface may be judged
     /// against the attestations: a platform object by its own name, and a value table, which
     /// the walk keeps as a kind of its own to carry its columns, by the platform type it is.
@@ -2612,11 +2626,13 @@ impl<'db> InferenceContext<'db> {
                 }
                 let key = name.as_str().fold_lower();
                 if !self.body_writes_name(name, &key) {
-                    // Not a local: only the configuration root is the same on every path,
-                    // unless the walk trusts the value's own inferred type.
+                    // Not a local: only the configuration root and an attested system
+                    // enumeration, which the platform names globally, are the same on every
+                    // path, unless the walk trusts the value's own inferred type.
                     let ty = self.expr_types.get(&expr).copied()?;
                     return (walk.inferred_leaves
-                        || crate::field_lookup::is_configuration_metadata_root(self.db, ty))
+                        || crate::field_lookup::is_configuration_metadata_root(self.db, ty)
+                        || self.is_attested_system_enum(ty))
                     .then(|| vec![ty]);
                 }
                 let use_stmt = self.body.enclosing_stmt(expr)?;
