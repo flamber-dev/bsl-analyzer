@@ -3385,6 +3385,72 @@ fn test_workspace_call_graph_query_ref_links_method_to_mdo() {
     assert!(!qref.crosses_client_to_server);
 }
 
+/// A query that names an object only through `ЗНАЧЕНИЕ` or `ВЫРАЗИТЬ` reads it: the
+/// method gets a `query_ref` edge to each declared object it names that way, and none to
+/// an object the configuration does not declare.
+#[test]
+fn test_workspace_call_graph_query_ref_links_value_and_cast_objects() {
+    use bsl_metadata::MdoType;
+    use hir::call_graph::{EdgeKind, GraphNode};
+    use hir::ConfigsDatabase;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("src/cf");
+    std::fs::create_dir_all(root.join("Catalogs")).unwrap();
+    std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+    for (index, name) in
+        ["Номенклатура", "СерииНоменклатуры", "УпаковкиЕдиницыИзмерения"].into_iter().enumerate()
+    {
+        std::fs::write(
+            root.join(format!("Catalogs/{name}.xml")),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-00000000000{index}">
+        <Properties>
+            <Name>{name}</Name>
+        </Properties>
+    </Catalog>
+</MetaDataObject>"#
+            ),
+        )
+        .unwrap();
+    }
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![(None, root.clone())], None);
+
+    let file_id = FileId(0);
+    let file_path = root.join("CommonModules/Отчеты/Ext/Module.bsl");
+    let mut file_set = FileSet::new();
+    file_set.insert(file_id, VfsPath::new(file_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file_id, SourceRootId(0));
+    db.set_file_text(
+        file_id,
+        "Процедура Считать() Экспорт\n\
+         Запрос = \"ВЫБРАТЬ ВЫРАЗИТЬ(Н.Ссылка КАК Справочник.УпаковкиЕдиницыИзмерения) КАК У \
+         ИЗ Справочник.Номенклатура КАК Н \
+         ГДЕ Н.Ссылка <> ЗНАЧЕНИЕ(Справочник.СерииНоменклатуры.ПустаяСсылка) \
+         И Н.Ссылка <> ЗНАЧЕНИЕ(Справочник.Пропавший.ПустаяСсылка)\";\n\
+         КонецПроцедуры",
+    );
+
+    let graph = db.workspace_call_graph(SourceRootId(0));
+    let mut read: Vec<String> = graph
+        .edges()
+        .filter(|e| e.kind == EdgeKind::QueryRef)
+        .filter_map(|e| match &e.to {
+            GraphNode::Mdo { mdo_type: MdoType::Catalog, object_name } => {
+                Some(object_name.as_str().to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    read.sort();
+    assert_eq!(read, ["Номенклатура", "СерииНоменклатуры", "УпаковкиЕдиницыИзмерения"]);
+}
+
 /// Golden equivalence: building the whole-config graph through the resident
 /// `GraphIndex` (the streaming-build path) must produce byte-for-byte the same
 /// `WorkspaceCallGraph` as the monolithic Salsa fold, AND the same per-module

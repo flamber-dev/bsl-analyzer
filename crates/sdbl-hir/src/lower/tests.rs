@@ -2338,6 +2338,37 @@ fn collect_resolved_attributes_first_hop_skips_standard() {
     );
 }
 
+/// `ЗНАЧЕНИЕ(...)` and `ВЫРАЗИТЬ(... КАК ...)` name metadata objects outside the FROM
+/// clause; a typical warehouse query compares a series with
+/// `ЗНАЧЕНИЕ(Справочник.СерииНоменклатуры.ПустаяСсылка)` and casts a package with
+/// `ВЫРАЗИТЬ(Т.Упаковка КАК Справочник.УпаковкиЕдиницыИзмерения)`. A value that is not a
+/// metadata object (`ВидДвиженияНакопления.Приход`) names nothing.
+#[test]
+fn collect_referenced_objects_names_value_and_cast_targets() {
+    use crate::hir::SdblHir;
+    use bsl_metadata::MdoType;
+
+    let code = "ВЫБРАТЬ ВЫРАЗИТЬ(Т.Упаковка КАК Справочник.УпаковкиЕдиницыИзмерения) КАК Упаковка \
+                ИЗ Документ.Заказ.Товары КАК Т \
+                ГДЕ Т.Серия <> ЗНАЧЕНИЕ(Справочник.СерииНоменклатуры.ПустаяСсылка) \
+                  И Т.Ссылка.ВидДвижения = ЗНАЧЕНИЕ(ВидДвиженияНакопления.Приход) \
+                  И Т.Номенклатура В (ВЫБРАТЬ Н.Ссылка ИЗ Справочник.Номенклатура КАК Н \
+                    ГДЕ Н.ТипНоменклатуры = ЗНАЧЕНИЕ(Перечисление.ТипыНоменклатуры.Товар))";
+    let package = lower_sdbl_to_hir(&parser::parse_sdbl(code), None);
+    let mut objects: Vec<(MdoType, String)> = Vec::new();
+    for query in package.queries() {
+        SdblHir::collect_referenced_objects(&query.hir, &mut objects);
+    }
+    objects.sort();
+    let mut expected = vec![
+        (MdoType::Catalog, "УпаковкиЕдиницыИзмерения".to_string()),
+        (MdoType::Catalog, "СерииНоменклатуры".to_string()),
+        (MdoType::Enum, "ТипыНоменклатуры".to_string()),
+    ];
+    expected.sort();
+    assert_eq!(objects, expected);
+}
+
 fn unknown_fields(package: &crate::SdblPackage) -> Vec<String> {
     package
         .all_diagnostics()

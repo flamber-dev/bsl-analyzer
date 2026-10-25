@@ -882,10 +882,18 @@ pub(crate) fn collect_module_query_refs(
         };
         let mut resolved = Vec::new();
         let mut attrs = Vec::new();
+        let mut referenced = Vec::new();
         for query in package.queries() {
             query.hir.collect_resolved_tables(&mut resolved);
             query.hir.collect_resolved_attributes(&mut attrs);
+            query.hir.collect_referenced_objects(&mut referenced);
         }
+        // An object named by `ЗНАЧЕНИЕ`/`ВЫРАЗИТЬ` is a read only when the configuration
+        // declares it; the declared spelling joins the FROM tables below.
+        let named = referenced.into_iter().filter_map(|(mdo_type, name)| {
+            db.resolve_metadata_object(module.file_id, mdo_type, &name)
+                .map(|object| (mdo_type, object.name.clone()))
+        });
         let tables = resolved
             .into_iter()
             .filter_map(|table| match table {
@@ -895,6 +903,7 @@ pub(crate) fn collect_module_query_refs(
                 }
                 sdbl_hir::ResolvedTable::TempTable { .. } => None,
             })
+            .chain(named)
             .collect();
         sites.push(QueryRefSite { from, tables, attrs });
     }
