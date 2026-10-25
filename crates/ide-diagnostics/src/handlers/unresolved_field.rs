@@ -686,6 +686,40 @@ mod tests {
         );
     }
 
+    /// A global export shadows the platform's global names, so while a global module body
+    /// is unread the bare name may denote that export instead of the enumeration, and a
+    /// miss on it proves nothing. The readable control shows the same read is reported once
+    /// the whole global surface is known.
+    #[test]
+    fn an_unread_global_body_leaves_a_system_enumeration_miss_unjudged() {
+        use crate::test_utils::check_with_cfe_unreadable;
+        if !crate::test_utils::built_in_facts_are_served() {
+            return;
+        }
+        let code = "Процедура Тест() Экспорт\n    С = Символы.НетТакогоСимвола;\nКонецПроцедуры";
+        let fixture = || {
+            let mut builder = test_fixture::CfeFixtureBuilder::new("");
+            builder.add_base_module_global("Глобальный", "Процедура П() Экспорт КонецПроцедуры");
+            builder.build()
+        };
+        let misses = |unreadable: &[&str]| -> Vec<_> {
+            check_with_cfe_unreadable(code, fixture(), unreadable)
+                .into_iter()
+                .filter(|d| d.code == DiagnosticCode::UnresolvedField)
+                .collect()
+        };
+
+        let control = misses(&[]);
+        assert_eq!(
+            control.len(),
+            1,
+            "control: a known global surface judges the miss: {control:?}"
+        );
+
+        let unread = misses(&["CommonModules/Глобальный/Ext/Module.bsl"]);
+        assert!(unread.is_empty(), "an unread global body may export the name: {unread:?}");
+    }
+
     /// Only an attested enumeration is judged: the configuration's style items are values of
     /// `ЦветаСтиля`, `ШрифтыСтиля` and `РамкиСтиля` that no platform list can contain, so a
     /// read of one is never a miss.

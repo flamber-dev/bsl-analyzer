@@ -2473,8 +2473,12 @@ impl<'db> InferenceContext<'db> {
     /// A system enumeration (`РежимДиалогаВопрос`, `Символы`) whose value list is attested as
     /// complete. The bare name denotes it on every path, since the platform names it globally
     /// and a local of that name is a different receiver, and a value it lacks fails at run
-    /// time instead of reading as an unknown shape.
+    /// time instead of reading as an unknown shape. An unread global body may export that
+    /// name and shadow the enumeration, so then the bare name denotes nothing certain.
     fn is_attested_system_enum(&self, ty: TypeId) -> bool {
+        if self.global_surface_partly_unknown {
+            return false;
+        }
         let TypeKind::PlatformObject(facet) = self.db.lookup_type(ty) else {
             return false;
         };
