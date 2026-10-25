@@ -772,6 +772,13 @@ fn answer_from_the_reloaded_baseline(state: &mut GlobalState) {
 fn handle_idle_tick(state: &mut GlobalState) {
     state.idle_ticks = state.idle_ticks.saturating_add(1);
 
+    // A job parked on a disk change the watcher never delivered is retried at this cadence:
+    // nothing else would move the revision it waits on.
+    if let Some(plan) = state.workspace_batch_plan.as_mut() {
+        plan.parked_at = None;
+    }
+    state.shared_metadata_warm_parked_at = None;
+
     // Ref-only git movement (fetch/rebase/reset) produces no file events; the
     // idle tick is the only place that notices it.
     state.check_scope_ref_drift();
@@ -1351,9 +1358,16 @@ pub(crate) fn handle_task(state: &mut GlobalState, task: crate::global_state::Ta
             tracing::debug!(cancelled, "shared editor storage metadata warm-up ended");
             state.shared_metadata_warm_in_flight = false;
             // What it had parsed before the write stays memoised, so another run continues
-            // from there.
+            // from there. A cancel no write explains is a disk read that drifted from its
+            // revision: another run unwinds the same way until the change is applied, so it
+            // waits for the revision to move (or for an idle tick) instead of restarting at
+            // once.
             if cancelled {
                 state.shared_metadata_warm_pending = true;
+                let revision = state.analysis_host.request_revision();
+                if state.shared_metadata_warm_revision == Some(revision) {
+                    state.shared_metadata_warm_parked_at = Some(revision);
+                }
             }
             state.start_shared_metadata_warmup();
         }
@@ -1913,11 +1927,21 @@ fn apply_workspace_batch_completion(
     }
 
     match outcome {
-        // A concurrent edit cancelled this chunk. Keep the plan and cursor; the
-        // bottom-of-loop dispatch retries the SAME chunk once the edit settles. Salsa
-        // memoization resumes it cheaply. `PendingWrite` is transient, so this cannot
-        // loop forever — a deterministic unwind arrives as `Failed` instead.
-        WorkspaceBatchOutcome::Cancelled => Ok(()),
+        // A concurrent edit cancelled this chunk, or a file changed on disk under analysis
+        // (`PendingWrite`). Keep the plan and cursor; the bottom-of-loop dispatch retries
+        // the SAME chunk once the edit settles. Salsa memoization resumes it cheaply. A write
+        // cancels a job and then starts a new revision, so a cut with the revision unchanged
+        // since dispatch was not an edit's: a re-dispatch now would unwind the same way, so
+        // the chunk is parked until the revision moves (the change applied) or an idle tick
+        // lifts it. Never skipped: its files are owed diagnostics of the text on disk.
+        WorkspaceBatchOutcome::Cancelled => {
+            let revision = state.analysis_host.request_revision();
+            let plan = state.workspace_batch_plan.as_mut().expect("plan present after gate");
+            if plan.dispatched_revision == revision {
+                plan.parked_at = Some(revision);
+            }
+            Ok(())
+        }
         // Ambiguous under parallelism: a transient edit-cancellation cascade (retry) or a
         // real deterministic panic in a shared query (skip). Disambiguate by budget — retry
         // a few times, and if it keeps unwinding treat it as deterministic and skip.
@@ -6602,6 +6626,8 @@ mod tests {
             mem_budget_mb: 0,
             chunks_since_trim: 0,
             chunk_retries: 0,
+            dispatched_revision: state.analysis_host.request_revision(),
+            parked_at: None,
             started_at: std::time::Instant::now(),
             analysis_guard,
         });
@@ -6890,6 +6916,100 @@ mod tests {
         let chunk = current_chunk(&state, Vec::new());
         handle_task(&mut state, chunk).unwrap();
         assert!(state.workspace_batch_plan.is_none(), "the sweep finalizes after the last chunk");
+    }
+
+    /// A cut that leaves the revision where the chunk was dispatched is a disk read that
+    /// drifted from its revision: a re-dispatch at once would unwind the same way, so the
+    /// chunk waits until the revision moves or an idle tick lifts the wait — and is never
+    /// skipped, however many such cuts come. An edit's cut moved the revision and is retried
+    /// at once.
+    #[test]
+    fn workspace_batch_cut_no_write_explains_waits_and_is_never_skipped() {
+        use crate::handlers::workspace_batch::workspace_batch_parked;
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+        install_test_plan(&mut state, 2);
+        let gen = state.workspace_batch_generation;
+        let cancelled = || Task::WorkspaceBatchChunk {
+            generation: gen,
+            outcome: crate::global_state::WorkspaceBatchOutcome::Cancelled,
+        };
+        let next_chunk = |state: &crate::global_state::GlobalState| {
+            state.workspace_batch_plan.as_ref().expect("plan active").next_chunk
+        };
+        // What a dispatch records; every cut answers the dispatch before it.
+        let dispatched = |state: &mut crate::global_state::GlobalState| {
+            let revision = state.analysis_host.request_revision();
+            let plan = state.workspace_batch_plan.as_mut().expect("plan active");
+            plan.dispatched_revision = revision;
+            plan.parked_at = None;
+        };
+        let edit = |state: &mut crate::global_state::GlobalState| {
+            state.analysis_host.raw_database_mut().set_workspace_load_complete(true);
+        };
+
+        dispatched(&mut state);
+        edit(&mut state);
+        handle_task(&mut state, cancelled()).unwrap();
+        assert!(!workspace_batch_parked(&state), "an edit's cut is retried at once");
+
+        for _ in 0..10 {
+            dispatched(&mut state);
+            handle_task(&mut state, cancelled()).unwrap();
+            assert!(workspace_batch_parked(&state), "a cut no write explains waits");
+            assert_eq!(next_chunk(&state), 0, "and its chunk is never skipped");
+        }
+        edit(&mut state);
+        assert!(!workspace_batch_parked(&state), "the change applied lifts the wait");
+
+        dispatched(&mut state);
+        handle_task(&mut state, cancelled()).unwrap();
+        assert!(workspace_batch_parked(&state), "control: the chunk waits again");
+        handle_idle_tick(&mut state);
+        assert!(!workspace_batch_parked(&state), "an idle tick lifts the wait");
+        assert_eq!(next_chunk(&state), 0);
+    }
+
+    /// The warm-up's counterpart: a cancellation no write explains asks for another run that
+    /// waits for the revision to move or for an idle tick, and never gives up; a
+    /// cancellation after an edit runs again at once.
+    #[test]
+    fn a_metadata_warmup_cancelled_without_a_write_waits_and_is_never_dropped() {
+        use crate::global_state::Task;
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+        let started = |state: &mut crate::global_state::GlobalState| {
+            state.shared_metadata_warm_revision = Some(state.analysis_host.request_revision());
+            state.shared_metadata_warm_parked_at = None;
+            state.shared_metadata_warm_in_flight = true;
+            state.shared_metadata_warm_pending = false;
+        };
+        let cancelled = |state: &mut crate::global_state::GlobalState| {
+            handle_task(state, Task::SharedMetadataWarmed { cancelled: true }).unwrap();
+            assert!(state.shared_metadata_warm_pending, "a cancelled warm-up asks for another");
+        };
+        let edit = |state: &mut crate::global_state::GlobalState| {
+            state.analysis_host.raw_database_mut().set_workspace_load_complete(true);
+        };
+
+        started(&mut state);
+        edit(&mut state);
+        cancelled(&mut state);
+        assert!(!state.shared_metadata_warm_parked(), "an edit's cancel runs again at once");
+
+        for _ in 0..10 {
+            started(&mut state);
+            cancelled(&mut state);
+            assert!(state.shared_metadata_warm_parked(), "a cancel no write explains waits");
+        }
+        edit(&mut state);
+        assert!(!state.shared_metadata_warm_parked(), "the change applied lifts the wait");
+
+        started(&mut state);
+        cancelled(&mut state);
+        assert!(state.shared_metadata_warm_parked(), "control: the warm-up waits again");
+        handle_idle_tick(&mut state);
+        assert!(!state.shared_metadata_warm_parked(), "an idle tick lifts the wait");
     }
 
     #[test]

@@ -309,6 +309,13 @@ pub struct WorkspaceBatchPlan {
     /// so the chunk is retried up to a budget and then skipped. Reset when the cursor
     /// advances (a computed or skipped chunk).
     pub chunk_retries: u32,
+    /// The revision the current chunk was dispatched at. A `PendingWrite` cut after which it
+    /// still holds was not an edit's: the retry would compute the same thing again.
+    pub dispatched_revision: salsa::Revision,
+    /// Set by such a cut: the chunk waits for the revision to move from this one — the
+    /// disk change applied — instead of being re-dispatched at once. An idle tick lifts it,
+    /// so a change the watcher never delivers is retried at the idle cadence, not spun on.
+    pub parked_at: Option<salsa::Revision>,
     pub started_at: std::time::Instant,
     /// Held for the batch's whole lifetime so the "Analyzing" indicator shows once for
     /// the sweep rather than flickering per chunk; dropped when the plan is cleared.
@@ -398,6 +405,13 @@ pub struct GlobalState {
     pub(crate) shared_metadata_warm_in_flight: bool,
     /// The current editor storage still wants a metadata warm-up started.
     pub(crate) shared_metadata_warm_pending: bool,
+    /// The revision the in-flight (or last) metadata warm-up started at.
+    pub(crate) shared_metadata_warm_revision: Option<salsa::Revision>,
+    /// Set when a warm-up was cancelled with the revision unchanged since it started — a
+    /// disk read that drifted from its revision, which unwinds the same way until the
+    /// change is applied. The next warm-up waits for the revision to move from this one,
+    /// or for an idle tick, instead of restarting at once.
+    pub(crate) shared_metadata_warm_parked_at: Option<salsa::Revision>,
     pub(crate) shared_request_generation: u64,
     pub(crate) shared_owner_generation: Option<u64>,
     pub(crate) shared_configuration_error: Option<String>,
@@ -687,6 +701,8 @@ impl GlobalState {
             shared_metadata_warmups: 0,
             shared_metadata_warm_in_flight: false,
             shared_metadata_warm_pending: false,
+            shared_metadata_warm_revision: None,
+            shared_metadata_warm_parked_at: None,
             shared_request_generation: 0,
             shared_owner_generation: None,
             shared_configuration_error: None,
@@ -1134,6 +1150,7 @@ impl GlobalState {
     /// event loop starts it once neither holds ([`Self::start_shared_metadata_warmup`]).
     pub(crate) fn warm_shared_view_metadata(&mut self) {
         self.shared_metadata_warm_pending = true;
+        self.shared_metadata_warm_parked_at = None;
         self.start_shared_metadata_warmup();
     }
 
@@ -1145,17 +1162,30 @@ impl GlobalState {
         {
             return;
         }
+        if self.shared_metadata_warm_parked() {
+            return;
+        }
+        self.shared_metadata_warm_parked_at = None;
         let analysis = self.analysis_host.analysis();
+        let revision = salsa::plumbing::current_revision(analysis.database());
         let analysis_guard = self.note_analysis_spawned();
         let spawned = self.task_pool.pool.try_spawn(move || {
             let _analysis_guard = analysis_guard;
             shared_metadata_warmup(|| analysis.warm_configuration_inventory())
         });
         if spawned.is_ok() {
+            self.shared_metadata_warm_revision = Some(revision);
             self.shared_metadata_warmups += 1;
             self.shared_metadata_warm_in_flight = true;
             self.shared_metadata_warm_pending = false;
         }
+    }
+
+    /// Whether the next warm-up waits for the revision to move — see
+    /// [`Self::shared_metadata_warm_parked_at`].
+    pub(crate) fn shared_metadata_warm_parked(&self) -> bool {
+        self.shared_metadata_warm_parked_at
+            .is_some_and(|parked_at| parked_at == self.analysis_host.request_revision())
     }
 
     pub(crate) fn schedule_shared_seed(&mut self) {
@@ -1228,8 +1258,9 @@ impl GlobalState {
 ///
 /// The event loop keeps one warm-up in flight and learns that it ended only from this
 /// report: a warm-up that unwound without one would hold every later warm-up back for the
-/// rest of the session. Only a cancellation asks for another run; a warm-up that failed
-/// otherwise would fail the same way again, and the analysis loads what it needs itself.
+/// rest of the session. Only a cancellation — a concurrent edit, or a file changed on disk
+/// under analysis (`PendingWrite`) — asks for another run; a warm-up that failed otherwise
+/// would fail the same way again, and the analysis loads what it needs itself.
 pub(crate) fn shared_metadata_warmup(warm: impl FnOnce()) -> Task {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(warm)) {
         Ok(()) => Task::SharedMetadataWarmed { cancelled: false },

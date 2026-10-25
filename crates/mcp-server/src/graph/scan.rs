@@ -56,8 +56,7 @@ impl FileStat {
     /// the metadata fallback exists only for synthetic diagnostic fixtures and for
     /// reporting an unreadable file as changed rather than silently unchanged.
     pub(crate) fn fingerprint(&self) -> u64 {
-        let hash = self.persisted_content_hash();
-        u64::from_le_bytes(hash[..8].try_into().expect("blake3 yields >= 8 bytes"))
+        digest_fingerprint(&self.persisted_content_hash())
     }
 
     /// The complete BLAKE3 digest used by the portable graph fingerprint. It is
@@ -96,6 +95,15 @@ impl FileStat {
     pub(crate) fn key(&self, roots: &bsl_search::WorkspaceRoots) -> Option<bsl_search::FileKey> {
         roots.root_of(&self.walked, &self.canonical)
     }
+}
+
+/// The fingerprint [`FileStat::fingerprint`] gives a readable file holding `bytes`.
+pub(crate) fn fingerprint_of_bytes(bytes: &[u8]) -> u64 {
+    digest_fingerprint(blake3::hash(bytes).as_bytes())
+}
+
+fn digest_fingerprint(hash: &[u8; 32]) -> u64 {
+    u64::from_le_bytes(hash[..8].try_into().expect("blake3 yields >= 8 bytes"))
 }
 
 /// The drift fingerprint of a single file on disk, matching the per-file value

@@ -1225,12 +1225,13 @@ pub fn handle_workspace_symbol(
         // A module or a metadata object has no declaration node of its own; the
         // file start is where its card is anchored too.
         let range = place.range.unwrap_or_else(|| ide::TextRange::empty(0.into()));
-        // Reading a closed file's text panics when it changed under analysis or
-        // became unreadable — a race this answer walks straight into, since a
-        // name search returns files nobody asked about and metadata XML is
-        // rewritten by the configurator and by git alike. One racing file must
-        // not fail the whole request; a `salsa::Cancelled` is a real abort and
-        // keeps unwinding.
+        // Reading a closed file's text panics when it became unreadable — a race
+        // this answer walks straight into, since a name search returns files
+        // nobody asked about and metadata XML is rewritten by the configurator
+        // and by git alike. One unreadable file must not fail the whole request.
+        // A `salsa::Cancelled` is a real abort and keeps unwinding — including
+        // `PendingWrite` for a file changed on disk under analysis, which retries
+        // the whole request.
         let converted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             converter.convert(IdeLocation { file_id: place.file_id, range })
         }));

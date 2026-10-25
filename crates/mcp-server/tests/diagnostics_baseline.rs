@@ -160,6 +160,23 @@ async fn workspace_until_both_modules(client: &Client) {
     }
 }
 
+/// Replace a watched module in one step: the bytes are written in a directory nobody watches
+/// and renamed over the target. An in-place write truncates first, and a resident reading the
+/// module inside that window records the revision of an empty file while the disk ends up
+/// holding the full text. The rename is the only event on the target path, and the target
+/// appears whole; both temporary directories live under the system temp dir, so the rename
+/// stays on one file system.
+fn replace_module(path: &Path, text: &str) {
+    let staging = tempfile::tempdir().unwrap();
+    let staged = staging.path().join("Module.bsl");
+    std::fs::write(&staged, text).unwrap();
+    std::fs::rename(&staged, path).unwrap();
+}
+
+fn result_id(body: &Value) -> String {
+    body["result"]["result_id"].as_str().expect("a result id").to_owned()
+}
+
 fn args(action: &str) -> Map<String, Value> {
     Map::from_iter([("action".to_owned(), json!(action))])
 }
@@ -230,8 +247,8 @@ async fn baseline_parity_partial_stale_error_recovery_and_cancellation() {
     {
         use std::os::unix::fs::PermissionsExt;
         let source = root.join(first_rel);
-        let original = std::fs::metadata(&source).unwrap().permissions();
-        std::fs::write(&source, format!("{first_body}// drift\n")).unwrap();
+        let before_drift = result_id(&diagnostics(&client, file_args.clone()).await);
+        replace_module(&source, &format!("{first_body}// drift\n"));
         std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o000)).unwrap();
         // Mode bits do not stop a privileged user, and the suite does run as root in
         // CI. Without this check the assertions below would pass vacuously there —
@@ -253,9 +270,20 @@ async fn baseline_parity_partial_stale_error_recovery_and_cancellation() {
             assert_eq!(stale["result"]["baseline"]["resolved"], 0);
         } else {
             eprintln!("skipping the unreadable-file leg: mode 0o000 is not an obstacle here");
+            // Restoring before the drift edit is applied would let the watcher deliver the
+            // two edits as one, or the resident read the restore against the drift's revision.
+            let mut patience =
+                common::Patience::new(common::STATE_CEILING, Duration::from_millis(20));
+            loop {
+                let body = diagnostics(&client, file_args.clone()).await;
+                if result_id(&body) != before_drift {
+                    break;
+                }
+                assert!(patience.allows(), "the resident never applied the drift edit: {body}");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
         }
-        std::fs::set_permissions(&source, original).unwrap();
-        std::fs::write(&source, first_body).unwrap();
+        replace_module(&source, first_body);
     }
 
     std::fs::write(&baseline_path, b"{broken").unwrap();

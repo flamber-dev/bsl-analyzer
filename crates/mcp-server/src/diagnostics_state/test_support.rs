@@ -214,6 +214,21 @@ pub(crate) fn wait_until<T, S: std::fmt::Debug>(
     );
 }
 
+/// Run the first load of `state` to its published outcome by joining the loader, which
+/// returns once the outcome is published: no poll of the status decides when a stand is ready.
+pub(crate) fn join_load(state: &DiagnosticsState) {
+    state
+        .ensure_loading()
+        .expect("the first load starts a build")
+        .join()
+        .expect("the loader finishes");
+    match state.status() {
+        DiagnosticsStatus::Ready { .. } => {}
+        DiagnosticsStatus::Failed(msg) => panic!("diagnostics load failed: {msg}"),
+        other => panic!("the loader ended without publishing a resident: {other:?}"),
+    }
+}
+
 pub(crate) fn wait_ready(state: &DiagnosticsState) {
     wait_until("the diagnostics db becomes ready", || match state.status() {
         DiagnosticsStatus::Ready { .. } => Ok(()),
