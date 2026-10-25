@@ -3385,6 +3385,94 @@ fn test_workspace_call_graph_query_ref_links_method_to_mdo() {
     assert!(!qref.crosses_client_to_server);
 }
 
+/// A query that dereferences past the first hop reads every object and declared
+/// attribute it passes. The shape is a typical warehouse check
+/// (`Товары.ЕдиницаИзмерения.ТипИзмеряемойВеличины` over `Справочник.Номенклатура КАК
+/// Товары`): the method reads `Номенклатура.ЕдиницаИзмерения`, and through it the
+/// package catalog and its `ТипИзмеряемойВеличины`.
+#[test]
+fn test_workspace_call_graph_query_ref_follows_a_dereference_chain() {
+    use bsl_metadata::MdoType;
+    use hir::call_graph::{EdgeKind, GraphNode};
+    use hir::ConfigsDatabase;
+
+    let catalog = |uuid: u8, name: &str, attribute: &str, ty: &str| {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:xs="http://www.w3.org/2001/XMLSchema" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-0000000000{uuid:02}">
+        <Properties>
+            <Name>{name}</Name>
+        </Properties>
+        <ChildObjects>
+            <Attribute uuid="00000000-0000-0000-0000-0000000001{uuid:02}">
+                <Properties>
+                    <Name>{attribute}</Name>
+                    <Type><v8:Type>{ty}</v8:Type></Type>
+                </Properties>
+            </Attribute>
+        </ChildObjects>
+    </Catalog>
+</MetaDataObject>"#
+        )
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("src/cf");
+    std::fs::create_dir_all(root.join("Catalogs")).unwrap();
+    std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+    std::fs::write(
+        root.join("Catalogs/Номенклатура.xml"),
+        catalog(1, "Номенклатура", "ЕдиницаИзмерения", "cfg:CatalogRef.УпаковкиЕдиницыИзмерения"),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("Catalogs/УпаковкиЕдиницыИзмерения.xml"),
+        catalog(2, "УпаковкиЕдиницыИзмерения", "ТипИзмеряемойВеличины", "xs:string"),
+    )
+    .unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![(None, root.clone())], None);
+    let file_id = FileId(0);
+    let file_path = root.join("CommonModules/Отчеты/Ext/Module.bsl");
+    let mut file_set = FileSet::new();
+    file_set.insert(file_id, VfsPath::new(file_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file_id, SourceRootId(0));
+    db.set_file_text(
+        file_id,
+        "Процедура Считать() Экспорт\n\
+         Запрос = \"ВЫБРАТЬ Товары.ЕдиницаИзмерения.ТипИзмеряемойВеличины КАК Тип \
+         ИЗ Справочник.Номенклатура КАК Товары\";\n\
+         КонецПроцедуры",
+    );
+
+    let graph = db.workspace_call_graph(SourceRootId(0));
+    let mut read: Vec<String> = graph
+        .edges()
+        .filter(|e| e.kind == EdgeKind::QueryRef)
+        .map(|e| match &e.to {
+            GraphNode::Mdo { mdo_type: MdoType::Catalog, object_name } => {
+                object_name.as_str().to_string()
+            }
+            GraphNode::Attribute { mdo_type: MdoType::Catalog, object_name, attr_name } => {
+                format!("{}.{}", object_name.as_str(), attr_name.as_str())
+            }
+            other => panic!("unexpected query_ref target: {other:?}"),
+        })
+        .collect();
+    read.sort();
+    assert_eq!(
+        read,
+        [
+            "Номенклатура",
+            "Номенклатура.ЕдиницаИзмерения",
+            "УпаковкиЕдиницыИзмерения",
+            "УпаковкиЕдиницыИзмерения.ТипИзмеряемойВеличины",
+        ]
+    );
+}
+
 /// Golden equivalence: building the whole-config graph through the resident
 /// `GraphIndex` (the streaming-build path) must produce byte-for-byte the same
 /// `WorkspaceCallGraph` as the monolithic Salsa fold, AND the same per-module

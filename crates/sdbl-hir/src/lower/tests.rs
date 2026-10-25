@@ -2338,6 +2338,51 @@ fn collect_resolved_attributes_first_hop_skips_standard() {
     );
 }
 
+/// A column path that goes past its first hop dereferences a reference attribute: the
+/// chain names the referred object and the remaining names, for the caller to resolve
+/// against the configuration. A one-hop path and a non-reference first hop yield none.
+#[test]
+fn collect_dereference_chains_follows_a_reference_attribute() {
+    use crate::hir::SdblHir;
+    use bsl_metadata::{Attribute, AttributeType, Configuration, MdoType, MetadataObject};
+    use std::sync::Arc;
+
+    let mut config = Configuration::new("Test");
+    let mut goods = MetadataObject::new(MdoType::Catalog, "Товары");
+    goods.add_attribute(Attribute {
+        name: "Номенклатура".to_string(),
+        name_en: None,
+        attr_type: AttributeType::Ref {
+            mdo_type: MdoType::Catalog,
+            name: "Номенклатура".to_string(),
+        },
+    });
+    goods.add_attribute(Attribute {
+        name: "Артикул".to_string(),
+        name_en: None,
+        attr_type: AttributeType::String { length: Some(25) },
+    });
+    config.add_metadata_object(goods);
+    config.add_metadata_object(MetadataObject::new(MdoType::Catalog, "Номенклатура"));
+    let config = Arc::new(config);
+
+    let code = "ВЫБРАТЬ Т.Номенклатура.ЕдиницаИзмерения.Вес, Т.Номенклатура, Т.Артикул.Длина \
+                ИЗ Справочник.Товары КАК Т";
+    let package = lower_sdbl_to_hir(&parser::parse_sdbl(code), Some(config));
+    let mut chains: Vec<(MdoType, String, Vec<String>)> = Vec::new();
+    for query in package.queries() {
+        SdblHir::collect_dereference_chains(&query.hir, &mut chains);
+    }
+    assert_eq!(
+        chains,
+        [(
+            MdoType::Catalog,
+            "Номенклатура".to_string(),
+            vec!["ЕдиницаИзмерения".to_string(), "Вес".to_string()]
+        )]
+    );
+}
+
 fn unknown_fields(package: &crate::SdblPackage) -> Vec<String> {
     package
         .all_diagnostics()
