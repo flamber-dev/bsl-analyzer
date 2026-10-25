@@ -3,7 +3,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use common::Lsp;
+use common::{replace_config, Lsp};
 use mcp_server::{
     serve_stream, McpProfile, McpServer, SharedState, WorkspaceCacheLayout, WorkspaceInitError,
 };
@@ -457,7 +457,7 @@ async fn invalid_project_config_preserves_lsp_and_rejects_mcp_until_repair() {
     assert_mcp_missing(&old_client, &consumer_path).await;
     assert_mcp_diagnostic(&mcp_diagnostic(&old_client, &consumer_path).await);
 
-    std::fs::write(&config_path, INVALID_CONFIG).expect("write only invalid TOML config");
+    replace_config(&config_path, INVALID_CONFIG);
     send_config_change(&mut lsp, &config_path);
     let error = lsp
         .wait_for_within(test_utils::wait::ceiling(Duration::from_secs(45)), |message| {
@@ -506,7 +506,7 @@ async fn invalid_project_config_preserves_lsp_and_rejects_mcp_until_repair() {
     );
     old_state.shutdown();
 
-    std::fs::write(&config_path, CONFIG).expect("restore exact known-good TOML config");
+    replace_config(&config_path, CONFIG);
     send_config_change(&mut lsp, &config_path);
     let restored_diagnostics = lsp
         .wait_for_within(test_utils::wait::ceiling(Duration::from_secs(45)), |message| {

@@ -321,6 +321,18 @@
       "verified_against_version": "8.3.27",
       "evidence_source": "The pinned 8.3.27 corpus documents ТаблицаЗначений / ValueTable with 19 methods (ids 1817-1835: Удалить, Сортировать, Скопировать, Сдвинуть, Получить, Очистить, НайтиСтроки, Количество, ЗаполнитьЗначения, Итог, Найти, ЗагрузитьКолонку, ВыбратьСтроку, Вставить, ВыгрузитьКолонку, СкопироватьКолонки, Добавить, Индекс, Свернуть) and 2 properties (ids 5519-5520: Колонки, Индексы); platform_facts.json holds exactly these 21 records. The type is not among the corpus types without members, its name is unique (ТаблицаЗначений / ValueTable resolve to one type), and no docs-gap overlay of crates/bsl-platform/src/db.rs covers it. A live run on 8.3.17.1549 and 8.3.27.2214 answers `Таблица.НетТакогоМетода()` on `Новый ТаблицаЗначений` with «Метод объекта не обнаружен (НетТакогоМетода)» and `Таблица.НетТакогоПоля` with «Поле объекта не обнаружено (НетТакогоПоля)», while `Колонки.Добавить`, `Добавить` and `Количество()` work.",
       "rationale": "A value table's columns are members of its rows, not of the table, so the table's own surface is the platform's 21 members whatever columns it carries. Attesting them lets the method-miss and field-miss checks judge a table the walk saw built by `Новый ТаблицаЗначений` on every path, where before the receiver was a kind of its own with no surface the checks could close."
+    },
+    {
+      "type": "Chars",
+      "verified_against_version": "8.3.27",
+      "evidence_source": "The pinned 8.3.27 corpus documents Символы / Chars as a system enumeration with exactly 6 values (ids 5537-5542: ВК, ПФ, ПС, НПП, Таб, ВТаб) and no method; platform_facts.json holds exactly these records. The type is not among the corpus types without members, its name is unique, and no docs-gap overlay of crates/bsl-platform/src/db.rs covers it. A live run on 8.3.17.1549 and 8.3.27.2214 answers `Символы.НетТакогоСимвола` with «Поле объекта не обнаружено (НетТакогоСимвола)», while each of the listed values works.",
+      "rationale": "A system enumeration has no members beyond its values, so the extracted list is the platform's own value set and a miss on it fails at run time. Attesting it lets the absent-field check judge the enumeration read by its global name, where before the receiver was open."
+    },
+    {
+      "type": "QuestionDialogMode",
+      "verified_against_version": "8.3.27",
+      "evidence_source": "The pinned 8.3.27 corpus documents РежимДиалогаВопрос / QuestionDialogMode as a system enumeration with exactly 6 values (ids 3107-3112: ПрерватьПовторитьПропустить, ОК, ОКОтмена, ПовторитьОтмена, ДаНет, ДаНетОтмена) and no method; platform_facts.json holds exactly these records. The type is not among the corpus types without members, its name is unique, and no docs-gap overlay of crates/bsl-platform/src/db.rs covers it. A live run on 8.3.17.1549 and 8.3.27.2214 answers `РежимДиалогаВопрос.НетТакогоЗначения` with «Поле объекта не обнаружено (НетТакогоЗначения)», while each of the listed values works.",
+      "rationale": "A system enumeration has no members beyond its values, so the extracted list is the platform's own value set and a miss on it fails at run time. Attesting it lets the absent-field check judge the enumeration read by its global name, where before the receiver was open."
     }
   ]
 }

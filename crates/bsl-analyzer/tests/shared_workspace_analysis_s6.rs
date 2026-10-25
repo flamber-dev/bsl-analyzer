@@ -3,7 +3,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use common::Lsp;
+use common::{replace_config, Lsp};
 use mcp_server::{serve_stream, McpProfile, McpServer, SharedState, WorkspaceCacheLayout};
 use rmcp::model::{CallToolRequestParams, ClientRequest, PingRequest};
 use rmcp::service::RunningService;
@@ -429,12 +429,4 @@ async fn excluding_and_readmitting_a_provider_tombstones_and_restores_its_defini
     eprintln!("S6 phase=exclude/lsp-shutdown");
     assert!(lsp.shutdown(6).success(), "LSP exits cleanly");
     eprintln!("S6 phase=exclude/complete");
-}
-
-/// Swap the config in one step: the running server watches it, and a plain write lets it read
-/// the file half-written and rebind the workspace to a project that never existed.
-fn replace_config(path: &Path, text: &str) {
-    let next = path.with_extension("toml.next");
-    std::fs::write(&next, text).expect("write the next config");
-    std::fs::rename(&next, path).expect("swap the config in");
 }
