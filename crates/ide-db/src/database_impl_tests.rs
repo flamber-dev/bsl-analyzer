@@ -3841,6 +3841,119 @@ fn test_workspace_call_graph_query_ref_dereference_chain_standard_and_defined_ty
     );
 }
 
+/// A query that names an object only through `ЗНАЧЕНИЕ` or `ВЫРАЗИТЬ` reads it: the
+/// method gets a `query_ref` edge to each declared object it names that way, and none to
+/// an object the configuration does not declare.
+#[test]
+fn test_workspace_call_graph_query_ref_links_value_and_cast_objects() {
+    use bsl_metadata::MdoType;
+    use hir::call_graph::{EdgeKind, GraphNode};
+    use hir::ConfigsDatabase;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("src/cf");
+    std::fs::create_dir_all(root.join("Catalogs")).unwrap();
+    std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+    for (index, name) in
+        ["Номенклатура", "СерииНоменклатуры", "УпаковкиЕдиницыИзмерения"].into_iter().enumerate()
+    {
+        std::fs::write(
+            root.join(format!("Catalogs/{name}.xml")),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-00000000000{index}">
+        <Properties>
+            <Name>{name}</Name>
+        </Properties>
+    </Catalog>
+</MetaDataObject>"#
+            ),
+        )
+        .unwrap();
+    }
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![(None, root.clone())], None);
+
+    let file_id = FileId(0);
+    let file_path = root.join("CommonModules/Отчеты/Ext/Module.bsl");
+    let mut file_set = FileSet::new();
+    file_set.insert(file_id, VfsPath::new(file_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file_id, SourceRootId(0));
+    db.set_file_text(
+        file_id,
+        "Процедура Считать() Экспорт\n\
+         Запрос = \"ВЫБРАТЬ ВЫРАЗИТЬ(Н.Ссылка КАК Справочник.УпаковкиЕдиницыИзмерения) КАК У \
+         ИЗ Справочник.Номенклатура КАК Н \
+         ГДЕ Н.Ссылка <> ЗНАЧЕНИЕ(Справочник.СерииНоменклатуры.ПустаяСсылка) \
+         И Н.Ссылка <> ЗНАЧЕНИЕ(Справочник.Пропавший.ПустаяСсылка)\";\n\
+         КонецПроцедуры",
+    );
+
+    let graph = db.workspace_call_graph(SourceRootId(0));
+    let mut read: Vec<String> = graph
+        .edges()
+        .filter(|e| e.kind == EdgeKind::QueryRef)
+        .filter_map(|e| match &e.to {
+            GraphNode::Mdo { mdo_type: MdoType::Catalog, object_name } => {
+                Some(object_name.as_str().to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    read.sort();
+    assert_eq!(read, ["Номенклатура", "СерииНоменклатуры", "УпаковкиЕдиницыИзмерения"]);
+}
+
+/// A method whose FROM table and `ЗНАЧЕНИЕ` name the same object in different case reads
+/// that object once in its outbound facts.
+#[test]
+fn test_method_outbound_facts_query_reads_fold_case() {
+    use bsl_metadata::MdoType;
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("src/cf");
+    std::fs::create_dir_all(root.join("Catalogs")).unwrap();
+    std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+    std::fs::write(
+        root.join("Catalogs/Номенклатура.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-000000000000">
+        <Properties>
+            <Name>Номенклатура</Name>
+        </Properties>
+    </Catalog>
+</MetaDataObject>"#,
+    )
+    .unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![(None, root.clone())], None);
+
+    let file_id = FileId(0);
+    let file_path = root.join("CommonModules/Отчеты/Ext/Module.bsl");
+    let mut file_set = FileSet::new();
+    file_set.insert(file_id, VfsPath::new(file_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file_id, SourceRootId(0));
+    db.set_file_text(
+        file_id,
+        "Процедура Считать() Экспорт\n\
+         Запрос = \"ВЫБРАТЬ Н.Ссылка ИЗ Справочник.номенклатура КАК Н \
+         ГДЕ Н.Ссылка <> ЗНАЧЕНИЕ(Справочник.Номенклатура.ПустаяСсылка)\";\n\
+         КонецПроцедуры",
+    );
+
+    let local_id = db.item_tree(file_id).methods().next().expect("one method").key();
+    let method = hir::MethodId { module: ModuleId::new(file_id), local_id };
+    let facts = hir::method_outbound_facts(&db, method);
+    assert_eq!(facts.query_reads.len(), 1, "{:?}", facts.query_reads);
+    assert_eq!(facts.query_reads[0].0, MdoType::Catalog);
+}
+
 /// Golden equivalence: building the whole-config graph through the resident
 /// `GraphIndex` (the streaming-build path) must produce byte-for-byte the same
 /// `WorkspaceCallGraph` as the monolithic Salsa fold, AND the same per-module

@@ -3,7 +3,7 @@ use stdx::case::CaseExt;
 use text_size::{TextRange, TextSize};
 
 use crate::diagnostics::SdblDiagnostic;
-use crate::types::SdblType;
+use crate::types::{MdoRef, SdblType};
 use bsl_metadata::MdoType;
 
 pub type Name = SmolStr;
@@ -251,6 +251,127 @@ fn referred_object(ty: &SdblType) -> Option<&crate::types::MdoRef> {
             referred_object(underlying)
         }
         _ => None,
+    }
+}
+
+impl SdblHir {
+    /// Every metadata object this query tree names in an expression rather than as a
+    /// source: `ЗНАЧЕНИЕ(Справочник.Серии.ПустаяСсылка)` names `Справочник.Серии`, and
+    /// `ВЫРАЗИТЬ(Т.Упаковка КАК Справочник.Упаковки)` names `Справочник.Упаковки`. The
+    /// query reads such an object's data, so it is a query read like a FROM table; a
+    /// non-metadata `ЗНАЧЕНИЕ(ВидДвиженияНакопления.Приход)` names nothing. Names are as
+    /// written: whether the object exists is the caller's question.
+    pub fn collect_referenced_objects(&self, out: &mut Vec<(MdoType, String)>) {
+        for table in self.all_tables() {
+            for param in &table.virtual_table_params {
+                collect_expr_objects(param, out);
+            }
+            for sub in &table.subquery {
+                sub.collect_referenced_objects(out);
+            }
+        }
+        for field in &self.select.fields {
+            collect_expr_objects(&field.expr, out);
+        }
+        for join in &self.joins {
+            if let Some(cond) = &join.condition {
+                collect_expr_objects(cond, out);
+            }
+        }
+        if let Some(where_expr) = &self.where_clause {
+            collect_expr_objects(where_expr, out);
+        }
+        if let Some(group_by) = &self.group_by {
+            for expr in &group_by.exprs {
+                collect_expr_objects(expr, out);
+            }
+        }
+        if let Some(having) = &self.having {
+            collect_expr_objects(having, out);
+        }
+        if let Some(order_by) = &self.order_by {
+            for item in &order_by.items {
+                collect_expr_objects(&item.expr, out);
+            }
+        }
+        for union in &self.unions {
+            union.query.collect_referenced_objects(out);
+        }
+    }
+}
+
+/// The object an `ЗНАЧЕНИЕ` or `ВЫРАЗИТЬ` call names, then every nested expression.
+fn collect_expr_objects(expr: &ExprHir, out: &mut Vec<(MdoType, String)>) {
+    match expr {
+        ExprHir::FunctionCall { function, args, cast_target, .. } => {
+            if let Some(target) = cast_target {
+                out.push((target.mdo_type, target.name.clone()));
+            }
+            if matches!(function, FunctionKind::Value) {
+                if let Some(ExprHir::ColumnRef { parts, .. }) = args.first() {
+                    if let [kind, object, ..] = parts.as_slice() {
+                        if let Ok(mdo_type) = kind.as_str().parse::<MdoType>() {
+                            out.push((mdo_type, object.as_str().to_string()));
+                        }
+                    }
+                }
+            }
+            for arg in args {
+                collect_expr_objects(arg, out);
+            }
+        }
+        ExprHir::Subquery { query, .. } => query.collect_referenced_objects(out),
+        ExprHir::In { expr: inner, values, .. } => {
+            collect_expr_objects(inner, out);
+            match values {
+                InValues::List(items) => {
+                    for item in items {
+                        collect_expr_objects(item, out);
+                    }
+                }
+                InValues::Subquery(sq) => sq.collect_referenced_objects(out),
+            }
+        }
+        ExprHir::BinaryOp { lhs, rhs, .. } => {
+            collect_expr_objects(lhs, out);
+            collect_expr_objects(rhs, out);
+        }
+        ExprHir::UnaryOp { expr: inner, .. } | ExprHir::IsNull { expr: inner, .. } => {
+            collect_expr_objects(inner, out)
+        }
+        ExprHir::Case { operand, when_clauses, else_expr, .. } => {
+            if let Some(op) = operand {
+                collect_expr_objects(op, out);
+            }
+            for clause in when_clauses {
+                collect_expr_objects(&clause.condition, out);
+                collect_expr_objects(&clause.result, out);
+            }
+            if let Some(else_e) = else_expr {
+                collect_expr_objects(else_e, out);
+            }
+        }
+        ExprHir::Between { expr: inner, low, high, .. } => {
+            collect_expr_objects(inner, out);
+            collect_expr_objects(low, out);
+            collect_expr_objects(high, out);
+        }
+        ExprHir::Like { expr: inner, pattern, escape, .. } => {
+            collect_expr_objects(inner, out);
+            collect_expr_objects(pattern, out);
+            if let Some(esc) = escape {
+                collect_expr_objects(esc, out);
+            }
+        }
+        ExprHir::Tuple { elements, .. } => {
+            for elem in elements {
+                collect_expr_objects(elem, out);
+            }
+        }
+        ExprHir::ColumnRef { .. }
+        | ExprHir::Literal { .. }
+        | ExprHir::Parameter { .. }
+        | ExprHir::Missing { .. } => {}
     }
 }
 
@@ -828,6 +949,9 @@ pub enum ExprHir {
         function: FunctionKind,
         args: Vec<ExprHir>,
         member_access: Vec<Name>,
+        /// The object a `ВЫРАЗИТЬ(... КАК Вид.Объект)` names. Kept apart from `ty`, which a
+        /// dereference through parentheses erases while the query still reads the object.
+        cast_target: Option<MdoRef>,
         ty: SdblType,
         range: TextRange,
     },
