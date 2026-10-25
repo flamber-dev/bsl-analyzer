@@ -906,16 +906,21 @@ pub(crate) fn collect_module_query_refs(
 }
 
 /// Follow each dereference chain through the configuration: every object it passes is
-/// read, and every declared attribute it names is read. A hop stops the chain when the
-/// object is not declared, when the name is not one of its declared attributes (a
-/// standard attribute such as `Код`, a tabular section), or when the attribute is not a
-/// single reference type the next name could belong to.
+/// read, and every declared attribute it names is read. A standard attribute (`Код`,
+/// `Ссылка`, `Родитель`) is not a declared read, the same as on the first hop, but a
+/// standard reference still leads on. A hop stops the chain when the object is not
+/// declared, when the name is none of its attributes (a tabular section), or when the
+/// attribute is not a single reference type, directly or through a defined type, the
+/// next name could belong to.
 fn resolve_dereference_chains(
     db: &dyn crate::configs::ConfigsDatabase,
     file_id: FileId,
     chains: Vec<(MdoType, String, Vec<String>)>,
     attrs: &mut Vec<(MdoType, String, String)>,
 ) -> Vec<(MdoType, String)> {
+    use bsl_metadata::{is_standard_attribute_name, AttributeType};
+
+    let resolver = crate::sdbl_cache::DbSdblResolver::new(db, file_id);
     let mut tables = Vec::new();
     for (mut mdo_type, mut name, hops) in chains {
         for hop in hops {
@@ -923,12 +928,32 @@ fn resolve_dereference_chains(
                 break;
             };
             tables.push((mdo_type, object.name.clone()));
-            let Some(attribute) = object.find_attribute(&hop) else { break };
-            attrs.push((mdo_type, object.name.clone(), attribute.name.clone()));
-            match &attribute.attr_type {
-                bsl_metadata::AttributeType::Ref { mdo_type: next_type, name: next_name } => {
-                    mdo_type = *next_type;
-                    name = next_name.clone();
+            let Some(attribute) = object.attributes.iter().find(|attribute| {
+                stdx::case::eq_ignore_case(&attribute.name, &hop)
+                    || attribute
+                        .name_en
+                        .as_deref()
+                        .is_some_and(|name_en| stdx::case::eq_ignore_case(name_en, &hop))
+            }) else {
+                break;
+            };
+            let is_standard = is_standard_attribute_name(&attribute.name)
+                || attribute.name_en.as_deref().is_some_and(is_standard_attribute_name);
+            if !is_standard {
+                attrs.push((mdo_type, object.name.clone(), attribute.name.clone()));
+            }
+            let next = match &attribute.attr_type {
+                AttributeType::DefinedType { name } => bsl_metadata::resolve_defined_type_terminal(
+                    &resolver,
+                    name,
+                    &mut std::collections::HashSet::new(),
+                ),
+                other => Some(other.clone()),
+            };
+            match next {
+                Some(AttributeType::Ref { mdo_type: next_type, name: next_name }) => {
+                    mdo_type = next_type;
+                    name = next_name;
                 }
                 _ => break,
             }

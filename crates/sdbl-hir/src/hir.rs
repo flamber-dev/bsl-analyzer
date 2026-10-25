@@ -178,9 +178,10 @@ impl SdblHir {
     /// Every column path that dereferences past its first hop, as the object the first hop
     /// refers to and the names that follow: `Т.Номенклатура.ЕдиницаИзмерения.Вес` over
     /// `Справочник.Товары КАК Т`, whose `Номенклатура` is a `Справочник.Номенклатура`
-    /// reference, yields (`Справочник.Номенклатура`, [`ЕдиницаИзмерения`, `Вес`]). The first
-    /// hop itself is what [`Self::collect_resolved_attributes`] reports; the rest needs the
-    /// configuration, so it is resolved by the caller.
+    /// reference (directly or through a defined type), yields (`Справочник.Номенклатура`,
+    /// [`ЕдиницаИзмерения`, `Вес`]). The first hop itself is what
+    /// [`Self::collect_resolved_attributes`] reports; the rest needs the configuration, so
+    /// it is resolved by the caller.
     pub fn collect_dereference_chains(&self, out: &mut Vec<(MdoType, String, Vec<String>)>) {
         use std::collections::HashMap;
 
@@ -202,7 +203,7 @@ impl SdblHir {
             }
             let Some(table) = by_alias.get(&alias.as_str().fold_lower()) else { continue };
             let Some(field) = find_attr_field(table, field.as_str()) else { continue };
-            if let SdblType::Ref(target) = &field.ty {
+            if let Some(target) = referred_object(&field.ty) {
                 out.push((
                     target.mdo_type,
                     target.name.clone(),
@@ -238,6 +239,18 @@ impl SdblHir {
                     .iter()
                     .flat_map(|order_by| order_by.items.iter().map(|item| &item.expr)),
             )
+    }
+}
+
+/// The object a reference-typed field points to, looking through defined types that
+/// wrap a single reference.
+fn referred_object(ty: &SdblType) -> Option<&crate::types::MdoRef> {
+    match ty {
+        SdblType::Ref(target) => Some(target),
+        SdblType::DefinedType { underlying_type: Some(underlying), .. } => {
+            referred_object(underlying)
+        }
+        _ => None,
     }
 }
 
