@@ -99,6 +99,27 @@ mod tests {
         }
     }
 
+    /// The session module compiles on the server and in the external connection
+    /// only, so the platform drops a method under `#Если ТонкийКлиент` unread.
+    #[test]
+    fn method_in_a_module_level_branch_no_environment_compiles_is_silent() {
+        let module = |condition: &str| -> Vec<_> {
+            let fixture = format!(
+                "//- /Ext/SessionModule.bsl\n#Если {condition} Тогда\n\
+                 Процедура Проба() Экспорт\n    Т = Новый НесуществующийТипОбъекта;\n\
+                 КонецПроцедуры\n#КонецЕсли\n"
+            );
+            check_hir_diagnostic_with_fixtures(&fixture)
+                .into_iter()
+                .filter(|d| d.code.as_str() == CODE)
+                .collect()
+        };
+        let client = module("ТонкийКлиент");
+        assert!(client.is_empty(), "no environment compiles the method: {client:?}");
+        let server = module("Сервер");
+        assert_eq!(server.len(), 1, "the server compiles the method: {server:?}");
+    }
+
     #[test]
     fn type_available_in_another_environment_is_not_unknown() {
         let fixture = "//- /Catalogs/Товары/Forms/ФормаЭлемента/Ext/Form/Module.bsl\n\

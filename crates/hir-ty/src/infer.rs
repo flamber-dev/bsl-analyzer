@@ -1550,6 +1550,7 @@ impl<'db> InferenceContext<'db> {
         if raw.is_empty()
             || raw.contains('.')
             || self.in_uncompiled_branch
+            || self.in_dead_branch
             || self.module_compiles_nowhere()
             || !TyLoweringContext::bare_name_is_unmodelled(raw)
             || crate::platform_type_name::is_known_non_corpus_type_name(raw)
@@ -1564,18 +1565,9 @@ impl<'db> InferenceContext<'db> {
         {
             return;
         }
-        let served = platform
-            .help_origin()
-            .and_then(|origin| origin.platform_version.as_deref())
-            .and_then(bsl_platform::PlatformVersion::parse_release);
-        let target = self
-            .db
-            .target_platform_version()
-            .and_then(|version| bsl_platform::PlatformVersion::parse_release(&version));
-        if let (Some(served), Some(target)) = (served, target) {
-            if target.release_newer_than(served) {
-                return;
-            }
+        let served = platform.help_origin().and_then(|origin| origin.platform_version.as_deref());
+        if !served_help_covers_target(served, self.db.target_platform_version().as_deref()) {
+            return;
         }
         self.push_inference_diagnostic(InferenceDiagnostic::UnknownTypeInNew {
             expr,
@@ -5833,6 +5825,23 @@ impl<'db> InferenceContext<'db> {
     }
 }
 
+/// Whether help of the `served` release lists every type of the project's
+/// `target` release. A set target needs a served release that is known and not
+/// older: an unversioned corpus, or a target that does not parse, may be older
+/// than the platform the project compiles on.
+fn served_help_covers_target(served: Option<&str>, target: Option<&str>) -> bool {
+    let Some(target) = target else {
+        return true;
+    };
+    match (
+        served.and_then(bsl_platform::PlatformVersion::parse_release),
+        bsl_platform::PlatformVersion::parse_release(target),
+    ) {
+        (Some(served), Some(target)) => !target.release_newer_than(served),
+        _ => false,
+    }
+}
+
 fn const_eval_literal_index(expr: &Expr) -> Option<usize> {
     let Expr::Literal(Literal::Number(n)) = expr else {
         return None;
@@ -6353,6 +6362,17 @@ pub fn type_of_expr_query(
 mod tests {
     use super::*;
     use bsl_types::testing::InMemoryDb;
+
+    #[test]
+    fn served_help_covers_only_a_target_it_is_known_not_to_predate() {
+        assert!(served_help_covers_target(Some("8.3.27.2214"), None));
+        assert!(served_help_covers_target(None, None));
+        assert!(served_help_covers_target(Some("8.3.27.2214"), Some("8.3.27")));
+        assert!(served_help_covers_target(Some("8.3.27.2214"), Some("8.3.24")));
+        assert!(!served_help_covers_target(Some("8.3.27.2214"), Some("8.3.28")));
+        assert!(!served_help_covers_target(None, Some("8.3.27")), "unversioned help");
+        assert!(!served_help_covers_target(Some("8.3.27.2214"), Some("8.3.x")), "target unparsed");
+    }
 
     #[test]
     fn t12_function_facet_synthesizes_candidate_with_argument_diagnostics() {

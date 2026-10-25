@@ -16,10 +16,11 @@ type family the analyzer knows the platform serves outside its type list.
 - the type name is a value: `New("Array")`, `New(TypeName)`, `New(Type("..."))` — the
   name is a value known only at run time;
 - the platform help is not served in full (no help, or the requested source degraded to
-  the built-in facts), or the project's target platform is newer than the served help:
-  a newer release may add types the list lacks;
-- the call sits in an `#If` branch no environment of the method compiles, or in a common
-  module with no environments set;
+  the built-in facts), or the project's target platform is newer than the served help or
+  is set while the release of the help is unknown: a newer release may add types the list
+  lacks;
+- the call sits in an `#If` branch, or in a method under a module-level `#If`, that no
+  environment of the module compiles, or in a common module with no environments set;
 - the name belongs to a family the platform serves outside its type list: form controls,
   managed-form extensions, XDTO/XML/DOM types, metadata-object descriptions, register
   record sets and keys;
