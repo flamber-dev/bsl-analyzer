@@ -1015,3 +1015,13 @@ fn lone_cr_after_comment_keeps_the_code_out_of_it() {
         assert!(result.text.contains(kept), "{input:?} formatted to {:?}", result.text);
     }
 }
+
+#[test]
+fn bom_only_module_is_left_untouched() {
+    // An "empty" 1C module dump is exactly the BOM: nothing to format, nothing to rewrite.
+    assert_eq!(fmt("\u{feff}"), "\u{feff}");
+
+    // Control: a normal CRLF module keeps its CRLF and gains no extra line break.
+    let crlf = "\u{feff}Процедура Т()\r\n\tА = 1;\r\nКонецПроцедуры\r\n";
+    assert_eq!(fmt(crlf), crlf);
+}
