@@ -464,8 +464,11 @@ fn apply_bslls(
 // Text helpers
 // ---------------------------------------------------------------------------
 
+/// The comment body: leading slashes off, and the line break the lexer keeps inside the
+/// token on a CRLF file off too — otherwise the last code of a directive arrives as
+/// `Код\r` and no directive in a 1C dump (always CRLF) ever resolves.
 fn strip_comment_slashes(text: &str) -> &str {
-    text.trim_start_matches('/')
+    text.trim_start_matches('/').trim_end_matches(['\r', '\n'])
 }
 
 fn split_first_word(s: &str) -> (&str, &str) {
@@ -691,5 +694,92 @@ mod tests {
         };
         let diags = check_file_diagnostics_with_config(code, config);
         assert!(!has(&diags, DiagnosticCode::UnknownSuppressionCode), "{diags:#?}");
+    }
+
+    // 1C dumps are always CRLF; the lexer keeps the `\r` inside the comment token.
+    fn crlf(code: &str) -> String {
+        code.replace('\n', "\r\n")
+    }
+
+    // `check_file_diagnostics` goes through `Fixture::parse`, which splits on `.lines()` and so
+    // silently turns CRLF into LF; this helper hands the text to the database untouched.
+    fn check_raw_diagnostics(code: &str) -> Vec<Diagnostic> {
+        use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use ide_db::RootDatabaseImpl;
+
+        let mut fixture = test_fixture::Fixture::new();
+        fixture.add_file("/test.bsl", code);
+        let file_id = fixture.first_file().expect("fixture should have a file");
+
+        let mut db = RootDatabaseImpl::new();
+        let mut file_set = vfs::FileSet::default();
+        file_set.insert(file_id, vfs::VfsPath::new("/test.bsl"));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, SourceRootId(0));
+        for (fid, file) in &fixture.files {
+            db.set_file_text(*fid, &file.content);
+        }
+        crate::file_diagnostics(&db, file_id, &DiagnosticsConfig::all_enabled())
+    }
+
+    fn unknown_code_messages(diags: &[Diagnostic]) -> Vec<&str> {
+        diags
+            .iter()
+            .filter(|d| d.code == DiagnosticCode::UnknownSuppressionCode)
+            .map(|d| d.message.as_str())
+            .collect()
+    }
+
+    const OFF_FIXTURE: &str =
+        "// bsl-analyzer:off SelfAssign\nПроцедура Тест()\n    А = А;\nКонецПроцедуры\n";
+
+    #[test]
+    fn crlf_off_directive_suppresses_without_unknown_code() {
+        let code = crlf(OFF_FIXTURE);
+        assert!(code.contains("\r\n"));
+        let diags = check_raw_diagnostics(&code);
+        assert!(!has(&diags, DiagnosticCode::UnknownSuppressionCode), "{diags:#?}");
+        assert!(!has(&diags, DiagnosticCode::SelfAssign), "{diags:#?}");
+    }
+
+    #[test]
+    fn lf_off_directive_control_suppresses_without_unknown_code() {
+        let diags = check_raw_diagnostics(OFF_FIXTURE);
+        assert!(!has(&diags, DiagnosticCode::UnknownSuppressionCode), "{diags:#?}");
+        assert!(!has(&diags, DiagnosticCode::SelfAssign), "{diags:#?}");
+    }
+
+    #[test]
+    fn crlf_disable_next_line_suppresses_next_line() {
+        let code = crlf(
+            "Процедура Тест()\n    // bsl-analyzer:disable-next-line SelfAssign\n    А = А;\n    Б = Б;\nКонецПроцедуры\n",
+        );
+        let diags = check_raw_diagnostics(&code);
+        assert!(!has(&diags, DiagnosticCode::UnknownSuppressionCode), "{diags:#?}");
+        assert_eq!(self_assign_lines(&diags, &code), vec![3]);
+    }
+
+    #[test]
+    fn crlf_unknown_code_is_flagged_without_carriage_return() {
+        let code = crlf(
+            "Процедура Тест()\n    // bsl-analyzer:off NoSuchRule\n    А = А;\nКонецПроцедуры\n",
+        );
+        let diags = check_raw_diagnostics(&code);
+        assert_eq!(
+            unknown_code_messages(&diags),
+            vec!["Неизвестный код диагностики в директиве подавления: NoSuchRule"],
+            "{diags:#?}"
+        );
+        assert_eq!(self_assign_lines(&diags, &code), vec![2]);
+    }
+
+    #[test]
+    fn crlf_bslls_alias_range_honored() {
+        let code = crlf(
+            "Процедура Тест()\n    // BSLLS:SelfAssign-off\n    А = А;\n    // BSLLS:SelfAssign-on\n    Б = Б;\nКонецПроцедуры\n",
+        );
+        let diags = check_raw_diagnostics(&code);
+        assert!(!has(&diags, DiagnosticCode::UnknownSuppressionCode), "{diags:#?}");
+        assert_eq!(self_assign_lines(&diags, &code), vec![4]);
     }
 }
