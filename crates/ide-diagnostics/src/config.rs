@@ -1,11 +1,10 @@
 use crate::handlers;
 use crate::handlers::deprecated_platform_api::ExcludeProblem;
-use crate::metadata::{DiagnosticSeverityLevel, DiagnosticType, MetadataTag};
+use crate::metadata::{parse_severity, DiagnosticSeverityLevel, DiagnosticType, MetadataTag};
 use crate::{DiagnosticCode, Severity};
 use base_db::{DiagnosticsConfigInput, Locale};
 use std::collections::HashMap;
 use std::path::Path;
-use stdx::case::CaseExt;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MetadataOverride {
@@ -27,24 +26,11 @@ impl EffectiveMetadata {
         if let Some(override_str) = &self.lsp_severity_override {
             return parse_severity(override_str);
         }
-        self.base.calculate_severity()
+        self.base.effective_severity()
     }
 
     pub fn tags(&self) -> Vec<MetadataTag> {
         self.tags_override.clone().unwrap_or_else(|| self.base.tags.to_vec())
-    }
-}
-
-fn parse_severity(s: &str) -> Severity {
-    match s.fold_lower().as_str() {
-        "error" => Severity::Error,
-        "warning" => Severity::Warning,
-        "information" | "info" => Severity::Information,
-        "hint" => Severity::Hint,
-        "blocker" => Severity::Blocker,
-        "critical" => Severity::Critical,
-        "major" => Severity::Major,
-        _ => Severity::Warning,
     }
 }
 
@@ -1116,6 +1102,25 @@ mod tests {
         assert!(config.disabled.is_empty());
         assert!(config.enabled.is_empty());
         assert_eq!(config.locale, Locale::Ru);
+    }
+
+    #[test]
+    fn static_lsp_severity_override_lowers_default_severity() {
+        let config = DiagnosticsConfig::default();
+        assert_eq!(config.severity(DiagnosticCode::UnavailableInEnvironment), Severity::Warning);
+        assert_eq!(config.severity(DiagnosticCode::ModuleAccessibility), Severity::Warning);
+        // Control: metadata without a static override keeps its computed grade.
+        assert_eq!(config.severity(DiagnosticCode::CommonModuleInvalidType), Severity::Major);
+    }
+
+    #[test]
+    fn user_override_wins_over_static_lsp_severity() {
+        let mut config = DiagnosticsConfig::default();
+        config.metadata_overrides.insert(
+            DiagnosticCode::UnavailableInEnvironment,
+            MetadataOverride { lsp_severity: Some("hint".into()), ..Default::default() },
+        );
+        assert_eq!(config.severity(DiagnosticCode::UnavailableInEnvironment), Severity::Hint);
     }
 }
 
