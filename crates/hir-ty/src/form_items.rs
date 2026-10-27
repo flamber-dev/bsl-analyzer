@@ -11,6 +11,7 @@ use bsl_types::testing::RootConfigCtx;
 use hir_def::resolver::Resolver;
 use hir_def::ty::MetadataKind;
 use hir_def::Name;
+use stdx::case::CaseExt;
 use vfs::FileId;
 
 use crate::db::HirDatabase;
@@ -45,8 +46,55 @@ fn is_ordinary_controls_name(name: &Name) -> bool {
         || name.eq_ignore_case(&Name::new(ORDINARY_CONTROLS_TYPE_EN))
 }
 
-fn is_form_self_name(name: &Name) -> bool {
-    name.eq_ignore_case(&Name::new("ЭтаФорма")) || name.eq_ignore_case(&Name::new("ThisForm"))
+/// The managed form's items collection, as the module spells it.
+const MANAGED_ITEMS_NAME_RU: &str = "Элементы";
+const MANAGED_ITEMS_NAME_EN: &str = "Items";
+
+fn is_managed_items_name(name: &Name) -> bool {
+    name.eq_ignore_case(&Name::new(MANAGED_ITEMS_NAME_RU))
+        || name.eq_ignore_case(&Name::new(MANAGED_ITEMS_NAME_EN))
+}
+
+/// Which items collection a body is scanned for. The two differ in the name the module
+/// spells, in the methods that change the set of items, and in how the module names the
+/// form itself: in a managed form module `ЭтотОбъект` is the form too.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ItemsCollection {
+    /// `ЭлементыФормы` of an ordinary form.
+    Ordinary,
+    /// `Элементы` of a managed form.
+    Managed,
+}
+
+impl ItemsCollection {
+    fn names_collection(self, name: &Name) -> bool {
+        match self {
+            Self::Ordinary => is_ordinary_controls_name(name),
+            Self::Managed => is_managed_items_name(name),
+        }
+    }
+
+    /// Methods of the collection that change which items it holds. `ВсеЭлементыФормы`
+    /// adds with `Вставить` as well, and `Переместить` only reorders.
+    fn changes_items(self, method: &Name) -> bool {
+        let shared: &[&str] = &["Добавить", "Add", "Удалить", "Delete"];
+        let own: &[&str] = match self {
+            Self::Ordinary => &["ДобавитьActiveX", "AddActiveX", "Очистить", "Clear"],
+            Self::Managed => &["Вставить", "Insert"],
+        };
+        shared.iter().chain(own).any(|m| method.eq_ignore_case(&Name::new(m)))
+    }
+
+    fn names_form(self, name: &Name) -> bool {
+        if name.eq_ignore_case(&Name::new("ЭтаФорма"))
+            || name.eq_ignore_case(&Name::new("ThisForm"))
+        {
+            return true;
+        }
+        self == Self::Managed
+            && (name.eq_ignore_case(&Name::new("ЭтотОбъект"))
+                || name.eq_ignore_case(&Name::new("ThisObject")))
+    }
 }
 
 /// The form of this module when it is an ORDINARY form whose dialog was read from its
@@ -80,17 +128,27 @@ pub(crate) fn resolve_ordinary_form_controls(
 /// to other code (which may add controls), can reach a control the dialog does not
 /// list, so there a miss proves nothing.
 pub(crate) fn ordinary_controls_closed(db: &dyn HirDatabase, resolver: &Resolver) -> bool {
-    let Some(module_id) = resolver.module_id() else { return false };
     if ordinary_form_with_known_dialog(db, resolver).is_none() {
         return false;
     }
+    no_body_changes_items(db, resolver, ItemsCollection::Ordinary)
+}
+
+/// Whether no body of this module — nor of its sibling extension bodies — may change
+/// which items the collection holds.
+fn no_body_changes_items(
+    db: &dyn HirDatabase,
+    resolver: &Resolver,
+    collection: ItemsCollection,
+) -> bool {
+    let Some(module_id) = resolver.module_id() else { return false };
     let source_root = db.file_source_root_input(module_id.file_id).source_root_id(db);
     let index = db.module_index(source_root);
     // An extension can add controls that the base dialog does not describe, even
     // while inference uses the base file as its metadata context.
     let unchanged = |bodies: &hir_def::ModuleBodies| {
         let mut all = bodies.method_bodies().map(|(_, body, _)| body).chain(bodies.module_code());
-        !all.any(body_may_change_controls)
+        !all.any(|body| body_may_change_items(body, collection))
     };
     std::iter::once(module_id.file_id).chain(index.sibling_bodies(module_id.file_id)).all(|file| {
         if !unchanged(&db.module_bodies(hir_def::ModuleId::new(file))) {
@@ -107,27 +165,23 @@ pub(crate) fn ordinary_controls_closed(db: &dyn HirDatabase, resolver: &Resolver
     })
 }
 
-fn body_may_change_controls(body: &hir_def::Body) -> bool {
+fn body_may_change_items(body: &hir_def::Body, collection: ItemsCollection) -> bool {
     use hir_def::{Expr, IdConversion, Literal, Stmt};
 
     // The collection however it is spelled: `ЭлементыФормы`, `ЭтаФорма.ЭлементыФормы`,
     // `ЭтаФорма["ЭлементыФормы"]`.
     let is_controls = |expr: &Expr| match expr {
-        Expr::Path(name) => is_ordinary_controls_name(name),
-        Expr::Field { field, .. } => is_ordinary_controls_name(field),
+        Expr::Path(name) => collection.names_collection(name),
+        Expr::Field { field, .. } => collection.names_collection(field),
         Expr::Index { base, index } => match body.expr_idx(*index) {
-            Expr::Literal(Literal::String(text)) => is_ordinary_controls_name(&Name::new(text)),
+            Expr::Literal(Literal::String(text)) => collection.names_collection(&Name::new(text)),
             Expr::Literal(_) => false,
             // A computed property of this form may be its controls collection.
-            _ => matches!(body.expr_idx(*base), Expr::Path(name) if is_form_self_name(name)),
+            _ => matches!(body.expr_idx(*base), Expr::Path(name) if collection.names_form(name)),
         },
         _ => false,
     };
-    let is_add = |method: &Name| {
-        ["Добавить", "Add", "ДобавитьActiveX", "AddActiveX"]
-            .iter()
-            .any(|add| method.eq_ignore_case(&Name::new(add)))
-    };
+    let is_add = |method: &Name| collection.changes_items(method);
     // Table-box columns also become named form controls. The receiver may be a
     // local alias, so a syntactic scan cannot restrict this to a literal field path.
     let creates_columns = |method: &Name| {
@@ -165,7 +219,7 @@ fn body_may_change_controls(body: &hir_def::Body) -> bool {
     body.exprs_iter().any(|(id, expr)| {
         let escapes = || !receivers.contains(&id.to_idx());
         match expr {
-            Expr::Path(name) if is_form_self_name(name) => escapes(),
+            Expr::Path(name) if collection.names_form(name) => escapes(),
             Expr::MethodCall { receiver, method, .. } => {
                 creates_columns(method) || (is_add(method) && is_controls(body.expr_idx(*receiver)))
             }
@@ -179,6 +233,45 @@ fn body_may_change_controls(body: &hir_def::Body) -> bool {
             _ => is_controls(expr) && escapes(),
         }
     })
+}
+
+/// The form of this module when it is a MANAGED form the dump describes — the only
+/// case where the module knows its items.
+fn managed_form_with_items(db: &dyn HirDatabase, resolver: &Resolver) -> Option<Arc<Form>> {
+    if !crate::this_object::is_managed_form_module(db, resolver) {
+        return None;
+    }
+    db.module_metadata(resolver.module_id()?).form.clone()
+}
+
+/// Whether a miss on this managed form's `Элементы` is a real defect: the dump
+/// describes the form and no body may change the set of items.
+pub(crate) fn managed_form_items_closed(db: &dyn HirDatabase, resolver: &Resolver) -> bool {
+    managed_form_with_items(db, resolver).is_some()
+        && no_body_changes_items(db, resolver, ItemsCollection::Managed)
+}
+
+/// Whether `name` may be an item the platform generates rather than one the dump
+/// lists. A command placed into a command bar or a context menu — a standard command
+/// of the form, a command of the object, a global command — becomes an item named
+/// after its owner followed by the command (`ФормаЗаписатьИЗакрыть`, `СписокСоздать`,
+/// `СправочникФайлыВставитьШтрихкодВФайл`), and the dump describes none of them. The
+/// owner is the form itself or one of its items, so a name that extends `Форма` or the
+/// name of an item proves nothing.
+pub(crate) fn may_be_generated_item_name(
+    db: &dyn HirDatabase,
+    resolver: &Resolver,
+    name: &Name,
+) -> bool {
+    let Some(form) = managed_form_with_items(db, resolver) else { return true };
+    let folded = name.as_str().fold_lower();
+    let extends = |owner: &str| {
+        let owner = owner.fold_lower();
+        folded.len() > owner.len() && folded.starts_with(&owner)
+    };
+    extends("Форма")
+        || extends("Form")
+        || form.elements().iter().any(|element| extends(&element.name))
 }
 
 pub(crate) fn lookup_form_item_field(
@@ -204,18 +297,14 @@ pub(crate) fn lookup_form_item_field(
     if !is_form_items_collection_ty(db, receiver) {
         return None;
     }
-    if !crate::this_object::is_managed_form_module(db, resolver) {
-        return None;
-    }
-    let module_id = resolver.module_id()?;
-    let metadata = db.module_metadata(module_id);
-    let form = metadata.form.as_ref()?;
+    let form = managed_form_with_items(db, resolver)?;
     let element = form.find_element(field.as_str())?;
+    let module_id = resolver.module_id()?;
     let obj_resolver = crate::object_resolver::DbObjectResolver::new(db, module_id.file_id);
     Some(FieldInfo {
         name: Name::new(&element.name),
         name_en: None,
-        ty: lower_form_element(db, form, element, &obj_resolver),
+        ty: lower_form_element(db, &form, element, &obj_resolver),
         value_ty: None,
         is_readonly: true,
         origin: FieldOrigin::PlatformProperty { env: hir_def::execution_env::EnvFlags::ALL },
