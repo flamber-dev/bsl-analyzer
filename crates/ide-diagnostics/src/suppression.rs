@@ -773,8 +773,10 @@ mod tests {
         assert_eq!(self_assign_lines(&diags, &code), vec![2]);
     }
 
+    // Control, not a regression test: the BSLLS switch parser already stops at a trailing `\r`
+    // (not a word char); this guards that stripping the line break keeps the alias working.
     #[test]
-    fn crlf_bslls_alias_range_honored() {
+    fn crlf_bslls_alias_range_control_honored() {
         let code = crlf(
             "Процедура Тест()\n    // BSLLS:SelfAssign-off\n    А = А;\n    // BSLLS:SelfAssign-on\n    Б = Б;\nКонецПроцедуры\n",
         );
