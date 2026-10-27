@@ -199,6 +199,25 @@ mod tests {
     /// watchdog, not a latency measure.
     const HANG_WATCHDOG: Duration = test_utils::wait::hang_guard(Duration::from_secs(60));
 
+    /// Park the pool's single worker inside a job that returns once the returned
+    /// sender is dropped. Waits until the worker has dequeued that job: until it
+    /// has, the job still occupies a queue slot, and the worker taking it later
+    /// would free room in a queue the test has just filled.
+    fn park_single_worker(handle: &Handle<usize>) -> Sender<()> {
+        let (gate_tx, gate_rx) = bounded::<()>(0);
+        let (parked_tx, parked_rx) = bounded::<()>(1);
+        handle
+            .pool
+            .try_spawn(move || {
+                let _ = parked_tx.send(());
+                let _ = gate_rx.recv();
+                0
+            })
+            .expect("first job fits");
+        parked_rx.recv_timeout(HANG_WATCHDOG).expect("the worker must take the gate job");
+        gate_tx
+    }
+
     #[test]
     fn bounded_pool_executes_more_jobs_than_workers() {
         let workers = 2;
@@ -278,15 +297,7 @@ mod tests {
     #[test]
     fn try_broadcast_refuses_partial_spawn_when_queue_lacks_room() {
         let handle = TaskPool::<usize>::new_with_workers(1);
-        // Park the single worker so enqueued jobs stay queued.
-        let (gate_tx, gate_rx) = bounded::<()>(0);
-        handle
-            .pool
-            .try_spawn(move || {
-                let _ = gate_rx.recv();
-                0
-            })
-            .expect("first job fits");
+        let gate_tx = park_single_worker(&handle);
         while handle.pool.try_spawn(|| 1).is_ok() {}
 
         assert_eq!(
@@ -300,15 +311,7 @@ mod tests {
     #[test]
     fn try_spawn_reports_full_and_recovers() {
         let handle = TaskPool::<usize>::new_with_workers(1);
-        // Park the single worker on a gate so the queue can only fill up.
-        let (gate_tx, gate_rx) = bounded::<()>(0);
-        handle
-            .pool
-            .try_spawn(move || {
-                let _ = gate_rx.recv();
-                0
-            })
-            .expect("first job fits");
+        let gate_tx = park_single_worker(&handle);
 
         let mut accepted = 1;
         let mut saw_full = false;

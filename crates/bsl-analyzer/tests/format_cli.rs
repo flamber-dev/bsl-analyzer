@@ -112,3 +112,33 @@ fn format_preserves_parse_errors_invariant() {
         "format introduced parse errors: original={orig_errors}, formatted={fmt_errors}"
     );
 }
+
+const BOM_ONLY: &[u8] = &[0xEF, 0xBB, 0xBF];
+
+#[test]
+fn format_leaves_bom_only_module_byte_for_byte() {
+    let temp = TempDir::new().expect("tempdir");
+    let file = temp.path().join("Empty.bsl");
+    fs::write(&file, BOM_ONLY).expect("write fixture");
+
+    let output = bsl_analyzer().arg("format").arg("-w").arg(&file).output().expect("run");
+    assert!(output.status.success(), "stderr:\n{}", String::from_utf8_lossy(&output.stderr));
+    let on_disk = fs::read(&file).expect("read");
+    assert_eq!(on_disk, BOM_ONLY, "BOM-only module must come back byte for byte");
+}
+
+#[test]
+fn format_check_passes_on_bom_only_module() {
+    let temp = TempDir::new().expect("tempdir");
+    let file = temp.path().join("Empty.bsl");
+    fs::write(&file, BOM_ONLY).expect("write fixture");
+
+    let output = bsl_analyzer().arg("format").arg("--check").arg(&file).output().expect("run");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
