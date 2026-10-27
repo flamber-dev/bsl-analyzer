@@ -505,6 +505,11 @@ pub fn render_full(
 
     let n_gaps = ir.gaps.len();
     let n_atoms = ir.atoms.len();
+    // Nothing to format means nothing to rewrite: in a 1C dump an "empty" module is three
+    // bytes of BOM, and appending a final newline both touches a file with no code in it
+    // and writes an LF into a CRLF dump. `Atom` carries the BOM like any other token, so
+    // the question is whether any atom is something other than the BOM.
+    let has_code = ir.atoms.iter().any(|atom| atom.kind != SyntaxKind::BOM);
     let mut out = String::new();
     let mut edits = Vec::new();
 
@@ -521,7 +526,7 @@ pub fn render_full(
         }
         if is_last_gap
             && insert_final_newline
-            && (!out.is_empty() || !rendered.is_empty() || n_atoms > 0)
+            && has_code
             && !rendered.ends_with('\n')
             && !rendered.ends_with("\r\n")
         {
