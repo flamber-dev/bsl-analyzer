@@ -278,7 +278,8 @@ fn assert_mcp_finding(
     let finding = matching[0];
     let ((line, utf16_column), (end_line, end_utf16_column)) =
         last_range_positions(source, range_text);
-    assert_eq!(finding["internal_severity"], "Major", "{code} severity: {body}");
+    let expected_severity = if code == "ModuleAccessibility" { "Warning" } else { "Major" };
+    assert_eq!(finding["internal_severity"], expected_severity, "{code} severity: {body}");
     assert_eq!(finding["message"], expected_message, "{code} identity: {body}");
     if code == "ModuleAccessibility" {
         assert_eq!(
@@ -629,7 +630,7 @@ async fn effective_settings_compatibility_and_execution_context_match_live_adapt
         1,
         SETTINGS_MESSAGE,
     );
-    assert_lsp_finding(&initial_lsp, &source, CONTEXT_CODE, CONTEXT_RANGE, 1, CONTEXT_MESSAGE);
+    assert_lsp_finding(&initial_lsp, &source, CONTEXT_CODE, CONTEXT_RANGE, 2, CONTEXT_MESSAGE);
     let initial_mcp = mcp_diagnostic_state(&client, relative, true, true).await;
     assert_mcp_finding(
         &initial_mcp,
@@ -674,7 +675,7 @@ async fn effective_settings_compatibility_and_execution_context_match_live_adapt
         1,
         COMPATIBILITY_MESSAGE,
     );
-    assert_lsp_finding(&disabled_lsp, &source, CONTEXT_CODE, CONTEXT_RANGE, 1, CONTEXT_MESSAGE);
+    assert_lsp_finding(&disabled_lsp, &source, CONTEXT_CODE, CONTEXT_RANGE, 2, CONTEXT_MESSAGE);
     let disabled_mcp = mcp_diagnostic_state(&client, relative, true, false).await;
     assert_mcp_finding(
         &disabled_mcp,
@@ -753,7 +754,7 @@ async fn effective_settings_compatibility_and_execution_context_match_live_adapt
         "НетТакойПроцедуры",
         SETTINGS_MESSAGE,
     );
-    assert_lsp_finding(&fallback_lsp, &source, CONTEXT_CODE, CONTEXT_RANGE, 1, CONTEXT_MESSAGE);
+    assert_lsp_finding(&fallback_lsp, &source, CONTEXT_CODE, CONTEXT_RANGE, 2, CONTEXT_MESSAGE);
     assert_mcp_finding(&fallback_mcp, &source, CONTEXT_CODE, CONTEXT_RANGE, MCP_CONTEXT_MESSAGE);
     let fallback_provider =
         wait_mcp_call_type(&client, &consumer_path, "ДатьСтроку", "Строка", false).await;
