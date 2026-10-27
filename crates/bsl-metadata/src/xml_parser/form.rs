@@ -51,6 +51,7 @@ pub fn parse_form_xml(xml: &str) -> Result<Form> {
     };
 
     let mut elements = Vec::new();
+    collect_attached_items(form_node, &mut elements, None);
     if let Some(child_items) =
         form_node.children().find(|n| n.is_element() && n.tag_name().name() == "ChildItems")
     {
@@ -241,34 +242,76 @@ fn tag_to_kind(tag: &str) -> FormElementKind {
     }
 }
 
+/// The tags an item carries beside its own `<ChildItems>`, as the dump writes them:
+/// `<ExtendedTooltip>`, `<ContextMenu>` and the auto command bar sit next to the item
+/// they belong to, and the form's own bar next to `<ChildItems>`. They are named form
+/// items like any other (`Элементы.СписокКонтекстноеМеню`), so a walk that only
+/// descends into `<ChildItems>` loses them — and with them every item they hold.
+const ATTACHED_ITEM_TAGS: &[&str] = &[
+    "AutoCommandBar",
+    "ContextMenu",
+    "ExtendedTooltip",
+    "SearchStringAddition",
+    "ViewStatusAddition",
+    "SearchControlAddition",
+];
+
+fn collect_attached_items(
+    owner: roxmltree::Node<'_, '_>,
+    elements: &mut Vec<FormElement>,
+    parent_id: Option<u32>,
+) {
+    for node in owner
+        .children()
+        .filter(|n| n.is_element() && ATTACHED_ITEM_TAGS.contains(&n.tag_name().name()))
+    {
+        push_item(node, elements, parent_id);
+    }
+}
+
+/// Records `node` as a form item and descends into everything it holds: its attached
+/// items and its `<ChildItems>`. An item without a name or an id is not addressable and
+/// is skipped, children and all.
+fn push_item(
+    node: roxmltree::Node<'_, '_>,
+    elements: &mut Vec<FormElement>,
+    parent_id: Option<u32>,
+) {
+    let name = match node.attribute("name") {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return,
+    };
+    // The form's own auto command bar carries `id="-1"`, so the id is read as signed
+    // and kept by its bit pattern: it only has to be unique and to match the
+    // `parent_id` its children are given.
+    let id: u32 = match node.attribute("id").and_then(|s| s.parse::<i64>().ok()) {
+        Some(v) => v as u32,
+        None => return,
+    };
+    let data_path = node
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "DataPath")
+        .and_then(|n| n.text())
+        .map(|t| t.to_string());
+
+    let kind = tag_to_kind(node.tag_name().name());
+    elements.push(FormElement::with_kind(name, id, data_path, kind, parent_id));
+
+    collect_attached_items(node, elements, Some(id));
+    if let Some(nested) =
+        node.children().find(|n| n.is_element() && n.tag_name().name() == "ChildItems")
+    {
+        collect_child_items(nested, elements, Some(id));
+    }
+}
+
 fn collect_child_items(
     child_items: roxmltree::Node<'_, '_>,
     elements: &mut Vec<FormElement>,
     parent_id: Option<u32>,
 ) {
     for node in child_items.children().filter(|n| n.is_element()) {
-        let name = match node.attribute("name") {
-            Some(n) if !n.is_empty() => n.to_string(),
-            _ => continue,
-        };
-        let id: u32 = match node.attribute("id").and_then(|s| s.parse().ok()) {
-            Some(v) => v,
-            None => continue,
-        };
-        let data_path = node
-            .children()
-            .find(|n| n.is_element() && n.tag_name().name() == "DataPath")
-            .and_then(|n| n.text())
-            .map(|t| t.to_string());
-
-        let kind = tag_to_kind(node.tag_name().name());
-        elements.push(FormElement::with_kind(name, id, data_path, kind, parent_id));
-
-        if let Some(nested) =
-            node.children().find(|n| n.is_element() && n.tag_name().name() == "ChildItems")
-        {
-            collect_child_items(nested, elements, Some(id));
-        }
+        push_item(node, elements, parent_id);
     }
 }
 
@@ -1347,5 +1390,53 @@ mod tests {
                 .any(|e| e.kind == FormElementKind::Field && e.parent_id.is_none()),
             "fixture must contain at least one top-level <InputField>"
         );
+    }
+
+    #[test]
+    fn items_attached_beside_child_items_are_collected_with_their_parents() {
+        // The dump writes the form's own bar, and a field's context menu and tooltip,
+        // next to `<ChildItems>` rather than inside it.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.10">
+    <AutoCommandBar name="ФормаКоманднаяПанель" id="-1">
+        <ChildItems>
+            <Button name="ФормаЗаписать" id="5"/>
+        </ChildItems>
+    </AutoCommandBar>
+    <ChildItems>
+        <InputField name="Список" id="6">
+            <DataPath>Объект.Code</DataPath>
+            <ContextMenu name="СписокКонтекстноеМеню" id="7"/>
+            <ExtendedTooltip name="СписокРасширеннаяПодсказка" id="8"/>
+        </InputField>
+    </ChildItems>
+</Form>"#;
+
+        let form = parse_form_xml(xml).unwrap();
+
+        // The ordinary field was collected before the fix and must still be.
+        let field = form.find_element("Список").expect("ordinary field is collected");
+        assert_eq!(field.parent_id, None);
+
+        let bar = form
+            .find_element("ФормаКоманднаяПанель")
+            .expect("the form's own command bar (id=\"-1\") is collected");
+        assert_eq!(bar.parent_id, None);
+
+        let button = form
+            .find_element("ФормаЗаписать")
+            .expect("a button of the form's command bar is collected");
+        assert_eq!(button.id, 5);
+        assert_eq!(button.parent_id, Some(bar.id));
+
+        let menu = form
+            .find_element("СписокКонтекстноеМеню")
+            .expect("the field's context menu is collected");
+        assert_eq!(menu.parent_id, Some(field.id));
+
+        let tooltip = form
+            .find_element("СписокРасширеннаяПодсказка")
+            .expect("the field's extended tooltip is collected");
+        assert_eq!(tooltip.parent_id, Some(field.id));
     }
 }
