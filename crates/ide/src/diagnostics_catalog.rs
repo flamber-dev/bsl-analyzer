@@ -105,9 +105,9 @@ pub fn catalog_entry(code: crate::DiagnosticCode, locale: Locale) -> Option<Cata
     Some(CatalogEntry {
         code: code.as_str(),
         title,
-        // Default config applies no override, so the emitted severity equals the
-        // metadata's computed grade (`EffectiveMetadata::severity_value`).
-        default_severity: meta.calculate_severity().into(),
+        // Default config applies no user override, so the emitted severity is the static
+        // `lsp_severity_override` when the metadata sets one (`EffectiveMetadata::severity_value`).
+        default_severity: meta.effective_severity().into(),
         r#type: diagnostic_type_str(meta.diagnostic_type),
         activated_by_default: meta.activated_by_default,
         clean_code_attribute: clean_code_attribute_str(meta.clean_code_attribute),
