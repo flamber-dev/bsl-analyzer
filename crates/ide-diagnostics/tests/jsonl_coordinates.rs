@@ -51,3 +51,34 @@ fn jsonl_columns_are_zero_based_character_offsets() {
     let first = finding_over(source, "Перем").to_output(source);
     assert_eq!((first.start_line, first.start_column), (0, 0));
 }
+
+#[test]
+fn jsonl_lines_break_on_a_lone_carriage_return() {
+    let source = "Перем А;\rПеременная = \"Значение\";\n";
+    let token = "Значение";
+    let output = finding_over(source, token).to_output(source);
+
+    assert_eq!(output.start_line, 1);
+    assert_eq!(source.lines().count(), 1, "a `\\n`-only split must not see the second line");
+
+    let line = line_index::split_lines(source).nth(output.start_line).unwrap();
+    let sliced: String = line
+        .chars()
+        .skip(output.start_column)
+        .take(output.end_column - output.start_column)
+        .collect();
+    assert_eq!(sliced, token);
+}
+
+#[test]
+fn jsonl_end_column_of_a_multiline_finding_counts_in_the_end_line() {
+    let source = "Перем А;\r\nПеременная = 1;\r\n";
+    let start = TextSize::from(0);
+    let end = TextSize::try_from(source.find("Переменная").unwrap() + "Пер".len()).unwrap();
+    let mut finding = finding_over(source, "Перем");
+    finding.range = TextRange::new(start, end);
+    let output = finding.to_output(source);
+
+    assert_eq!((output.start_line, output.start_column), (0, 0));
+    assert_eq!((output.end_line, output.end_column), (1, 3));
+}
