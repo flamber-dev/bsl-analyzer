@@ -1,5 +1,6 @@
 use crate::Severity;
 use serde::{Deserialize, Serialize};
+use stdx::case::CaseExt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CleanCodeAttribute {
@@ -170,7 +171,30 @@ pub struct DiagnosticMetadata {
     pub impacts: &'static [Impact],
 }
 
+pub fn parse_severity(s: &str) -> Severity {
+    match s.fold_lower().as_str() {
+        "error" => Severity::Error,
+        "warning" => Severity::Warning,
+        "information" | "info" => Severity::Information,
+        "hint" => Severity::Hint,
+        "blocker" => Severity::Blocker,
+        "critical" => Severity::Critical,
+        "major" => Severity::Major,
+        _ => Severity::Warning,
+    }
+}
+
 impl DiagnosticMetadata {
+    /// The severity a finding carries with no user override: the static
+    /// `lsp_severity_override` when the metadata sets one, else the grade computed
+    /// from the diagnostic type and level.
+    pub fn effective_severity(&self) -> Severity {
+        if !self.lsp_severity_override.is_empty() {
+            return parse_severity(self.lsp_severity_override);
+        }
+        self.calculate_severity()
+    }
+
     pub const fn calculate_severity(&self) -> Severity {
         match self.diagnostic_type {
             DiagnosticType::CodeSmell => match self.severity {
