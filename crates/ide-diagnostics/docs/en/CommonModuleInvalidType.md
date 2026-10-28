@@ -18,14 +18,20 @@ the accepted module types.
 | Client-side                     | CommonClient (or CommonGlobal) |             |        |                     | +                             | +                            |
 | Client-server                   | CommonClientServer             |             | +      | +                   | +                             | +                            |
 
-Two deviations are accepted, both taken from the standard:
+These deviations are accepted, taken from the standard's conditional wording:
 
 - a client-side module may set only one of the two client flags - a module
   available only in the managed or only in the ordinary application
   (std469, item 2.3);
 - `Client (Ordinary application)` is required for server-side and
   client-server modules only when the configuration supports the ordinary
-  application (`ordinaryAppSupport`), the same leniency the naming checks apply.
+  application (`ordinaryAppSupport`), the same leniency the naming checks apply;
+- `External connection` is optional for this type check on server-side and
+  client-server modules: a module flagged only `Server` is an ordinary server
+  module of a working configuration (std469, item 2.1 asks for the extra flags
+  so the configuration works in those modes). Naming checks are not loosened:
+  they still select the server and client-server templates that include
+  `External connection`.
 
 `Global`, `Privileged` and `Return values reuse` do not affect the result.
 `Server call` is accepted only together with `Server` and no other context;
