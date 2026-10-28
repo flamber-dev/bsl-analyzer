@@ -41,9 +41,12 @@ pub fn from_metadata(
     //   * Клиентский (п. 2.3): a client module may target only one of the two clients
     //     (only managed or only ordinary application), so any non-empty client pair
     //     without server-side flags is valid;
-    //   * Серверный / Клиент-серверный (п. 2.1): `Клиент (обычное приложение)` exists
-    //     only for the ordinary application, so it is required only when the
-    //     configuration supports it - the same leniency the naming rules apply.
+    //   * Серверный / Клиент-серверный (п. 2.1): the standard asks for the extra flags
+    //     "для корректной работы в режимах внешнего соединения, управляемого и обычного
+    //     приложений", i.e. conditionally. `Клиент (обычное приложение)` exists only for
+    //     the ordinary application, so it is required only when the configuration
+    //     supports it; `ВнешнееСоединение` is optional - a module that is only `Сервер`
+    //     is an ordinary server module of a working configuration.
     // Серверный для вызова с клиента stays exact: `ВызовСервера` is valid only with
     // `Сервер` and no other context (std469 п. 2.2, std679); a module with no context
     // is a deviation too.
@@ -54,10 +57,10 @@ pub fn from_metadata(
         && !module.is_external_connection()
         && (module.is_client_ordinary_application() || module.is_client_managed_application());
 
-    let is_valid = common_module_helpers::is_server(module, ordinary)
+    let is_valid = is_server_for_type_check(module, ordinary)
         || common_module_helpers::is_server_call(module)
         || is_client
-        || common_module_helpers::is_client_server(module, ordinary);
+        || is_client_server_for_type_check(module, ordinary);
 
     if is_valid {
         return Vec::new();
@@ -73,6 +76,24 @@ pub fn from_metadata(
         tags: ctx.tags(code),
         fixes: vec![],
     }]
+}
+
+// These predicates are deliberately NOT the shared `common_module_helpers::is_server` /
+// `is_client_server`: those also decide which modules the naming checks
+// (`define_common_module_name_check`) judge, and loosening them would silently change
+// those rules. Here `ВнешнееСоединение` is optional, for the type check only.
+fn is_server_for_type_check(module: &bsl_metadata::CommonModule, ordinary: bool) -> bool {
+    !module.is_server_call()
+        && module.is_server()
+        && (module.is_client_ordinary_application() || !ordinary)
+        && !module.is_client_managed_application()
+}
+
+fn is_client_server_for_type_check(module: &bsl_metadata::CommonModule, ordinary: bool) -> bool {
+    !module.is_server_call()
+        && module.is_server()
+        && (module.is_client_ordinary_application() || !ordinary)
+        && module.is_client_managed_application()
 }
 
 #[cfg(test)]
@@ -146,14 +167,14 @@ mod tests {
         assert_valid_set(
             false,
             &[
-                // Серверный: Клиент (обычное) optional.
-                "01100", "01110", //
+                // Серверный: ВнешнееСоединение and Клиент (обычное) optional.
+                "01000", "01010", "01100", "01110", //
                 // Серверный для вызова с клиента.
                 "11000", //
                 // Клиентский: any non-empty client pair.
                 "00010", "00001", "00011", //
-                // Клиент-серверный: Клиент (обычное) optional.
-                "01101", "01111",
+                // Клиент-серверный: ВнешнееСоединение and Клиент (обычное) optional.
+                "01001", "01011", "01101", "01111",
             ],
         );
     }
@@ -163,14 +184,14 @@ mod tests {
         assert_valid_set(
             true,
             &[
-                // Серверный.
-                "01110", //
+                // Серверный: ВнешнееСоединение optional, Клиент (обычное) required.
+                "01010", "01110", //
                 // Серверный для вызова с клиента.
                 "11000", //
                 // Клиентский: any non-empty client pair.
                 "00010", "00001", "00011", //
                 // Клиент-серверный.
-                "01111",
+                "01011", "01111",
             ],
         );
     }
@@ -237,6 +258,27 @@ mod tests {
     }
 
     #[test]
+    fn server_module_without_external_connection_is_valid() {
+        // Only `Сервер`: valid without ordinaryAppSupport; with it the rule still
+        // requires `Клиент (обычное приложение)`, so the bare module fires.
+        let bare = || named("ОбщийМодуль24").server(true).build();
+        assert!(!fires(bare(), false));
+        assert!(fires(bare(), true));
+        // With `Клиент (обычное приложение)` it is valid in both modes.
+        for ordinary in [false, true] {
+            let with_ordinary =
+                named("ОбщийМодуль25").server(true).client_ordinary_application(true).build();
+            assert!(!fires(with_ordinary, ordinary));
+            let client_server = named("ОбщийМодуль26КлиентСервер")
+                .server(true)
+                .client_ordinary_application(true)
+                .client_managed_application(true)
+                .build();
+            assert!(!fires(client_server, ordinary));
+        }
+    }
+
+    #[test]
     fn server_call_template_is_valid() {
         for ordinary in [false, true] {
             let module = named("ОбщийМодуль8ВызовСервера").server_call(true).server(true).build();
@@ -287,14 +329,11 @@ mod tests {
     fn incomplete_server_contexts_fire() {
         for ordinary in [false, true] {
             assert!(fires(named("ОбщийМодуль15").build(), ordinary));
-            assert!(fires(named("ОбщийМодуль16").server(true).build(), ordinary));
             assert!(fires(named("ОбщийМодуль17").external_connection(true).build(), ordinary));
-            let no_external = named("ОбщийМодуль18КлиентСервер")
-                .server(true)
-                .client_ordinary_application(true)
-                .client_managed_application(true)
-                .build();
-            assert!(fires(no_external, ordinary));
+            // ВызовСервера mixes with a context-less or external-only module stay errors.
+            let call_external =
+                named("ОбщийМодуль18").server_call(true).external_connection(true).build();
+            assert!(fires(call_external, ordinary));
         }
     }
 
