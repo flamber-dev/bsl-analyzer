@@ -34,7 +34,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             if !code_blocks_before_sub.is_empty() {
                 return vec![create_diagnostic(&code_blocks_before_sub, code, ctx)];
             }
-            break;
+            continue;
         }
 
         if is_code_block(&child) {
@@ -204,6 +204,39 @@ mod tests {
               message: Обнаружен блок кода перед объявлением процедур и функций
               severity: Blocker"#]],
         );
+    }
+
+    #[test]
+    fn test_code_between_two_methods() {
+        let code = r#"Процедура ВыдатьКнигу()
+КонецПроцедуры
+
+ЧислоВыдач = 0;
+
+Процедура ВернутьКнигу()
+КонецПроцедуры
+"#;
+        check(
+            code,
+            expect![[r#"
+            CodeBlockBeforeSub @ 4:1..4:15
+              message: Обнаружен блок кода перед объявлением процедур и функций
+              severity: Blocker"#]],
+        );
+    }
+
+    #[test]
+    fn test_body_after_all_methods_is_valid() {
+        let code = r#"Процедура ВыдатьКнигу()
+КонецПроцедуры
+
+Процедура ВернутьКнигу()
+КонецПроцедуры
+
+ЧислоВыдач = 0;
+ВыдатьКнигу();
+"#;
+        check(code, expect![[r#""#]]);
     }
 
     #[test]
