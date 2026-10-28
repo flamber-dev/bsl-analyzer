@@ -1,7 +1,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use syntax::{SyntaxKind, SyntaxNode};
+use ide_db::TextRange;
+use syntax::{SyntaxKind, SyntaxNode, WalkEvent};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -27,18 +28,24 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let parse = ctx.parse();
     let root = parse.syntax_node();
 
-    let mut code_blocks_before_sub: Vec<SyntaxNode> = Vec::new();
-
-    for child in root.children() {
-        if is_subroutine(&child) {
-            if !code_blocks_before_sub.is_empty() {
-                return vec![create_diagnostic(&code_blocks_before_sub, code, ctx)];
+    // Methods wrapped in `#Если` are nested inside the directive node, so the
+    // scan descends into preprocessor containers instead of looking only at
+    // the root's children.
+    let mut code_before_sub: Option<TextRange> = None;
+    let mut preorder = root.preorder();
+    while let Some(event) = preorder.next() {
+        let WalkEvent::Enter(node) = event else { continue };
+        if is_subroutine(&node) {
+            if let Some(range) = code_before_sub {
+                return vec![create_diagnostic(range, code, ctx)];
             }
-            continue;
-        }
-
-        if is_code_block(&child) {
-            code_blocks_before_sub.push(child.clone());
+            preorder.skip_subtree();
+        } else if is_executable_statement(&node) {
+            let range = node.text_range();
+            code_before_sub = Some(code_before_sub.map_or(range, |acc| acc.cover(range)));
+            preorder.skip_subtree();
+        } else if node != root && !is_preproc_container(&node) {
+            preorder.skip_subtree();
         }
     }
 
@@ -49,90 +56,22 @@ fn is_subroutine(node: &SyntaxNode) -> bool {
     matches!(node.kind(), SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF)
 }
 
-fn is_code_block(node: &SyntaxNode) -> bool {
-    match node.kind() {
-        SyntaxKind::CALL_STMT
-        | SyntaxKind::ASSIGN_STMT
-        | SyntaxKind::IF_STMT
-        | SyntaxKind::WHILE_STMT
-        | SyntaxKind::FOR_STMT
-        | SyntaxKind::FOR_EACH_STMT
-        | SyntaxKind::TRY_STMT
-        | SyntaxKind::RETURN_STMT
-        | SyntaxKind::RAISE_STMT
-        | SyntaxKind::BREAK_STMT
-        | SyntaxKind::CONTINUE_STMT => true,
-
-        SyntaxKind::PRE_REGION_DIR | SyntaxKind::PRE_IF_DIR => contains_executable_code(node),
-
-        SyntaxKind::VAR_DEF
-        | SyntaxKind::WHITESPACE
-        | SyntaxKind::NEWLINE
-        | SyntaxKind::COMMENT
-        | SyntaxKind::COMPILER_DIRECTIVE
-        | SyntaxKind::ANNOTATION => false,
-
-        _ => {
-            tracing::debug!(
-                kind = ?node.kind(),
-                "Unexpected node kind in SourceFile children"
-            );
-            false
-        }
-    }
-}
-
-fn contains_executable_code(node: &SyntaxNode) -> bool {
-    for child in node.children() {
-        if is_subroutine(&child) {
-            continue;
-        }
-        if matches!(
-            child.kind(),
-            SyntaxKind::CALL_STMT
-                | SyntaxKind::ASSIGN_STMT
-                | SyntaxKind::IF_STMT
-                | SyntaxKind::WHILE_STMT
-                | SyntaxKind::FOR_STMT
-                | SyntaxKind::FOR_EACH_STMT
-                | SyntaxKind::TRY_STMT
-                | SyntaxKind::RETURN_STMT
-                | SyntaxKind::RAISE_STMT
-                | SyntaxKind::BREAK_STMT
-                | SyntaxKind::CONTINUE_STMT
-        ) {
-            return true;
-        }
-        if contains_executable_code(&child) {
-            return true;
-        }
-    }
-    false
+fn is_preproc_container(node: &SyntaxNode) -> bool {
+    matches!(
+        node.kind(),
+        SyntaxKind::PRE_IF_DIR
+            | SyntaxKind::PRE_ELSIF_CLAUSE
+            | SyntaxKind::PRE_ELSE_CLAUSE
+            | SyntaxKind::PRE_TORN_IF_PART
+            | SyntaxKind::PRE_REGION_DIR
+    )
 }
 
 fn create_diagnostic(
-    code_blocks: &[SyntaxNode],
+    range: TextRange,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
 ) -> Diagnostic {
-    use ide_db::TextRange;
-
-    let first = code_blocks.first().unwrap();
-    let last = code_blocks.last().unwrap();
-
-    let start_offset = if first.kind() == SyntaxKind::PRE_REGION_DIR {
-        first
-            .descendants()
-            .find(is_executable_statement)
-            .map(|n| n.text_range().start())
-            .unwrap_or_else(|| first.text_range().start())
-    } else {
-        first.text_range().start()
-    };
-
-    let end_offset = last.text_range().end();
-    let range = TextRange::new(start_offset, end_offset);
-
     Diagnostic {
         code,
         message: "Обнаружен блок кода перед объявлением процедур и функций".to_string(),
@@ -155,8 +94,13 @@ fn is_executable_statement(node: &SyntaxNode) -> bool {
             | SyntaxKind::TRY_STMT
             | SyntaxKind::RETURN_STMT
             | SyntaxKind::RAISE_STMT
+            | SyntaxKind::EXECUTE_STMT
             | SyntaxKind::BREAK_STMT
             | SyntaxKind::CONTINUE_STMT
+            | SyntaxKind::GOTO_STMT
+            | SyntaxKind::LABEL_STMT
+            | SyntaxKind::ADD_HANDLER_STMT
+            | SyntaxKind::REMOVE_HANDLER_STMT
     )
 }
 
@@ -237,6 +181,67 @@ mod tests {
 ВыдатьКнигу();
 "#;
         check(code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_code_before_method_inside_if() {
+        let code = r#"Процедура ВыдатьКнигу()
+КонецПроцедуры
+
+ЧислоВыдач = 0;
+
+#Если Сервер Тогда
+Процедура ВернутьКнигу()
+КонецПроцедуры
+#КонецЕсли
+"#;
+        check(
+            code,
+            expect![[r#"
+            CodeBlockBeforeSub @ 4:1..4:15
+              message: Обнаружен блок кода перед объявлением процедур и функций
+              severity: Blocker"#]],
+        );
+    }
+
+    #[test]
+    fn test_range_excludes_method_inside_if() {
+        let code = r#"Процедура ВыдатьКнигу()
+КонецПроцедуры
+#Если Сервер Тогда
+Процедура ВернутьКнигу()
+КонецПроцедуры
+ЧислоВыдач = 0;
+#КонецЕсли
+Процедура СписатьВетхие()
+КонецПроцедуры
+"#;
+        check(
+            code,
+            expect![[r#"
+            CodeBlockBeforeSub @ 6:1..6:15
+              message: Обнаружен блок кода перед объявлением процедур и функций
+              severity: Blocker"#]],
+        );
+    }
+
+    #[test]
+    fn test_execute_between_methods() {
+        let code = r#"Процедура ВыдатьКнигу()
+КонецПроцедуры
+
+Выполнить("ЧислоВыдач = 0;");
+
+Процедура ВернутьКнигу()
+КонецПроцедуры
+"#;
+        check(
+            code,
+            expect![[r#"
+            CodeBlockBeforeSub @ 4:1..4:30
+              message: Обнаружен блок кода перед объявлением процедур и функций
+              severity: Blocker"#]],
+        );
     }
 
     #[test]

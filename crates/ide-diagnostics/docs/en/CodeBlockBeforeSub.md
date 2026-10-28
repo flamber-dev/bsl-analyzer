@@ -11,8 +11,9 @@ In the general case the order is:
 2. procedure and function definitions;
 3. executable module body statements.
 
-If free executable code appears before the first procedure or function, the
-module becomes harder to read and no longer follows the standard module layout.
+If free executable code appears before any procedure or function declaration,
+including code between two methods, the module becomes harder to read and no
+longer follows the standard module layout.
 
 ## Examples
 
