@@ -4,6 +4,7 @@
 //! judged.
 
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
+use ide_db::metadata::{RootKind, WorkspaceConfigsSnapshot};
 use ide_db::RootDatabaseImpl;
 use ide_diagnostics::{DiagnosticCode, DiagnosticsConfig};
 use std::path::{Path, PathBuf};
@@ -172,6 +173,53 @@ fn a_name_the_platform_may_generate_is_not_judged() {
 ",
     );
     let (_temp, found) = findings(&text);
+    assert!(found.is_empty(), "{found:?}");
+}
+
+/// A form borrowed by an extension dumps only the items it adds. The base
+/// dialog's items are absent from that list, so a reference to one of them is
+/// not a miss.
+#[test]
+fn a_borrowed_form_does_not_judge_items_the_base_describes() {
+    let root = PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../bsl-metadata/fixtures/extension_metadata"
+    ));
+    let base = root.join("base");
+    let extension = root.join("extension");
+    let ext_module = extension.join("Documents/Заказ/Forms/ФормаДокумента/Ext/Form/Module.bsl");
+    let base_module = base.join("Documents/Заказ/Forms/ФормаДокумента/Ext/Form/Module.bsl");
+    let text =
+        "&НаСервере\nПроцедура Тест()\n\tЭлементы.БазовоеПоле.Видимость = Ложь;\nКонецПроцедуры\n";
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::default();
+    file_set.insert(FileId(0), VfsPath::new(ext_module.to_string_lossy().as_ref()));
+    file_set.insert(FileId(1), VfsPath::new(base_module.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(FileId(0), SourceRootId(0));
+    db.set_file_source_root(FileId(1), SourceRootId(0));
+    db.set_file_text(FileId(0), text);
+    db.set_file_text(FileId(1), &std::fs::read_to_string(&base_module).unwrap());
+    let paths = vec![(None, base.clone()), (Some("Расширение".to_string()), extension.clone())];
+    db.set_workspace_configs_snapshot(WorkspaceConfigsSnapshot {
+        extension_scopes: vec![None, Some(bsl_metadata::ExtensionScope::InfoBase)],
+        canonical_paths: paths
+            .iter()
+            .map(|(_, path)| std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
+            .collect(),
+        kinds: vec![RootKind::Base, RootKind::Extension],
+        paths,
+        closures: vec![vec![], vec![]],
+        topological_order: vec![0, 1],
+        fingerprint: None,
+        source_exclusions: Default::default(),
+    });
+    let found: Vec<_> =
+        ide_diagnostics::file_diagnostics(&db, FileId(0), &DiagnosticsConfig::all_enabled())
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::UnresolvedField)
+            .map(|d| d.message)
+            .collect();
     assert!(found.is_empty(), "{found:?}");
 }
 

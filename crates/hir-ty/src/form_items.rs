@@ -246,9 +246,18 @@ fn managed_form_with_items(db: &dyn HirDatabase, resolver: &Resolver) -> Option<
 
 /// Whether a miss on this managed form's `Элементы` is a real defect: the dump
 /// describes the form and no body may change the set of items.
+///
+/// A form borrowed by an extension dumps only the items the extension adds.
+/// The base dialog's items are absent from that list, so a miss there proves
+/// nothing — the same reason a borrowed form's handler bindings are not judged.
 pub(crate) fn managed_form_items_closed(db: &dyn HirDatabase, resolver: &Resolver) -> bool {
-    managed_form_with_items(db, resolver).is_some()
-        && no_body_changes_items(db, resolver, ItemsCollection::Managed)
+    let Some(form) = managed_form_with_items(db, resolver) else {
+        return false;
+    };
+    if form.has_base_form() {
+        return false;
+    }
+    no_body_changes_items(db, resolver, ItemsCollection::Managed)
 }
 
 /// Whether `name` may be an item the platform generates rather than one the dump
