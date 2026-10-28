@@ -223,6 +223,55 @@ fn a_borrowed_form_does_not_judge_items_the_base_describes() {
     assert!(found.is_empty(), "{found:?}");
 }
 
+/// `&ИзменениеИКонтроль` is inferred against the base form. An item the
+/// extension's own `Form.xml` adds is still not a miss; a name neither form
+/// lists still is.
+#[test]
+fn a_change_and_validate_insert_does_not_judge_an_extension_item() {
+    let root = PathBuf::from(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../bsl-metadata/fixtures/extension_metadata"
+    ));
+    let base = root.join("base");
+    let extension = root.join("extension");
+    let ext_module = extension.join("Documents/Заказ/Forms/ФормаДокумента/Ext/Form/Module.bsl");
+    let base_module = base.join("Documents/Заказ/Forms/ФормаДокумента/Ext/Form/Module.bsl");
+    let ext_text = "&НаКлиенте\n&ИзменениеИКонтроль(\"Проверка\")\nПроцедура Расш_Проверка()\n#Вставка\n\tЭлементы.ПолеРасширения.Видимость = Ложь;\n\tЭлементы.НетТакого.Видимость = Ложь;\n#КонецВставки\nКонецПроцедуры\n";
+    let base_text = "&НаКлиенте\nПроцедура Проверка()\n\tДанные = Объект;\nКонецПроцедуры\n";
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::default();
+    file_set.insert(FileId(0), VfsPath::new(ext_module.to_string_lossy().as_ref()));
+    file_set.insert(FileId(1), VfsPath::new(base_module.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(FileId(0), SourceRootId(0));
+    db.set_file_source_root(FileId(1), SourceRootId(0));
+    db.set_file_text(FileId(0), ext_text);
+    db.set_file_text(FileId(1), base_text);
+    let paths = vec![(None, base.clone()), (Some("Расширение".to_string()), extension.clone())];
+    db.set_workspace_configs_snapshot(WorkspaceConfigsSnapshot {
+        extension_scopes: vec![None, Some(bsl_metadata::ExtensionScope::InfoBase)],
+        canonical_paths: paths
+            .iter()
+            .map(|(_, path)| std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
+            .collect(),
+        kinds: vec![RootKind::Base, RootKind::Extension],
+        paths,
+        closures: vec![vec![], vec![]],
+        topological_order: vec![0, 1],
+        fingerprint: None,
+        source_exclusions: Default::default(),
+    });
+    let found: Vec<_> =
+        ide_diagnostics::file_diagnostics(&db, FileId(0), &DiagnosticsConfig::all_enabled())
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::UnresolvedField)
+            .map(|d| d.message)
+            .collect();
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("НетТакого"), "{found:?}");
+    assert!(!found.iter().any(|message| message.contains("ПолеРасширения")), "{found:?}");
+}
+
 #[test]
 fn without_the_form_nothing_is_judged() {
     let temp = tempfile::tempdir().expect("tempdir");

@@ -2185,6 +2185,17 @@ impl<'db> InferenceContext<'db> {
         }
     }
 
+    /// An `&ИзменениеИКонтроль` splice is inferred against the base form. An item
+    /// the extension's own `Form.xml` adds is not a miss on that form.
+    fn extension_form_lists_item(&self, field: &hir_def::Name) -> bool {
+        let Some(extension) = self.effective_extension else { return false };
+        self.db
+            .module_metadata(extension)
+            .form
+            .as_ref()
+            .is_some_and(|form| form.find_element(field.as_str()).is_some())
+    }
+
     fn get_resolver(&self) -> Resolver {
         let module_id = hir_def::ModuleId { file_id: self.context_file_id };
         match &self.local_symbols {
@@ -3764,12 +3775,14 @@ impl<'db> InferenceContext<'db> {
                     // the module changes the set itself or the platform generates the item:
                     // a command placed into a command bar or a context menu becomes an item
                     // the dump never lists.
-                    let closed_managed_items =
-                        crate::form_items::is_form_items_collection_ty(self.db, base_ty)
+                    let closed_managed_items = crate::form_items::is_form_items_collection_ty(self.db, base_ty)
                             && crate::form_items::managed_form_items_closed(self.db, &resolver)
                             && !crate::form_items::may_be_generated_item_name(
                                 self.db, &resolver, field,
-                            );
+                            )
+                            // The splice is inferred against the base form, which does not
+                            // list items the extension's own Form.xml adds.
+                            && !self.extension_form_lists_item(field);
                     if !field.is_missing()
                         && (closed_receiver
                             || closed_metadata_collection
