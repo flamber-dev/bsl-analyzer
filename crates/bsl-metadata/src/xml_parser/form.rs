@@ -276,12 +276,14 @@ fn collect_attached_items(
 
 /// Form item ids are unsigned. The one exception is the form's own auto command
 /// bar, which the dump writes as `id="-1"` and which is kept as that bit pattern
-/// so its children can point at it. Any other value that does not fit in `u32` is
-/// not an id: truncating it would reuse another element's id and attach children
-/// to the wrong parent.
+/// so its children can point at it. That bit pattern is `u32::MAX`, so a positive
+/// id of the same value is not an id either: accepting both would make two
+/// elements one parent. Any other value that does not fit in `u32` is not an id:
+/// truncating it would reuse another element's id and attach children to the
+/// wrong parent.
 fn parse_form_item_id(raw: &str) -> Option<u32> {
     if let Ok(id) = raw.parse::<u32>() {
-        return Some(id);
+        return (id != u32::MAX).then_some(id);
     }
     (raw.parse::<i64>().ok() == Some(-1)).then_some(u32::MAX)
 }
@@ -1497,10 +1499,24 @@ mod tests {
             <ContextMenu name="ПолеМеню" id="3"/>
         </InputField>
         <InputField name="Другое" id="-2"/>
+        <InputField name="Максимум" id="4294967295"/>
     </ChildItems>
+    <AutoCommandBar name="ФормаКоманднаяПанель" id="-1">
+        <ChildItems>
+            <Button name="КнопкаПанели" id="4"/>
+        </ChildItems>
+    </AutoCommandBar>
 </Form>"#;
         let form = parse_form_xml(xml).unwrap();
         assert!(form.find_element("Поле").is_none(), "an id past u32::MAX is not an id");
+        assert!(
+            form.find_element("Максимум").is_none(),
+            "u32::MAX is reserved for id=\"-1\" and is not a second element"
+        );
+        let bar = form.find_element("ФормаКоманднаяПанель").unwrap();
+        assert_eq!(bar.id, u32::MAX);
+        let bar_children: Vec<_> = form.children_of(bar.id).map(|e| e.name.as_str()).collect();
+        assert_eq!(bar_children, ["КнопкаПанели"]);
         assert!(
             form.find_element("ПолеМеню").is_none(),
             "children of an unaddressable item are skipped with it"
