@@ -29,9 +29,9 @@ These deviations are accepted, taken from the standard's conditional wording:
 - `External connection` is optional for this type check on server-side and
   client-server modules: a module flagged only `Server` is an ordinary server
   module of a working configuration (std469, item 2.1 asks for the extra flags
-  so the configuration works in those modes). Naming checks are not loosened:
-  they still select the server and client-server templates that include
-  `External connection`.
+  so the configuration works in those modes). There is no naming check for the
+  server template. The client-server naming check still selects only the
+  template that includes `External connection`.
 
 `Global`, `Privileged` and `Return values reuse` do not affect the result.
 `Server call` is accepted only together with `Server` and no other context;

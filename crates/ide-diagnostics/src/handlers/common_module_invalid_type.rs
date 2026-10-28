@@ -78,10 +78,10 @@ pub fn from_metadata(
     }]
 }
 
-// These predicates are deliberately NOT the shared `common_module_helpers::is_server` /
-// `is_client_server`: those also decide which modules the naming checks
-// (`define_common_module_name_check`) judge, and loosening them would silently change
-// those rules. Here `ВнешнееСоединение` is optional, for the type check only.
+// Not the shared `common_module_helpers::is_server` / `is_client_server`: both still
+// require `ВнешнееСоединение`. `is_client_server` is the predicate of the client-server
+// naming check, so loosening it would change that rule. No naming check selects
+// the server template. Here the flag is optional for the type check only.
 fn is_server_for_type_check(module: &bsl_metadata::CommonModule, ordinary: bool) -> bool {
     !module.is_server_call()
         && module.is_server()
