@@ -2,7 +2,7 @@ use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use ide_db::TextRange;
-use syntax::{SyntaxKind, SyntaxNode, WalkEvent};
+use syntax::{SyntaxKind, SyntaxNode};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -28,43 +28,58 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let parse = ctx.parse();
     let root = parse.syntax_node();
 
-    // Methods wrapped in `#Если` are nested inside the directive node, so the
-    // scan descends into preprocessor containers instead of looking only at
-    // the root's children.
-    let mut code_before_sub: Option<TextRange> = None;
-    let mut preorder = root.preorder();
-    while let Some(event) = preorder.next() {
-        let WalkEvent::Enter(node) = event else { continue };
-        if is_subroutine(&node) {
-            if let Some(range) = code_before_sub {
-                return vec![create_diagnostic(range, code, ctx)];
+    match scan(&root, None) {
+        Err(range) => vec![create_diagnostic(range, code, ctx)],
+        Ok(_) => Vec::new(),
+    }
+}
+
+/// Scans `node`'s children in document order, starting with the code still
+/// waiting for a method. Returns that code after the node, or `Err` with the
+/// code that precedes a method.
+///
+/// Methods wrapped in `#Если` are nested inside the directive node, so the
+/// scan descends into preprocessor containers instead of looking only at the
+/// root's children.
+fn scan(node: &SyntaxNode, mut pending: Option<TextRange>) -> Result<Option<TextRange>, TextRange> {
+    for child in node.children() {
+        match child.kind() {
+            SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF => {
+                if let Some(range) = pending {
+                    return Err(range);
+                }
             }
-            preorder.skip_subtree();
-        } else if is_executable_statement(&node) {
-            let range = node.text_range();
-            code_before_sub = Some(code_before_sub.map_or(range, |acc| acc.cover(range)));
-            preorder.skip_subtree();
-        } else if node != root && !is_preproc_container(&node) {
-            preorder.skip_subtree();
+            SyntaxKind::PRE_IF_DIR => pending = scan_preproc_if(&child, pending)?,
+            SyntaxKind::PRE_REGION_DIR => pending = scan(&child, pending)?,
+            _ if is_executable_statement(&child) => {
+                pending = Some(cover(pending, child.text_range()));
+            }
+            _ => {}
         }
     }
-
-    Vec::new()
+    Ok(pending)
 }
 
-fn is_subroutine(node: &SyntaxNode) -> bool {
-    matches!(node.kind(), SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF)
+/// Only one branch of `#Если` is compiled, so code in one branch never
+/// precedes a method in another: each branch starts from the code before the
+/// directive.
+fn scan_preproc_if(
+    dir: &SyntaxNode,
+    pending: Option<TextRange>,
+) -> Result<Option<TextRange>, TextRange> {
+    let mut after = scan(dir, pending)?;
+    for clause in dir.children().filter(|clause| {
+        matches!(clause.kind(), SyntaxKind::PRE_ELSIF_CLAUSE | SyntaxKind::PRE_ELSE_CLAUSE)
+    }) {
+        if let Some(range) = scan(&clause, pending)? {
+            after = Some(cover(after, range));
+        }
+    }
+    Ok(after)
 }
 
-fn is_preproc_container(node: &SyntaxNode) -> bool {
-    matches!(
-        node.kind(),
-        SyntaxKind::PRE_IF_DIR
-            | SyntaxKind::PRE_ELSIF_CLAUSE
-            | SyntaxKind::PRE_ELSE_CLAUSE
-            | SyntaxKind::PRE_TORN_IF_PART
-            | SyntaxKind::PRE_REGION_DIR
-    )
+fn cover(acc: Option<TextRange>, range: TextRange) -> TextRange {
+    acc.map_or(range, |acc| acc.cover(range))
 }
 
 fn create_diagnostic(
@@ -220,6 +235,43 @@ mod tests {
             code,
             expect![[r#"
             CodeBlockBeforeSub @ 6:1..6:15
+              message: Обнаружен блок кода перед объявлением процедур и функций
+              severity: Blocker"#]],
+        );
+    }
+
+    #[test]
+    fn test_code_and_method_in_exclusive_branches_are_valid() {
+        let code = r#"Процедура ВыдатьКнигу()
+КонецПроцедуры
+#Если Сервер Тогда
+ЧислоВыдач = 0;
+#ИначеЕсли Клиент Тогда
+Процедура ВернутьКнигу()
+КонецПроцедуры
+#Иначе
+Процедура СписатьВетхие()
+КонецПроцедуры
+#КонецЕсли
+"#;
+        check(code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn test_code_in_branch_before_method_after_if() {
+        let code = r#"Процедура ВыдатьКнигу()
+КонецПроцедуры
+#Если Сервер Тогда
+#Иначе
+ЧислоВыдач = 0;
+#КонецЕсли
+Процедура ВернутьКнигу()
+КонецПроцедуры
+"#;
+        check(
+            code,
+            expect![[r#"
+            CodeBlockBeforeSub @ 5:1..5:15
               message: Обнаружен блок кода перед объявлением процедур и функций
               severity: Blocker"#]],
         );
