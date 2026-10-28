@@ -232,12 +232,17 @@ fn tag_to_kind(tag: &str) -> FormElementKind {
         "Button" => FormElementKind::Button,
         // The dump spells a decoration by its kind, never as a bare `Decoration`.
         "Decoration" | "LabelDecoration" | "PictureDecoration" => FormElementKind::Decoration,
-        "ContextMenu"
-        | "ExtendedTooltip"
-        | "SearchStringAddition"
-        | "ViewStatusAddition"
-        | "SearchControlAddition"
-        | "AutoCommandBar" => FormElementKind::Addition,
+        // Companion tags are form items, but not all of them are additions. The
+        // platform types of the same objects (the `КонтекстноеМеню` /
+        // `РасширеннаяПодсказка` / `КоманднаяПанель` properties) are ГруппаФормы,
+        // ДекорацияФормы and a command-bar group. Only the search additions are
+        // ДополнениеЭлементаФормы.
+        "ContextMenu" => FormElementKind::Group,
+        "ExtendedTooltip" => FormElementKind::Decoration,
+        "AutoCommandBar" => FormElementKind::CommandBar,
+        "SearchStringAddition" | "ViewStatusAddition" | "SearchControlAddition" => {
+            FormElementKind::Addition
+        }
         _ => FormElementKind::Other,
     }
 }
@@ -1233,12 +1238,12 @@ mod tests {
             ("FormattedDocumentField", FormElementKind::Field),
             ("PlannerField", FormElementKind::Field),
             ("PeriodField", FormElementKind::Field),
-            ("ContextMenu", FormElementKind::Addition),
-            ("ExtendedTooltip", FormElementKind::Addition),
+            ("ContextMenu", FormElementKind::Group),
+            ("ExtendedTooltip", FormElementKind::Decoration),
             ("SearchStringAddition", FormElementKind::Addition),
             ("ViewStatusAddition", FormElementKind::Addition),
             ("SearchControlAddition", FormElementKind::Addition),
-            ("AutoCommandBar", FormElementKind::Addition),
+            ("AutoCommandBar", FormElementKind::CommandBar),
             ("CompletelyUnknownTag", FormElementKind::Other),
         ];
         for (tag, expected) in cases {
@@ -1400,7 +1405,9 @@ mod tests {
 <Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.10">
     <AutoCommandBar name="ФормаКоманднаяПанель" id="-1">
         <ChildItems>
-            <Button name="ФормаЗаписать" id="5"/>
+            <Button name="ФормаЗаписать" id="5">
+                <ExtendedTooltip name="ФормаЗаписатьРасширеннаяПодсказка" id="9"/>
+            </Button>
         </ChildItems>
     </AutoCommandBar>
     <ChildItems>
@@ -1408,6 +1415,9 @@ mod tests {
             <DataPath>Объект.Code</DataPath>
             <ContextMenu name="СписокКонтекстноеМеню" id="7"/>
             <ExtendedTooltip name="СписокРасширеннаяПодсказка" id="8"/>
+            <SearchStringAddition name="СписокСтрокаПоиска" id="10"/>
+            <ViewStatusAddition name="СписокСостояниеПросмотра" id="11"/>
+            <SearchControlAddition name="СписокУправлениеПоиском" id="12"/>
         </InputField>
     </ChildItems>
 </Form>"#;
@@ -1416,27 +1426,50 @@ mod tests {
 
         // The ordinary field was collected before the fix and must still be.
         let field = form.find_element("Список").expect("ordinary field is collected");
+        assert_eq!(field.kind, FormElementKind::Field);
         assert_eq!(field.parent_id, None);
 
         let bar = form
             .find_element("ФормаКоманднаяПанель")
             .expect("the form's own command bar (id=\"-1\") is collected");
+        // `-1` is kept by its bit pattern so a child's parent_id can point at the bar.
+        assert_eq!(bar.id, u32::MAX);
+        assert_eq!(bar.kind, FormElementKind::CommandBar);
         assert_eq!(bar.parent_id, None);
 
         let button = form
             .find_element("ФормаЗаписать")
             .expect("a button of the form's command bar is collected");
         assert_eq!(button.id, 5);
+        assert_eq!(button.kind, FormElementKind::Button);
         assert_eq!(button.parent_id, Some(bar.id));
 
         let menu = form
             .find_element("СписокКонтекстноеМеню")
             .expect("the field's context menu is collected");
+        assert_eq!(menu.kind, FormElementKind::Group);
         assert_eq!(menu.parent_id, Some(field.id));
 
         let tooltip = form
             .find_element("СписокРасширеннаяПодсказка")
             .expect("the field's extended tooltip is collected");
+        assert_eq!(tooltip.kind, FormElementKind::Decoration);
         assert_eq!(tooltip.parent_id, Some(field.id));
+
+        let button_tooltip = form
+            .find_element("ФормаЗаписатьРасширеннаяПодсказка")
+            .expect("a tooltip attached to a command-bar button is collected");
+        assert_eq!(button_tooltip.parent_id, Some(button.id));
+
+        for (name, id) in [
+            ("СписокСтрокаПоиска", 10),
+            ("СписокСостояниеПросмотра", 11),
+            ("СписокУправлениеПоиском", 12),
+        ] {
+            let addition = form.find_element(name).expect(name);
+            assert_eq!(addition.kind, FormElementKind::Addition, "{name}");
+            assert_eq!(addition.id, id, "{name}");
+            assert_eq!(addition.parent_id, Some(field.id), "{name}");
+        }
     }
 }
