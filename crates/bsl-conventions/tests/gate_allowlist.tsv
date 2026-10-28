@@ -45,6 +45,7 @@ crates/bsl-metadata/src/xml_parser/predefined_parser.rs	Failed to parse Predefin
 crates/bsl-metadata/src/xml_parser/web_service.rs	WebServices/{}/Ext/Module.bsl	1	конструкция: канонический URI по умолчанию, загрузчик переписывает найденным
 crates/bsl-search/src/context.rs	Ext	1	вне-класса: позиция имени объекта, сравнение сознательно точное
 crates/bsl-types/src/display.rs	CommonModule	1	вне-класса: отображаемое имя типа
+crates/hir-ty/src/form_items.rs	Form	1	вне-класса: английское имя идентификатора BSL «Форма»
 crates/hir-ty/src/platform_type_name.rs	xml	1	вне-класса: тег имени платформенного типа
 crates/hir-ty/src/subtype.rs	CommonModule	1	вне-класса: имя типа в решётке подтипов
 crates/hir/src/definition.rs	Module	1	вне-класса: отображаемое имя вида определения
