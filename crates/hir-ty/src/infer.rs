@@ -3760,11 +3760,22 @@ impl<'db> InferenceContext<'db> {
                     let closed_ordinary_controls =
                         crate::form_items::is_ordinary_controls_collection_ty(self.db, base_ty)
                             && crate::form_items::ordinary_controls_closed(self.db, &resolver);
+                    // A managed form's items are the ones its `Form.xml` describes, unless
+                    // the module changes the set itself or the platform generates the item:
+                    // a command placed into a command bar or a context menu becomes an item
+                    // the dump never lists.
+                    let closed_managed_items =
+                        crate::form_items::is_form_items_collection_ty(self.db, base_ty)
+                            && crate::form_items::managed_form_items_closed(self.db, &resolver)
+                            && !crate::form_items::may_be_generated_item_name(
+                                self.db, &resolver, field,
+                            );
                     if !field.is_missing()
                         && (closed_receiver
                             || closed_metadata_collection
                             || closed_description
-                            || closed_ordinary_controls)
+                            || closed_ordinary_controls
+                            || closed_managed_items)
                     {
                         self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedField {
                             expr: expr_id,
