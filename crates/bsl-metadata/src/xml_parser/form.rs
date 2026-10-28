@@ -274,6 +274,18 @@ fn collect_attached_items(
     }
 }
 
+/// Form item ids are unsigned. The one exception is the form's own auto command
+/// bar, which the dump writes as `id="-1"` and which is kept as that bit pattern
+/// so its children can point at it. Any other value that does not fit in `u32` is
+/// not an id: truncating it would reuse another element's id and attach children
+/// to the wrong parent.
+fn parse_form_item_id(raw: &str) -> Option<u32> {
+    if let Ok(id) = raw.parse::<u32>() {
+        return Some(id);
+    }
+    (raw.parse::<i64>().ok() == Some(-1)).then_some(u32::MAX)
+}
+
 /// Records `node` as a form item and descends into everything it holds: its attached
 /// items and its `<ChildItems>`. An item without a name or an id is not addressable and
 /// is skipped, children and all.
@@ -286,11 +298,8 @@ fn push_item(
         Some(n) if !n.is_empty() => n.to_string(),
         _ => return,
     };
-    // The form's own auto command bar carries `id="-1"`, so the id is read as signed
-    // and kept by its bit pattern: it only has to be unique and to match the
-    // `parent_id` its children are given.
-    let id: u32 = match node.attribute("id").and_then(|s| s.parse::<i64>().ok()) {
-        Some(v) => v as u32,
+    let id = match node.attribute("id").and_then(parse_form_item_id) {
+        Some(id) => id,
         None => return,
     };
     let data_path = node
@@ -1471,5 +1480,34 @@ mod tests {
             assert_eq!(addition.id, id, "{name}");
             assert_eq!(addition.parent_id, Some(field.id), "{name}");
         }
+    }
+
+    #[test]
+    fn an_id_outside_u32_is_skipped_instead_of_truncated() {
+        // `4294967297` does not fit in u32. Truncating it to 1 would make this field
+        // share the group's id, and its context menu would show up as the group's child.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.10">
+    <ChildItems>
+        <UsualGroup name="Группа" id="1">
+            <ChildItems>
+                <Button name="Кнопка" id="2"/>
+            </ChildItems>
+        </UsualGroup>
+        <InputField name="Поле" id="4294967297">
+            <ContextMenu name="ПолеМеню" id="3"/>
+        </InputField>
+        <InputField name="Другое" id="-2"/>
+    </ChildItems>
+</Form>"#;
+        let form = parse_form_xml(xml).unwrap();
+        assert!(form.find_element("Поле").is_none(), "an id past u32::MAX is not an id");
+        assert!(
+            form.find_element("ПолеМеню").is_none(),
+            "children of an unaddressable item are skipped with it"
+        );
+        assert!(form.find_element("Другое").is_none(), "a negative id other than -1 is not an id");
+        let kids: Vec<_> = form.children_of(1).map(|e| e.name.as_str()).collect();
+        assert_eq!(kids, ["Кнопка"]);
     }
 }
