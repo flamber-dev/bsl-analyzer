@@ -31,9 +31,11 @@ three cases:
 
 Reporting covers both the platform logging API (`Message`, `WriteLogEvent`,
 `Сообщить`, `ЗаписьЖурналаРегистрации`) and application/BSP helpers
-recognized by name: a record-or-notify verb together with an error noun —
-`ЗаписатьОшибкуВЖурналРегистрации`, `ДобавитьСообщениеДляЖурналаРегистрации`,
-`СообщитьОбОшибке`, `ShowMessageBox`, etc. Pure formatters
+recognized by name: a record-or-notify verb together with an error, log, or
+event noun — `ЗаписатьОшибкуВЖурналРегистрации`,
+`ДобавитьСообщениеДляЖурналаРегистрации`, `СообщитьОбОшибке`, `ShowMessageBox`,
+`ЗаписатьСобытиеПодсистемы`, etc. The callee body is not read: the decision
+depends only on the name. Pure formatters
 (`ПодробноеПредставлениеОшибки`, `ErrorDescription`) do not count as
 reporting: a block that only formats the error stays "silent".
 

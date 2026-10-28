@@ -141,9 +141,9 @@ fn recovery_kind(body: &Body, expr_id: ExprIdx) -> RecoveryKind {
 }
 
 /// Recognizes user/BSP error-reporting helpers by name: a recording or
-/// notifying verb combined with an error/log/problem/warning noun
+/// notifying verb combined with an error/log/problem/warning/event noun
 /// (`ЗаписатьОшибкуВЖурналРегистрации`, `ДобавитьСообщениеДляЖурналаРегистрации`,
-/// `СообщитьОПроблеме`, `ПоказатьПредупреждение`, …).
+/// `СообщитьОПроблеме`, `ПоказатьПредупреждение`, `ЗаписатьСобытие…`, …).
 ///
 /// The platform security registry only knows global logging primitives, but the
 /// bulk of BSP/application handlers report through such named helpers. Pure
