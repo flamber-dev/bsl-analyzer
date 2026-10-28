@@ -51,6 +51,7 @@ pub fn parse_form_xml(xml: &str) -> Result<Form> {
     };
 
     let mut elements = Vec::new();
+    collect_attached_items(form_node, &mut elements, None);
     if let Some(child_items) =
         form_node.children().find(|n| n.is_element() && n.tag_name().name() == "ChildItems")
     {
@@ -231,13 +232,90 @@ fn tag_to_kind(tag: &str) -> FormElementKind {
         "Button" => FormElementKind::Button,
         // The dump spells a decoration by its kind, never as a bare `Decoration`.
         "Decoration" | "LabelDecoration" | "PictureDecoration" => FormElementKind::Decoration,
-        "ContextMenu"
-        | "ExtendedTooltip"
-        | "SearchStringAddition"
-        | "ViewStatusAddition"
-        | "SearchControlAddition"
-        | "AutoCommandBar" => FormElementKind::Addition,
+        // Companion tags are form items, but not all of them are additions. The
+        // platform types of the same objects (the `КонтекстноеМеню` /
+        // `РасширеннаяПодсказка` / `КоманднаяПанель` properties) are ГруппаФормы,
+        // ДекорацияФормы and a command-bar group. Only the search additions are
+        // ДополнениеЭлементаФормы.
+        "ContextMenu" => FormElementKind::Group,
+        "ExtendedTooltip" => FormElementKind::Decoration,
+        "AutoCommandBar" => FormElementKind::CommandBar,
+        "SearchStringAddition" | "ViewStatusAddition" | "SearchControlAddition" => {
+            FormElementKind::Addition
+        }
         _ => FormElementKind::Other,
+    }
+}
+
+/// The tags an item carries beside its own `<ChildItems>`, as the dump writes them:
+/// `<ExtendedTooltip>`, `<ContextMenu>` and the auto command bar sit next to the item
+/// they belong to, and the form's own bar next to `<ChildItems>`. They are named form
+/// items like any other (`Элементы.СписокКонтекстноеМеню`), so a walk that only
+/// descends into `<ChildItems>` loses them — and with them every item they hold.
+const ATTACHED_ITEM_TAGS: &[&str] = &[
+    "AutoCommandBar",
+    "ContextMenu",
+    "ExtendedTooltip",
+    "SearchStringAddition",
+    "ViewStatusAddition",
+    "SearchControlAddition",
+];
+
+fn collect_attached_items(
+    owner: roxmltree::Node<'_, '_>,
+    elements: &mut Vec<FormElement>,
+    parent_id: Option<u32>,
+) {
+    for node in owner
+        .children()
+        .filter(|n| n.is_element() && ATTACHED_ITEM_TAGS.contains(&n.tag_name().name()))
+    {
+        push_item(node, elements, parent_id);
+    }
+}
+
+/// Form item ids are unsigned. The one exception is the form's own auto command
+/// bar, which the dump writes as `id="-1"` and which is kept as that bit pattern
+/// so its children can point at it. Any other value that does not fit in `u32` is
+/// not an id: truncating it would reuse another element's id and attach children
+/// to the wrong parent.
+fn parse_form_item_id(raw: &str) -> Option<u32> {
+    if let Ok(id) = raw.parse::<u32>() {
+        return Some(id);
+    }
+    (raw.parse::<i64>().ok() == Some(-1)).then_some(u32::MAX)
+}
+
+/// Records `node` as a form item and descends into everything it holds: its attached
+/// items and its `<ChildItems>`. An item without a name or an id is not addressable and
+/// is skipped, children and all.
+fn push_item(
+    node: roxmltree::Node<'_, '_>,
+    elements: &mut Vec<FormElement>,
+    parent_id: Option<u32>,
+) {
+    let name = match node.attribute("name") {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return,
+    };
+    let id = match node.attribute("id").and_then(parse_form_item_id) {
+        Some(id) => id,
+        None => return,
+    };
+    let data_path = node
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "DataPath")
+        .and_then(|n| n.text())
+        .map(|t| t.to_string());
+
+    let kind = tag_to_kind(node.tag_name().name());
+    elements.push(FormElement::with_kind(name, id, data_path, kind, parent_id));
+
+    collect_attached_items(node, elements, Some(id));
+    if let Some(nested) =
+        node.children().find(|n| n.is_element() && n.tag_name().name() == "ChildItems")
+    {
+        collect_child_items(nested, elements, Some(id));
     }
 }
 
@@ -247,28 +325,7 @@ fn collect_child_items(
     parent_id: Option<u32>,
 ) {
     for node in child_items.children().filter(|n| n.is_element()) {
-        let name = match node.attribute("name") {
-            Some(n) if !n.is_empty() => n.to_string(),
-            _ => continue,
-        };
-        let id: u32 = match node.attribute("id").and_then(|s| s.parse().ok()) {
-            Some(v) => v,
-            None => continue,
-        };
-        let data_path = node
-            .children()
-            .find(|n| n.is_element() && n.tag_name().name() == "DataPath")
-            .and_then(|n| n.text())
-            .map(|t| t.to_string());
-
-        let kind = tag_to_kind(node.tag_name().name());
-        elements.push(FormElement::with_kind(name, id, data_path, kind, parent_id));
-
-        if let Some(nested) =
-            node.children().find(|n| n.is_element() && n.tag_name().name() == "ChildItems")
-        {
-            collect_child_items(nested, elements, Some(id));
-        }
+        push_item(node, elements, parent_id);
     }
 }
 
@@ -1190,12 +1247,12 @@ mod tests {
             ("FormattedDocumentField", FormElementKind::Field),
             ("PlannerField", FormElementKind::Field),
             ("PeriodField", FormElementKind::Field),
-            ("ContextMenu", FormElementKind::Addition),
-            ("ExtendedTooltip", FormElementKind::Addition),
+            ("ContextMenu", FormElementKind::Group),
+            ("ExtendedTooltip", FormElementKind::Decoration),
             ("SearchStringAddition", FormElementKind::Addition),
             ("ViewStatusAddition", FormElementKind::Addition),
             ("SearchControlAddition", FormElementKind::Addition),
-            ("AutoCommandBar", FormElementKind::Addition),
+            ("AutoCommandBar", FormElementKind::CommandBar),
             ("CompletelyUnknownTag", FormElementKind::Other),
         ];
         for (tag, expected) in cases {
@@ -1347,5 +1404,110 @@ mod tests {
                 .any(|e| e.kind == FormElementKind::Field && e.parent_id.is_none()),
             "fixture must contain at least one top-level <InputField>"
         );
+    }
+
+    #[test]
+    fn items_attached_beside_child_items_are_collected_with_their_parents() {
+        // The dump writes the form's own bar, and a field's context menu and tooltip,
+        // next to `<ChildItems>` rather than inside it.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.10">
+    <AutoCommandBar name="ФормаКоманднаяПанель" id="-1">
+        <ChildItems>
+            <Button name="ФормаЗаписать" id="5">
+                <ExtendedTooltip name="ФормаЗаписатьРасширеннаяПодсказка" id="9"/>
+            </Button>
+        </ChildItems>
+    </AutoCommandBar>
+    <ChildItems>
+        <InputField name="Список" id="6">
+            <DataPath>Объект.Code</DataPath>
+            <ContextMenu name="СписокКонтекстноеМеню" id="7"/>
+            <ExtendedTooltip name="СписокРасширеннаяПодсказка" id="8"/>
+            <SearchStringAddition name="СписокСтрокаПоиска" id="10"/>
+            <ViewStatusAddition name="СписокСостояниеПросмотра" id="11"/>
+            <SearchControlAddition name="СписокУправлениеПоиском" id="12"/>
+        </InputField>
+    </ChildItems>
+</Form>"#;
+
+        let form = parse_form_xml(xml).unwrap();
+
+        // The ordinary field was collected before the fix and must still be.
+        let field = form.find_element("Список").expect("ordinary field is collected");
+        assert_eq!(field.kind, FormElementKind::Field);
+        assert_eq!(field.parent_id, None);
+
+        let bar = form
+            .find_element("ФормаКоманднаяПанель")
+            .expect("the form's own command bar (id=\"-1\") is collected");
+        // `-1` is kept by its bit pattern so a child's parent_id can point at the bar.
+        assert_eq!(bar.id, u32::MAX);
+        assert_eq!(bar.kind, FormElementKind::CommandBar);
+        assert_eq!(bar.parent_id, None);
+
+        let button = form
+            .find_element("ФормаЗаписать")
+            .expect("a button of the form's command bar is collected");
+        assert_eq!(button.id, 5);
+        assert_eq!(button.kind, FormElementKind::Button);
+        assert_eq!(button.parent_id, Some(bar.id));
+
+        let menu = form
+            .find_element("СписокКонтекстноеМеню")
+            .expect("the field's context menu is collected");
+        assert_eq!(menu.kind, FormElementKind::Group);
+        assert_eq!(menu.parent_id, Some(field.id));
+
+        let tooltip = form
+            .find_element("СписокРасширеннаяПодсказка")
+            .expect("the field's extended tooltip is collected");
+        assert_eq!(tooltip.kind, FormElementKind::Decoration);
+        assert_eq!(tooltip.parent_id, Some(field.id));
+
+        let button_tooltip = form
+            .find_element("ФормаЗаписатьРасширеннаяПодсказка")
+            .expect("a tooltip attached to a command-bar button is collected");
+        assert_eq!(button_tooltip.parent_id, Some(button.id));
+
+        for (name, id) in [
+            ("СписокСтрокаПоиска", 10),
+            ("СписокСостояниеПросмотра", 11),
+            ("СписокУправлениеПоиском", 12),
+        ] {
+            let addition = form.find_element(name).expect(name);
+            assert_eq!(addition.kind, FormElementKind::Addition, "{name}");
+            assert_eq!(addition.id, id, "{name}");
+            assert_eq!(addition.parent_id, Some(field.id), "{name}");
+        }
+    }
+
+    #[test]
+    fn an_id_outside_u32_is_skipped_instead_of_truncated() {
+        // `4294967297` does not fit in u32. Truncating it to 1 would make this field
+        // share the group's id, and its context menu would show up as the group's child.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.10">
+    <ChildItems>
+        <UsualGroup name="Группа" id="1">
+            <ChildItems>
+                <Button name="Кнопка" id="2"/>
+            </ChildItems>
+        </UsualGroup>
+        <InputField name="Поле" id="4294967297">
+            <ContextMenu name="ПолеМеню" id="3"/>
+        </InputField>
+        <InputField name="Другое" id="-2"/>
+    </ChildItems>
+</Form>"#;
+        let form = parse_form_xml(xml).unwrap();
+        assert!(form.find_element("Поле").is_none(), "an id past u32::MAX is not an id");
+        assert!(
+            form.find_element("ПолеМеню").is_none(),
+            "children of an unaddressable item are skipped with it"
+        );
+        assert!(form.find_element("Другое").is_none(), "a negative id other than -1 is not an id");
+        let kids: Vec<_> = form.children_of(1).map(|e| e.name.as_str()).collect();
+        assert_eq!(kids, ["Кнопка"]);
     }
 }
