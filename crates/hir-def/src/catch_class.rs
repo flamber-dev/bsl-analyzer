@@ -141,9 +141,9 @@ fn recovery_kind(body: &Body, expr_id: ExprIdx) -> RecoveryKind {
 }
 
 /// Recognizes user/BSP error-reporting helpers by name: a recording or
-/// notifying verb combined with an error/log/problem/warning noun
+/// notifying verb combined with an error/log/problem/warning/event noun
 /// (`ЗаписатьОшибкуВЖурналРегистрации`, `ДобавитьСообщениеДляЖурналаРегистрации`,
-/// `СообщитьОПроблеме`, `ПоказатьПредупреждение`, …).
+/// `СообщитьОПроблеме`, `ПоказатьПредупреждение`, `ЗаписатьСобытие…`, …).
 ///
 /// The platform security registry only knows global logging primitives, but the
 /// bulk of BSP/application handlers report through such named helpers. Pure
@@ -163,7 +163,13 @@ fn name_is_error_report_sink(name: &str) -> bool {
         "оповест",   // Оповестить…
         "сохран",    // СохранитьОшибкуВЖурнал
     ];
-    const NOUNS: &[&str] = &["ошибк", "журнал", "проблем", "предупрежд"];
+    const NOUNS: &[&str] = &[
+        "ошибк",      // ЗаписатьОшибку…
+        "журнал",     // …ВЖурналРегистрации
+        "проблем",    // СообщитьОПроблеме
+        "предупрежд", // ПоказатьПредупреждение
+        "событи",     // ЗаписатьСобытиеЖурнала / ДобавитьСобытие…
+    ];
 
     let lower = name.fold_lower();
     VERBS.iter().any(|verb| lower.contains(verb)) && NOUNS.iter().any(|noun| lower.contains(noun))
@@ -591,5 +597,78 @@ mod tests {
         );
         let except = first_try_except(&body);
         assert_eq!(classify_catch_body(&body, except), CatchBodyClass::Mixed);
+    }
+
+    #[test]
+    fn local_event_wrapper_with_return_is_mixed() {
+        // A module-local wrapper around the journal write: `Записать… Событие…`.
+        // The call plus `Возврат` is a log and an other statement, so Mixed.
+        let body = parse_lower(
+            r#"
+Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        ЗаписатьСобытиеПодсистемы("Не разобрано: " + ПодробноеПредставлениеОшибки(ИнформацияОбОшибке()), УровеньЖурналаРегистрации.Ошибка);
+        Возврат;
+    КонецПопытки;
+КонецПроцедуры
+"#,
+        );
+        let except = first_try_except(&body);
+        assert_eq!(classify_catch_body(&body, except), CatchBodyClass::Mixed);
+    }
+
+    #[test]
+    fn local_event_wrapper_alone_is_logs_only() {
+        let body = parse_lower(
+            r#"
+Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        ЗафиксироватьСобытие(ИнформацияОбОшибке());
+    КонецПопытки;
+КонецПроцедуры
+"#,
+        );
+        let except = first_try_except(&body);
+        assert_eq!(classify_catch_body(&body, except), CatchBodyClass::LogsOnly);
+    }
+
+    #[test]
+    fn unnamed_call_with_return_stays_silent() {
+        let body = parse_lower(
+            r#"
+Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        ОбработатьДанные(ИнформацияОбОшибке());
+        Возврат;
+    КонецПопытки;
+КонецПроцедуры
+"#,
+        );
+        let except = first_try_except(&body);
+        assert_eq!(classify_catch_body(&body, except), CatchBodyClass::Silent);
+    }
+
+    #[test]
+    fn verb_with_foreign_noun_stays_silent() {
+        let body = parse_lower(
+            r#"
+Процедура Тест()
+    Попытка
+        Действие();
+    Исключение
+        ЗаписатьФайл(ИнформацияОбОшибке());
+        Возврат;
+    КонецПопытки;
+КонецПроцедуры
+"#,
+        );
+        let except = first_try_except(&body);
+        assert_eq!(classify_catch_body(&body, except), CatchBodyClass::Silent);
     }
 }
