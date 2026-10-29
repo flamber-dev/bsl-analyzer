@@ -1,4 +1,7 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, DiagnosticsContext};
+use bsl_metadata::MdoType;
+use lexer::sdbl::{tokenize_sdbl, SdblTokenKind};
+use std::str::FromStr;
 use syntax::sdbl_query::LiteralTextMap;
 use syntax::{SyntaxKind, SyntaxNode, TextRange, TextSize};
 
@@ -12,6 +15,29 @@ pub type SdblDispatchFn = fn(
     query_text: &str,
     diagnostics: &mut Vec<Diagnostic>,
 );
+
+/// Whether a query text is attested as 1C's own query language, and not a foreign
+/// dialect that merely opens with `SELECT` — WQL (`SELECT Caption FROM Win32_Process`),
+/// T-SQL, an ADO command. Both attestations come from vocabulary only SDBL owns: a
+/// keyword spelled in Cyrillic, which no foreign dialect has, and a metadata-object
+/// prefix, which only an SDBL data source names. String literals and comments do not
+/// attest — their Cyrillic is data, not language.
+///
+/// A text that attests to neither is not thereby ruled out, only unproven, which is why
+/// the answer costs a quick fix its place in a `fixAll` batch rather than costing the
+/// finding itself.
+pub fn sdbl_dialect_attested(query_text: &str) -> bool {
+    tokenize_sdbl(query_text).iter().any(|token| {
+        if matches!(token.kind, SdblTokenKind::String | SdblTokenKind::Comment) {
+            return false;
+        }
+        if MdoType::from_str(token.text.as_str()).is_ok() {
+            return true;
+        }
+        token.kind != SdblTokenKind::Ident
+            && token.text.chars().any(|ch| matches!(ch, 'А'..='я' | 'Ё' | 'ё'))
+    })
+}
 
 pub fn dispatch_simple(
     config: &DiagnosticsConfig,
@@ -457,5 +483,33 @@ pub(crate) fn for_each_executed_query(
         };
         let mapper = SdblPositionMapper::from_query_info(query_info, &bsl_source, &line_starts);
         f(text, package, &mapper, &query_info.query_text);
+    }
+}
+
+#[cfg(test)]
+mod dialect_tests {
+    use super::sdbl_dialect_attested;
+
+    #[test]
+    fn a_cyrillic_keyword_attests() {
+        assert!(sdbl_dialect_attested("ВЫБРАТЬ Оклад ИЗ Кадры"));
+    }
+
+    #[test]
+    fn a_metadata_prefix_attests() {
+        assert!(sdbl_dialect_attested("SELECT Shelf FROM Catalog.Library"));
+    }
+
+    #[test]
+    fn a_wql_text_attests_to_nothing() {
+        assert!(!sdbl_dialect_attested("SELECT Caption, ProcessId FROM Win32_Process"));
+    }
+
+    // Cyrillic inside a string literal is data, not language.
+    #[test]
+    fn cyrillic_in_a_literal_does_not_attest() {
+        assert!(!sdbl_dialect_attested(
+            "SELECT Caption FROM Win32_Process WHERE Caption = \"Блокнот\""
+        ));
     }
 }
