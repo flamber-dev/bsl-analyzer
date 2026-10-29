@@ -1,7 +1,5 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, DiagnosticsContext};
-use bsl_metadata::MdoType;
 use lexer::sdbl::{tokenize_sdbl, SdblTokenKind};
-use std::str::FromStr;
 use syntax::sdbl_query::LiteralTextMap;
 use syntax::{SyntaxKind, SyntaxNode, TextRange, TextSize};
 
@@ -19,10 +17,13 @@ pub type SdblDispatchFn = fn(
 /// Whether a query text is attested as 1C's own query language, and not a foreign
 /// dialect that merely opens with `SELECT` — WQL (`SELECT Caption FROM Win32_Process`),
 /// T-SQL, an ADO command. Both attestations come from vocabulary only SDBL owns: a
-/// keyword spelled in Cyrillic, which no foreign dialect has, and a metadata-object
-/// prefix (`Catalog.`), which only an SDBL data source names. A metadata-type word away
-/// from that position does not attest: `Report` or `Role` is an ordinary table or column
-/// name in T-SQL and WQL. String literals and comments do not attest either — their
+/// keyword spelled in Cyrillic, which no foreign dialect has, and the prefix of a
+/// metadata table (`Catalog.`), which only an SDBL data source names. The prefix is read
+/// from the lexer's own table roots, so a metadata kind without query tables (`Report.`,
+/// `Role.`) is a foreign qualifier, and a root word away from that position does not
+/// attest either: `Task` or `Document` is an ordinary column name in T-SQL and WQL. A
+/// foreign schema spelled like a root (`FROM Task.Users`) still attests — it reads
+/// exactly as `FROM Catalog.Library` does. String literals and comments do not attest either — their
 /// words are data, not language. That covers apostrophe-quoted literals as well: SDBL
 /// has none besides dates, so the lexer leaves their content as plain tokens, while
 /// WQL and T-SQL quote every string that way.
@@ -51,7 +52,7 @@ pub fn sdbl_dialect_attested(query_text: &str) -> bool {
             continue;
         }
         let is_prefix = significant.peek().is_some_and(|next| next.kind == SdblTokenKind::Dot);
-        if is_prefix && MdoType::from_str(token.text.as_str()).is_ok() {
+        if is_prefix && is_query_table_root(token.kind) {
             return true;
         }
         if token.kind != SdblTokenKind::Ident
@@ -61,6 +62,32 @@ pub fn sdbl_dialect_attested(query_text: &str) -> bool {
         }
     }
     false
+}
+
+fn is_query_table_root(kind: SdblTokenKind) -> bool {
+    use SdblTokenKind as S;
+    matches!(
+        kind,
+        S::MdoCatalog
+            | S::MdoDocument
+            | S::MdoEnum
+            | S::MdoChartOfCharacteristicTypes
+            | S::MdoChartOfAccounts
+            | S::MdoChartOfCalculationTypes
+            | S::MdoInformationRegister
+            | S::MdoAccumulationRegister
+            | S::MdoAccountingRegister
+            | S::MdoCalculationRegister
+            | S::MdoBusinessProcess
+            | S::MdoTask
+            | S::MdoExternalDataSource
+            | S::MdoConstant
+            | S::MdoConstants
+            | S::MdoSequence
+            | S::MdoDocumentJournal
+            | S::MdoExchangePlan
+            | S::MdoFilterCriterion
+    )
 }
 
 pub fn dispatch_simple(
@@ -544,6 +571,21 @@ mod dialect_tests {
         assert!(!sdbl_dialect_attested("SELECT Report, Body FROM Reports"));
         assert!(!sdbl_dialect_attested("SELECT Caption, Role FROM Win32_Process"));
         assert!(!sdbl_dialect_attested("SELECT Caption FROM enum"));
+    }
+
+    // Reports, roles and common modules are metadata kinds without query tables: a
+    // `Report.` qualifier can only be a foreign table name.
+    #[test]
+    fn a_metadata_kind_without_query_tables_does_not_attest() {
+        assert!(!sdbl_dialect_attested("SELECT Report.Name FROM Report"));
+        assert!(!sdbl_dialect_attested("SELECT Role.Name FROM Role"));
+        assert!(!sdbl_dialect_attested("SELECT Name FROM CommonModule.Items"));
+    }
+
+    #[test]
+    fn a_query_table_root_attests_in_either_language() {
+        assert!(sdbl_dialect_attested("SELECT Amount FROM AccumulationRegister.Stock"));
+        assert!(sdbl_dialect_attested("SELECT Amount FROM Document.Invoice"));
     }
 
     #[test]

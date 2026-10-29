@@ -657,5 +657,6 @@ mod tests {
         assert!(!fix_is_safe_for_fix_all(
             "SELECT Caption, ProcessId FROM Win32_Process WHERE Caption = 'Task'"
         ));
+        assert!(!fix_is_safe_for_fix_all("SELECT Report.Name FROM Report"));
     }
 }
