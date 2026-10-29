@@ -650,4 +650,12 @@ mod tests {
     fn an_english_query_over_a_metadata_table_keeps_an_auto_applicable_fix() {
         assert!(fix_is_safe_for_fix_all("SELECT Shelf FROM Catalog.Library"));
     }
+
+    #[test]
+    fn a_foreign_dialect_naming_a_metadata_type_keeps_its_fix_out_of_fix_all() {
+        assert!(!fix_is_safe_for_fix_all("SELECT Caption, Role FROM Win32_Process"));
+        assert!(!fix_is_safe_for_fix_all(
+            "SELECT Caption, ProcessId FROM Win32_Process WHERE Caption = 'Task'"
+        ));
+    }
 }

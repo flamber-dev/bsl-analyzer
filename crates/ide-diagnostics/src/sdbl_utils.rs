@@ -20,23 +20,47 @@ pub type SdblDispatchFn = fn(
 /// dialect that merely opens with `SELECT` — WQL (`SELECT Caption FROM Win32_Process`),
 /// T-SQL, an ADO command. Both attestations come from vocabulary only SDBL owns: a
 /// keyword spelled in Cyrillic, which no foreign dialect has, and a metadata-object
-/// prefix, which only an SDBL data source names. String literals and comments do not
-/// attest — their Cyrillic is data, not language.
+/// prefix (`Catalog.`), which only an SDBL data source names. A metadata-type word away
+/// from that position does not attest: `Report` or `Role` is an ordinary table or column
+/// name in T-SQL and WQL. String literals and comments do not attest either — their
+/// words are data, not language. That covers apostrophe-quoted literals as well: SDBL
+/// has none besides dates, so the lexer leaves their content as plain tokens, while
+/// WQL and T-SQL quote every string that way.
 ///
 /// A text that attests to neither is not thereby ruled out, only unproven, which is why
 /// the answer costs a quick fix its place in a `fixAll` batch rather than costing the
 /// finding itself.
 pub fn sdbl_dialect_attested(query_text: &str) -> bool {
-    tokenize_sdbl(query_text).iter().any(|token| {
-        if matches!(token.kind, SdblTokenKind::String | SdblTokenKind::Comment) {
-            return false;
+    let tokens = tokenize_sdbl(query_text);
+    let mut significant = tokens
+        .iter()
+        .filter(|token| {
+            !matches!(
+                token.kind,
+                SdblTokenKind::Whitespace | SdblTokenKind::Newline | SdblTokenKind::Comment
+            )
+        })
+        .peekable();
+    let mut in_apostrophe_literal = false;
+    while let Some(token) = significant.next() {
+        if token.kind == SdblTokenKind::Error && token.text == "'" {
+            in_apostrophe_literal = !in_apostrophe_literal;
+            continue;
         }
-        if MdoType::from_str(token.text.as_str()).is_ok() {
+        if in_apostrophe_literal || token.kind == SdblTokenKind::String {
+            continue;
+        }
+        let is_prefix = significant.peek().is_some_and(|next| next.kind == SdblTokenKind::Dot);
+        if is_prefix && MdoType::from_str(token.text.as_str()).is_ok() {
             return true;
         }
-        token.kind != SdblTokenKind::Ident
+        if token.kind != SdblTokenKind::Ident
             && token.text.chars().any(|ch| matches!(ch, 'А'..='я' | 'Ё' | 'ё'))
-    })
+        {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn dispatch_simple(
@@ -511,5 +535,35 @@ mod dialect_tests {
         assert!(!sdbl_dialect_attested(
             "SELECT Caption FROM Win32_Process WHERE Caption = \"Блокнот\""
         ));
+    }
+
+    // A metadata-type word attests only as a prefix: `Report` and `Role` are ordinary
+    // table and column names in T-SQL and WQL.
+    #[test]
+    fn a_metadata_type_word_outside_prefix_position_does_not_attest() {
+        assert!(!sdbl_dialect_attested("SELECT Report, Body FROM Reports"));
+        assert!(!sdbl_dialect_attested("SELECT Caption, Role FROM Win32_Process"));
+        assert!(!sdbl_dialect_attested("SELECT Caption FROM enum"));
+    }
+
+    #[test]
+    fn a_metadata_prefix_attests_across_whitespace() {
+        assert!(sdbl_dialect_attested("SELECT Shelf FROM Catalog\n\t.Library"));
+    }
+
+    // WQL and T-SQL quote strings with apostrophes; what sits between them is data.
+    #[test]
+    fn a_single_quoted_literal_does_not_attest() {
+        assert!(!sdbl_dialect_attested(
+            "SELECT Caption FROM Win32_Process WHERE Caption = 'Task.Run'"
+        ));
+        assert!(!sdbl_dialect_attested("SELECT Caption FROM Win32_Process WHERE Name = 'Строка'"));
+        assert!(!sdbl_dialect_attested("SELECT Caption FROM Win32_Process WHERE Caption = 'из'"));
+    }
+
+    #[test]
+    fn a_date_literal_does_not_hide_what_follows() {
+        assert!(sdbl_dialect_attested("SELECT Shelf FROM Catalog.Library WHERE Date > '20200101'"));
+        assert!(sdbl_dialect_attested("SELECT Shelf WHERE Date > '20200101' ИЛИ Shelf = 1"));
     }
 }
