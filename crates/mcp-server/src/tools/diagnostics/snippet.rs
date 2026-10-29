@@ -368,6 +368,7 @@ pub(crate) fn findings(
     let mut findings: Vec<Value> = Vec::new();
     let mut count_capped = false;
     let mut structure_omitted = 0usize;
+    let mut structure_omitted_codes = std::collections::BTreeSet::new();
 
     for diag in diagnostics {
         let Some(range) = snippet_range(&diag, snippet, &prepared.host_parse_errors) else {
@@ -375,6 +376,7 @@ pub(crate) fn findings(
         };
         if MODULE_STRUCTURE_CODES.contains(&diag.code) && !explicitly_asked(diag.code) {
             structure_omitted += 1;
+            structure_omitted_codes.insert(diag.code.as_str());
             continue;
         }
         let local = ide::Diagnostic { range, ..diag };
@@ -407,6 +409,7 @@ pub(crate) fn findings(
     });
     if structure_omitted > 0 {
         body["module_structure_omitted"] = json!(structure_omitted);
+        body["module_structure_omitted_codes"] = json!(structure_omitted_codes);
     }
     if budget_exhausted {
         body["budget_exhausted"] = json!(true);
