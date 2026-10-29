@@ -1306,7 +1306,7 @@ impl Counts {
 
 fn schema_json() -> Value {
     json!({
-        "schema_version": "17",
+        "schema_version": "18",
         "actions": ["catalog", "schema", "status", "file", "snippet", "workspace"],
         "severities": ["error", "warning", "info", "hint"],
         "status_result": {
@@ -1481,7 +1481,7 @@ mod tests {
         let result = schema();
         assert_structured_mirrors_text(&result);
         let body = body_of(&result);
-        assert_eq!(body["schema_version"], "17");
+        assert_eq!(body["schema_version"], "18");
         let actions = body["actions"].as_array().unwrap();
         assert!(actions.iter().any(|a| a == "catalog"));
         assert!(actions.iter().any(|a| a == "status"));
@@ -1596,7 +1596,7 @@ mod tests {
     #[test]
     fn diagnostics_selective_baseline_response_advertises_schema_15() {
         let body = schema_json();
-        assert_eq!(body["schema_version"], "17");
+        assert_eq!(body["schema_version"], "18");
         for field in ["selection", "partitions_enabled", "partitions_unsuppressed", "unsuppressed"]
         {
             assert!(body["baseline_result"][field].is_string());
@@ -1606,7 +1606,7 @@ mod tests {
     #[test]
     fn diagnostics_schema_json() {
         let body = schema_json();
-        assert_eq!(body["schema_version"], "17");
+        assert_eq!(body["schema_version"], "18");
         assert!(body["baseline_result"]["selection"].is_string());
         assert!(body["baseline_result"]["unsuppressed"].is_string());
     }
