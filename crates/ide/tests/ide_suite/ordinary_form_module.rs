@@ -141,7 +141,8 @@ fn ordinary_form_module_is_checked_for_the_managed_thick_client() {
 
 /// `Выполнить`/`Вычислить` in an ordinary form module is not the vulnerability the standard
 /// describes: the module runs in the thick client only, and the standard exempts client code.
-/// The syntactic `&НаКлиенте` exemption cannot cover this - ordinary forms carry no directives.
+/// The syntactic `&НаКлиенте` exemption cannot cover this - directives in an ordinary form do
+/// not decide where its code runs.
 #[test]
 fn execute_in_an_ordinary_form_module_is_not_reported() {
     const EXECUTE: &str = "\
