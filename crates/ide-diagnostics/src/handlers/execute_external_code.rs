@@ -25,6 +25,12 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 pub fn from_hir(range: LocalRange, ctx: &AnalysisContext) -> Option<Diagnostic<LocalRange>> {
+    // An ORDINARY form module is thick-client-only code: it has no server context, and the
+    // standard exempts code running on the client. The `&НаКлиенте` exemption in lowering is
+    // syntactic, and ordinary form modules carry no compilation directives at all.
+    if ctx.is_ordinary_form_module() {
+        return None;
+    }
     crate::simple_hir_diagnostic(
         DiagnosticCode::ExecuteExternalCode,
         "Запрещено выполнять внешний код на сервере",
