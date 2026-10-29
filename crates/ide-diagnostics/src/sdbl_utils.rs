@@ -1,5 +1,5 @@
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, DiagnosticsContext};
-use lexer::sdbl::{tokenize_sdbl, SdblTokenKind};
+use lexer::sdbl::{tokenize_sdbl, SdblToken, SdblTokenKind};
 use syntax::sdbl_query::LiteralTextMap;
 use syntax::{SyntaxKind, SyntaxNode, TextRange, TextSize};
 
@@ -23,35 +23,41 @@ pub type SdblDispatchFn = fn(
 /// `Role.`) is a foreign qualifier, and a root word away from that position does not
 /// attest either: `Task` or `Document` is an ordinary column name in T-SQL and WQL. A
 /// foreign schema spelled like a root (`FROM Task.Users`) still attests — it reads
-/// exactly as `FROM Catalog.Library` does. String literals and comments do not attest either — their
-/// words are data, not language. That covers apostrophe-quoted literals as well: SDBL
-/// has none besides dates, so the lexer leaves their content as plain tokens, while
-/// WQL and T-SQL quote every string that way.
+/// exactly as `FROM Catalog.Library` does.
+///
+/// Only code attests; string literals, comments and quoted identifiers hold data. The
+/// SDBL lexer marks its own `"…"` and `//…`, but leaves the foreign forms — `'…'`,
+/// `--…`, `/*…*/`, `[…]`, `` `…` `` — as plain tokens, so the scan skips them as `ForeignRegion`s.
 ///
 /// A text that attests to neither is not thereby ruled out, only unproven, which is why
 /// the answer costs a quick fix its place in a `fixAll` batch rather than costing the
 /// finding itself.
 pub fn sdbl_dialect_attested(query_text: &str) -> bool {
     let tokens = tokenize_sdbl(query_text);
-    let mut significant = tokens
-        .iter()
-        .filter(|token| {
-            !matches!(
-                token.kind,
-                SdblTokenKind::Whitespace | SdblTokenKind::Newline | SdblTokenKind::Comment
-            )
-        })
-        .peekable();
-    let mut in_apostrophe_literal = false;
-    while let Some(token) = significant.next() {
-        if token.kind == SdblTokenKind::Error && token.text == "'" {
-            in_apostrophe_literal = !in_apostrophe_literal;
+    let mut region: Option<ForeignRegion> = None;
+    let mut index = 0;
+    while let Some(token) = tokens.get(index) {
+        let next = tokens.get(index + 1);
+        index += 1;
+        if let Some(open) = region {
+            if open.closes_at(token, next) {
+                region = None;
+                index += open.closer_len() - 1;
+            }
             continue;
         }
-        if in_apostrophe_literal || token.kind == SdblTokenKind::String {
+        if let Some(opened) = ForeignRegion::opens_at(token, next) {
+            region = Some(opened);
+            index += opened.opener_len() - 1;
             continue;
         }
-        let is_prefix = significant.peek().is_some_and(|next| next.kind == SdblTokenKind::Dot);
+        if is_trivia(token.kind) || token.kind == SdblTokenKind::String {
+            continue;
+        }
+        let is_prefix = tokens[index..]
+            .iter()
+            .find(|following| !is_trivia(following.kind))
+            .is_some_and(|following| following.kind == SdblTokenKind::Dot);
         if is_prefix && is_query_table_root(token.kind) {
             return true;
         }
@@ -62,6 +68,58 @@ pub fn sdbl_dialect_attested(query_text: &str) -> bool {
         }
     }
     false
+}
+
+/// A stretch of foreign syntax whose words are data: SDBL has no such form, so its lexer
+/// emits the delimiters as operators or `Error` tokens and the content as plain tokens.
+#[derive(Clone, Copy)]
+enum ForeignRegion {
+    Quoted(&'static str),
+    LineComment,
+    BlockComment,
+}
+
+impl ForeignRegion {
+    fn opens_at(token: &SdblToken, next: Option<&SdblToken>) -> Option<Self> {
+        let next_kind = next.map(|next| next.kind);
+        match (token.kind, token.text.as_str(), next_kind) {
+            (SdblTokenKind::Error, "'", _) => Some(Self::Quoted("'")),
+            (SdblTokenKind::Error, "[", _) => Some(Self::Quoted("]")),
+            (SdblTokenKind::Error, "`", _) => Some(Self::Quoted("`")),
+            (SdblTokenKind::Minus, _, Some(SdblTokenKind::Minus)) => Some(Self::LineComment),
+            (SdblTokenKind::Slash, _, Some(SdblTokenKind::Star)) => Some(Self::BlockComment),
+            _ => None,
+        }
+    }
+
+    fn closes_at(self, token: &SdblToken, next: Option<&SdblToken>) -> bool {
+        match self {
+            Self::Quoted(closer) => token.kind == SdblTokenKind::Error && token.text == closer,
+            Self::LineComment => token.kind == SdblTokenKind::Newline,
+            Self::BlockComment => {
+                token.kind == SdblTokenKind::Star
+                    && next.is_some_and(|next| next.kind == SdblTokenKind::Slash)
+            }
+        }
+    }
+
+    fn opener_len(self) -> usize {
+        match self {
+            Self::Quoted(_) => 1,
+            Self::LineComment | Self::BlockComment => 2,
+        }
+    }
+
+    fn closer_len(self) -> usize {
+        match self {
+            Self::Quoted(_) | Self::LineComment => 1,
+            Self::BlockComment => 2,
+        }
+    }
+}
+
+fn is_trivia(kind: SdblTokenKind) -> bool {
+    matches!(kind, SdblTokenKind::Whitespace | SdblTokenKind::Newline | SdblTokenKind::Comment)
 }
 
 fn is_query_table_root(kind: SdblTokenKind) -> bool {
@@ -601,6 +659,24 @@ mod dialect_tests {
         ));
         assert!(!sdbl_dialect_attested("SELECT Caption FROM Win32_Process WHERE Name = 'Строка'"));
         assert!(!sdbl_dialect_attested("SELECT Caption FROM Win32_Process WHERE Caption = 'из'"));
+    }
+
+    // The SDBL lexer knows only `//` comments; foreign comments and quoted identifiers
+    // would otherwise reach the check as code.
+    #[test]
+    fn a_foreign_comment_or_quoted_identifier_does_not_attest() {
+        assert!(!sdbl_dialect_attested("SELECT Caption FROM Win32_Process -- выгрузка из базы"));
+        assert!(!sdbl_dialect_attested("SELECT Caption /* выбрать из Catalog.Library */ FROM T"));
+        assert!(!sdbl_dialect_attested("SELECT [Имя из базы] FROM Users"));
+        assert!(!sdbl_dialect_attested("SELECT `Имя из базы` FROM Users"));
+    }
+
+    #[test]
+    fn code_after_a_foreign_comment_still_attests() {
+        assert!(sdbl_dialect_attested("-- don't\nSELECT Shelf FROM Catalog.Library"));
+        assert!(sdbl_dialect_attested("SELECT /* note */ Shelf ИЗ Кадры"));
+        assert!(sdbl_dialect_attested("SELECT [Shelf] FROM Catalog.Library"));
+        assert!(sdbl_dialect_attested("SELECT Сумма - -1 КАК Остаток"));
     }
 
     #[test]
