@@ -1177,6 +1177,13 @@ fn finding_value(
         },
         "has_fix": !diag.fixes.is_empty(),
     });
+
+    // `has_fix` alone invites applying what it finds. A fix that renames a symbol whose other
+    // references a file-local batch cannot reach, or that rewrites a text the analyzer only
+    // guessed the dialect of, is deliberately opt-in — the answer has to say which is which.
+    if !diag.fixes.is_empty() {
+        v["fix_auto_applicable"] = json!(diag.fixes.iter().any(|fix| fix.safe_for_fix_all));
+    }
     // `range` above stays as it was — 0-based lines, columns in CODE POINTS — and the
     // contract location travels beside it. In a location, `range` is the finding's own
     // span (a diagnostic has no name of its own to point at) and `enclosing_range` is the
@@ -1213,7 +1220,7 @@ fn finding_value(
     if detailed {
         v["internal_severity"] = json!(diag.severity.as_str());
         if let Some(fix) = diag.fixes.first() {
-            v["fix"] = json!({ "label": fix.label });
+            v["fix"] = json!({ "label": fix.label, "auto_applicable": fix.safe_for_fix_all });
         }
     }
     v
@@ -1299,7 +1306,7 @@ impl Counts {
 
 fn schema_json() -> Value {
     json!({
-        "schema_version": "17",
+        "schema_version": "18",
         "actions": ["catalog", "schema", "status", "file", "snippet", "workspace"],
         "severities": ["error", "warning", "info", "hint"],
         "status_result": {
@@ -1346,9 +1353,10 @@ fn schema_json() -> Value {
             "standards": "[{ id: u16, url }] — 1C development standards the rule enforces, checked requirement first; omitted when the diagnostic has no standard behind it",
             "tags": "string[] — omitted when empty",
             "has_fix": "bool — whether an automatic fix is attached",
+            "fix_auto_applicable": "bool — present whenever `has_fix` is true: true when a fix may be applied unattended over a whole file (what an editor's `source.fixAll` takes), false when every attached fix is deliberately opt-in and needs a human to look at the place first",
             "graph_id": "durable id of the containing method — pass to `graph callers`/`node` (omitted when not in a method or not an indexable module)",
             "internal_severity": "7-grade name (detailed only)",
-            "fix": "{ label } (detailed only, when present)"
+            "fix": "{ label, auto_applicable } (detailed only, when present); `auto_applicable` is that one fix's own verdict, while `fix_auto_applicable` answers for the finding"
         },
         "baseline_result": {
             "state": "disabled | full | partial | error",
@@ -1473,7 +1481,7 @@ mod tests {
         let result = schema();
         assert_structured_mirrors_text(&result);
         let body = body_of(&result);
-        assert_eq!(body["schema_version"], "17");
+        assert_eq!(body["schema_version"], "18");
         let actions = body["actions"].as_array().unwrap();
         assert!(actions.iter().any(|a| a == "catalog"));
         assert!(actions.iter().any(|a| a == "status"));
@@ -1588,7 +1596,7 @@ mod tests {
     #[test]
     fn diagnostics_selective_baseline_response_advertises_schema_15() {
         let body = schema_json();
-        assert_eq!(body["schema_version"], "17");
+        assert_eq!(body["schema_version"], "18");
         for field in ["selection", "partitions_enabled", "partitions_unsuppressed", "unsuppressed"]
         {
             assert!(body["baseline_result"][field].is_string());
@@ -1598,7 +1606,7 @@ mod tests {
     #[test]
     fn diagnostics_schema_json() {
         let body = schema_json();
-        assert_eq!(body["schema_version"], "17");
+        assert_eq!(body["schema_version"], "18");
         assert!(body["baseline_result"]["selection"].is_string());
         assert!(body["baseline_result"]["unsuppressed"].is_string());
     }

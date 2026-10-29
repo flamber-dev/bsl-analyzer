@@ -309,3 +309,48 @@ async fn a_dropped_module_structure_rule_is_named_in_the_answer() {
     );
     client.cancel().await.expect("session closed");
 }
+
+// Two findings of one answer, each carrying a fix: removing an empty statement is
+// deterministic, removing a self-assignment is not something to do blind. `has_fix` renders
+// them identically, so the verdict has to be published beside it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_answer_says_which_fix_may_be_applied_unattended() {
+    let _guard = TEST_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    project(dir.path());
+    let client = client(dir.path()).await;
+
+    let body = diagnostics(
+        &client,
+        json!({
+            "action": "snippet",
+            "code": "Процедура Проба()\n\tА = 1;\n\tА = А;\n\tБ = 2;;\n\tСообщить(А + Б);\nКонецПроцедуры\n",
+            "min_severity": "hint",
+            "detail": "detailed",
+        }),
+    )
+    .await;
+    let findings = body["result"]["findings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("findings in {body}"))
+        .clone();
+    let by_code = |code: &str| -> serde_json::Value {
+        findings
+            .iter()
+            .find(|f| f["code"] == code)
+            .unwrap_or_else(|| panic!("a {code} finding in {body}"))
+            .clone()
+    };
+
+    let empty_statement = by_code("EmptyStatement");
+    assert_eq!(empty_statement["has_fix"], json!(true), "{body}");
+    assert_eq!(empty_statement["fix_auto_applicable"], json!(true), "{body}");
+    assert_eq!(empty_statement["fix"]["auto_applicable"], json!(true), "{body}");
+
+    let self_assign = by_code("SelfAssign");
+    assert_eq!(self_assign["has_fix"], json!(true), "{body}");
+    assert_eq!(self_assign["fix_auto_applicable"], json!(false), "{body}");
+    assert_eq!(self_assign["fix"]["auto_applicable"], json!(false), "{body}");
+
+    client.cancel().await.expect("session closed");
+}
