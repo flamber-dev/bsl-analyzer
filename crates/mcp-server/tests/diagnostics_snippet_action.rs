@@ -274,3 +274,38 @@ async fn an_unclosed_method_is_reported_in_a_host_whose_tail_does_not_parse() {
     assert!(codes(&body).contains(&"ParseError".to_owned()), "{body}");
     client.cancel().await.expect("session closed");
 }
+
+// A rule about a whole module's layout is dropped from a snippet's findings; the answer must
+// still name it, or "no finding" and "finding discarded" are indistinguishable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dropped_module_structure_rule_is_named_in_the_answer() {
+    let _guard = TEST_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    project(dir.path());
+    let client = client(dir.path()).await;
+
+    let body = diagnostics(
+        &client,
+        json!({
+            "action": "snippet",
+            "code": "Процедура НиктоНеЗовет()\n    А = 1;\n    Сообщить(А);\nКонецПроцедуры\n",
+        }),
+    )
+    .await;
+    let result = &body["result"];
+    assert!(
+        result["module_structure_omitted"].as_u64().unwrap_or(0) > 0,
+        "expected a dropped module-structure finding: {body}"
+    );
+    let named: Vec<String> = result["module_structure_omitted_codes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("module_structure_omitted_codes in {body}"))
+        .iter()
+        .map(|code| code.as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        named.contains(&"UnusedLocalMethod".to_owned()),
+        "dropped codes must name the rule: {named:?} in {body}"
+    );
+    client.cancel().await.expect("session closed");
+}
