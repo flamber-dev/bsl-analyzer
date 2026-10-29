@@ -77,7 +77,8 @@
   локальный метод: `CodeOutOfRegion`, `EmptyRegion`, `DuplicateRegion`, `NonStandardRegion`,
   `NonExportMethodsInApiRegion`, `CodeBlockBeforeSub`, `UnusedLocalMethod`) к фрагменту не
   относятся и отбрасываются, если не названы в `codes` явно; их число — в
-  `result.module_structure_omitted`.
+  `result.module_structure_omitted`, а сами коды — в `result.module_structure_omitted_codes`
+  (без повторов, по возрастанию): любой из них можно вернуть, назвав его в `codes`.
 
 ### Версии и lifecycle справочной поверхности
 

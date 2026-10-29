@@ -1403,6 +1403,7 @@ fn schema_json() -> Value {
             "truncated": "bool",
             "findings": "finding[] — `range` is 0-based and relative to `code`; no `location`, no `graph_id`. A parse error an unclosed block of `code` surfaces after it (on the wrapper's closing line or in the host after it), and that the host does not have by itself, is pinned to the end of `code`",
             "module_structure_omitted": "usize — findings of rules about a whole module's layout (CodeOutOfRegion, EmptyRegion, DuplicateRegion, NonStandardRegion, NonExportMethodsInApiRegion, CodeBlockBeforeSub, UnusedLocalMethod) dropped because a snippet is not a module; present only when > 0. Ask for a code in `codes` to keep it",
+            "module_structure_omitted_codes": "array of string — the de-duplicated, sorted codes behind `module_structure_omitted`; present only alongside it. Pass one in `codes` to get its findings back",
             "error": "no_host_module | invalid_snippet_context | the `file` path errors — present instead of findings when the code could not be placed"
         },
         "workspace_params": {
