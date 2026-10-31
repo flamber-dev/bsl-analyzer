@@ -134,7 +134,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         // button's handler. Reporting them unused turns one unread file into a pack of
         // false findings over every handler of the form, so stay silent here and let
         // `OrdinaryFormDialogUnread` say why the check was dropped.
-        if !form.is_managed() && !form.ordinary_dialog_known() {
+        if form.is_ordinary() && !form.ordinary_dialog_known() {
             return Vec::new();
         }
         for handler in form.event_handlers() {
@@ -1366,6 +1366,26 @@ mod tests {
             diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalMethod).collect();
         assert_eq!(unused.len(), 1, "{unused:?}");
         assert!(unused[0].message.contains("НеИспользуемая"));
+    }
+
+    #[test]
+    fn test_form_of_unknown_type_still_reports_unused_methods() {
+        let form = bsl_metadata::Form::new(
+            "Форма".to_string(),
+            bsl_metadata::FormType::Unknown,
+            uuid::Uuid::nil(),
+        );
+        let diagnostics = crate::test_utils::check_metadata_diagnostic(
+            form_module_metadata(form),
+            ORDINARY_FORM_MODULE,
+            |_metadata, ctx| super::check(ctx),
+        );
+        let unused: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::UnusedLocalMethod).collect();
+        assert!(
+            unused.iter().any(|d| d.message.contains("НеИспользуемая")),
+            "only an ordinary form drops the check: {unused:?}"
+        );
     }
 
     #[test]
