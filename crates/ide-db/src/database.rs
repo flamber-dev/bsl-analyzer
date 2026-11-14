@@ -3769,6 +3769,21 @@ impl hir::HirDatabase for RootDatabaseImpl {
     ) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>> {
         queries::reaching_definitions_query(self, method)
     }
+
+    fn module_code_foreign_write_reaching_definitions(
+        &self,
+        file_id: FileId,
+    ) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>> {
+        let file_id_input = FileIdInput::new(self, file_id);
+        queries::module_code_foreign_write_reaching_definitions_query(self, file_id_input)
+    }
+
+    fn method_foreign_write_reaching_definitions(
+        &self,
+        method: hir::MethodIdInput<'_>,
+    ) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>> {
+        queries::foreign_write_reaching_definitions_query(self, method)
+    }
 }
 
 #[salsa::db]

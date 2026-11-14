@@ -14,6 +14,20 @@ use stdx::case::CaseExt;
 
 use crate::{Lattice, Transfer};
 
+/// A writer of a local that the body does not spell out as an assignment: the analysis cannot
+/// read the value, only the fact that one may have been written here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ForeignWrite {
+    /// An argument the callee is PROVEN to take by reference.
+    ByRefArgument,
+    /// An argument whose passing direction is not attested: the callee may take it either way.
+    /// Kept apart from [`ForeignWrite::ByRefArgument`] because a reader is allowed to look past
+    /// an unattested direction and not past a proven one.
+    UnattestedArgument,
+    /// `Выполнить`, which may write any name of the body.
+    Execute,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DefSite {
     Parameter(BindingId),
@@ -25,6 +39,14 @@ pub enum DefSite {
     ForLoop(BindingId),
 
     ForEachLoop(BindingId),
+
+    /// A write the body does not spell out, attributed to the statement that may perform it.
+    /// `site` is the enclosing statement for a write inside a header expression too: identity
+    /// of the place is all a consumer needs, and a header expression is not a statement.
+    ForeignWrite {
+        site: RawIdx,
+        kind: ForeignWrite,
+    },
 
     Unknown,
 }
@@ -64,6 +86,150 @@ impl Definition {
 
     pub fn unknown(var_name: SmolStr) -> Self {
         Self::new(var_name, DefSite::Unknown)
+    }
+
+    pub fn foreign_write(var_name: SmolStr, site: RawIdx, kind: ForeignWrite) -> Self {
+        Self::new(var_name, DefSite::ForeignWrite { site, kind })
+    }
+}
+
+/// One write a [`ForeignWriteEvents`] collector attributes to one place of the body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignWriteEvent {
+    /// The enclosing statement, which becomes `DefSite::ForeignWrite::site`.
+    pub site: hir_def::StmtId,
+    pub var_name: SmolStr,
+    pub kind: ForeignWrite,
+}
+
+/// Writes of the body that reaching definitions cannot read, described by a collector outside
+/// this crate: the engine knows nothing about calls, callees or passing directions.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ForeignWriteEvents {
+    /// Writes performed while a statement runs.
+    pub stmt: FxHashMap<hir_def::StmtId, Vec<ForeignWriteEvent>>,
+    /// Writes performed while a header expression is evaluated - an `Если` or `Пока` condition,
+    /// a `Для` bound, a `Для Каждого` collection. Such an expression belongs to no basic block,
+    /// so its writes cannot hang off a statement.
+    pub header: FxHashMap<hir_def::ExprId, Vec<ForeignWriteEvent>>,
+    /// Statements that may write EVERY name. The engine expands these over its own definition
+    /// index: only the engine knows which names the body has.
+    pub every_name: Vec<hir_def::StmtId>,
+}
+
+impl ForeignWriteEvents {
+    pub fn is_empty(&self) -> bool {
+        self.stmt.is_empty() && self.header.is_empty() && self.every_name.is_empty()
+    }
+
+    pub fn push_stmt(&mut self, site: hir_def::StmtId, var_name: SmolStr, kind: ForeignWrite) {
+        self.stmt.entry(site).or_default().push(ForeignWriteEvent { site, var_name, kind });
+    }
+
+    pub fn push_header(
+        &mut self,
+        header: hir_def::ExprId,
+        site: hir_def::StmtId,
+        var_name: SmolStr,
+        kind: ForeignWrite,
+    ) {
+        self.header.entry(header).or_default().push(ForeignWriteEvent { site, var_name, kind });
+    }
+
+    pub fn push_every_name(&mut self, site: hir_def::StmtId) {
+        self.every_name.push(site);
+    }
+}
+
+/// The foreign definitions of one body, ready to be generated: the events as the collector
+/// described them, plus the name universe the engine expanded `every_name` over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ForeignWriteGen {
+    writes: Arc<ForeignWriteEvents>,
+    names: Arc<Vec<SmolStr>>,
+}
+
+impl ForeignWriteGen {
+    fn new(writes: Arc<ForeignWriteEvents>, index: &DefinitionIndex) -> Self {
+        let names: Vec<SmolStr> =
+            if writes.every_name.is_empty() { Vec::new() } else { index.var_names().collect() };
+        Self { writes, names: Arc::new(names) }
+    }
+
+    /// Every foreign definition this body can hold, to be added to the definition index: a
+    /// definition absent from the index cannot be set in any state.
+    fn definitions(&self) -> Vec<Definition> {
+        let from_event = |event: &ForeignWriteEvent| {
+            Definition::foreign_write(event.var_name.clone(), event.site.into_raw(), event.kind)
+        };
+        let mut defs: Vec<Definition> = self
+            .writes
+            .stmt
+            .values()
+            .chain(self.writes.header.values())
+            .flatten()
+            .map(from_event)
+            .collect();
+        for &site in &self.writes.every_name {
+            defs.extend(self.names.iter().map(|name| {
+                Definition::foreign_write(name.clone(), site.into_raw(), ForeignWrite::Execute)
+            }));
+        }
+        defs
+    }
+
+    /// Adds, without killing, the definitions a statement writes foreign. The earlier
+    /// definition still reaches the use: a by-reference argument or `Выполнить` MAY write, so a
+    /// consumer that sees a foreign definition beside an ordinary one knows only that the value
+    /// is not proven.
+    fn apply_stmt(&self, stmt_id: hir_def::StmtId, state: &mut ReachingDefs) {
+        if let Some(events) = self.writes.stmt.get(&stmt_id) {
+            for event in events {
+                state.insert(&Definition::foreign_write(
+                    event.var_name.clone(),
+                    event.site.into_raw(),
+                    event.kind,
+                ));
+            }
+        }
+        if self.writes.every_name.contains(&stmt_id) {
+            for name in self.names.iter() {
+                state.insert(&Definition::foreign_write(
+                    name.clone(),
+                    stmt_id.into_raw(),
+                    ForeignWrite::Execute,
+                ));
+            }
+        }
+    }
+
+    /// Approximate live heap bytes of the shared events and name universe, as
+    /// [`ReachingDefsResult::estimated_heap`] counts its own tables. Both are behind an `Arc`
+    /// shared with the transfer, which is dropped with the solve, so this result owns them.
+    fn estimated_heap(&self) -> usize {
+        let event_bytes =
+            |events: &Vec<ForeignWriteEvent>| crate::vec_bytes::<ForeignWriteEvent>(events.len());
+        let mut bytes = crate::map_table_bytes::<hir_def::StmtId, Vec<ForeignWriteEvent>>(
+            self.writes.stmt.len(),
+        ) + crate::map_table_bytes::<hir_def::ExprId, Vec<ForeignWriteEvent>>(
+            self.writes.header.len(),
+        ) + crate::vec_bytes::<hir_def::StmtId>(self.writes.every_name.len())
+            + crate::vec_bytes::<SmolStr>(self.names.len());
+        bytes += self.writes.stmt.values().map(event_bytes).sum::<usize>();
+        bytes += self.writes.header.values().map(event_bytes).sum::<usize>();
+        bytes
+    }
+
+    fn apply_header(&self, header: hir_def::ExprId, state: &mut ReachingDefs) {
+        if let Some(events) = self.writes.header.get(&header) {
+            for event in events {
+                state.insert(&Definition::foreign_write(
+                    event.var_name.clone(),
+                    event.site.into_raw(),
+                    event.kind,
+                ));
+            }
+        }
     }
 }
 
@@ -270,6 +436,30 @@ impl DefinitionIndex {
     pub fn is_empty(&self) -> bool {
         self.definitions.is_empty()
     }
+
+    /// Every name the index holds a definition for, `fold_lower`ed as [`Definition::new`] folds
+    /// them. The name universe a `Выполнить` write expands over.
+    fn var_names(&self) -> impl Iterator<Item = SmolStr> + '_ {
+        self.var_to_defs.keys().cloned()
+    }
+
+    /// This index with `extra` appended. The definitions already present keep their positions,
+    /// so a state built against either index means the same bits.
+    fn extended(&self, extra: impl IntoIterator<Item = Definition>) -> Arc<Self> {
+        let mut definitions = self.definitions.clone();
+        let mut var_to_defs = self.var_to_defs.clone();
+        let mut def_to_idx = self.def_to_idx.clone();
+        for def in extra {
+            if def_to_idx.contains_key(&def) {
+                continue;
+            }
+            let idx = definitions.len() as u32;
+            var_to_defs.entry(def.var_name.clone()).or_default().push(idx);
+            def_to_idx.insert(def.clone(), idx);
+            definitions.push(def);
+        }
+        Arc::new(Self { definitions, var_to_defs, def_to_idx })
+    }
 }
 
 fn extract_var_name_from_expr(expr_id: hir_def::ExprId, body: &Body) -> Option<SmolStr> {
@@ -447,19 +637,64 @@ pub fn solve_executable_reaching_definitions(
     solve_with(ExecutableReachingDefsTransfer, cfg, body_arc, seed_params)
 }
 
+/// [`solve_executable_reaching_definitions`] told about the writes it cannot read: a call that
+/// may write the local it is given, `Выполнить`. Such a write GENERATES its definition beside
+/// whatever reached the place already, and kills nothing, so a consumer reading the definitions
+/// of a use sees both the value it could follow and the fact that something else may have
+/// written since.
+///
+/// Empty events give the plain executable solve, down to the bits.
+pub fn solve_executable_reaching_definitions_with_writes(
+    cfg: Arc<cfg::ControlFlowGraph>,
+    body_arc: &Arc<Body>,
+    seed_params: bool,
+    writes: Arc<ForeignWriteEvents>,
+) -> Option<Arc<ReachingDefsResult>> {
+    if writes.is_empty() {
+        return solve_executable_reaching_definitions(cfg, body_arc, seed_params);
+    }
+    let body: &Body = body_arc;
+    let base = definition_index_of(body, seed_params);
+    let foreign = ForeignWriteGen::new(writes, &base);
+    let def_index = base.extended(foreign.definitions());
+    solve_prepared(
+        WritesAwareTransfer { foreign: foreign.clone() },
+        def_index,
+        Some(foreign),
+        cfg,
+        body_arc,
+        seed_params,
+    )
+}
+
+fn definition_index_of(body: &Body, seed_params: bool) -> Arc<DefinitionIndex> {
+    let params: Vec<_> = if seed_params {
+        body.params().map(|param_id| (body.binding(param_id).name.clone(), param_id)).collect()
+    } else {
+        Vec::new()
+    };
+    DefinitionIndex::from_body_with_params(body, params)
+}
+
 fn solve_with<T: Transfer<ReachingDefs>>(
     transfer: T,
     cfg: Arc<cfg::ControlFlowGraph>,
     body_arc: &Arc<Body>,
     seed_params: bool,
 ) -> Option<Arc<ReachingDefsResult>> {
+    let def_index = definition_index_of(body_arc, seed_params);
+    solve_prepared(transfer, def_index, None, cfg, body_arc, seed_params)
+}
+
+fn solve_prepared<T: Transfer<ReachingDefs>>(
+    transfer: T,
+    def_index: Arc<DefinitionIndex>,
+    foreign: Option<ForeignWriteGen>,
+    cfg: Arc<cfg::ControlFlowGraph>,
+    body_arc: &Arc<Body>,
+    seed_params: bool,
+) -> Option<Arc<ReachingDefsResult>> {
     let body: &Body = body_arc;
-    let params: Vec<_> = if seed_params {
-        body.params().map(|param_id| (body.binding(param_id).name.clone(), param_id)).collect()
-    } else {
-        Vec::new()
-    };
-    let def_index = DefinitionIndex::from_body_with_params(body, params);
 
     let mut initial_defs = ReachingDefs::new(def_index.clone());
     if seed_params {
@@ -475,7 +710,9 @@ fn solve_with<T: Transfer<ReachingDefs>>(
     solver.set_initial_state(initial_defs);
 
     solver.solve().map(|dataflow_result| {
-        Arc::new(ReachingDefsResult::new(dataflow_result, Arc::clone(body_arc)))
+        let mut result = ReachingDefsResult::new(dataflow_result, Arc::clone(body_arc));
+        result.foreign = foreign;
+        Arc::new(result)
     })
 }
 
@@ -501,6 +738,11 @@ pub struct ReachingDefsResult {
     /// Shared with the lowering memo: a retained result must not carry its
     /// own copy of the body.
     body: Arc<Body>,
+
+    /// Present when the solve was told about writes it cannot read. The replay inside a basic
+    /// block ([`ReachingDefsResult::defs_up_to_stmt`]) must generate the same definitions as
+    /// the solve did, or a read would see the block's entry state only.
+    foreign: Option<ForeignWriteGen>,
 }
 
 /// The expression naming the CFG header a read in `stmt` happens at, when `stmt` is a header
@@ -577,6 +819,7 @@ impl ReachingDefsResult {
             condition_blocks,
             loop_entry_blocks,
             body,
+            foreign: None,
         }
     }
 
@@ -605,6 +848,9 @@ impl ReachingDefsResult {
 
             let transfer = ReachingDefsTransfer;
             state = transfer.transfer_stmt(hir_stmt_raw, &state, &self.body);
+            if let Some(foreign) = &self.foreign {
+                foreign.apply_stmt(hir_stmt_id, &mut state);
+            }
         }
 
         Some(state)
@@ -672,7 +918,40 @@ impl ReachingDefsResult {
         }
         // The body is the lowering memo's `Arc`, counted there; only the pointer
         // is this result's own.
+        if let Some(foreign) = &self.foreign {
+            bytes += foreign.estimated_heap();
+        }
         bytes
+    }
+}
+
+/// [`ExecutableReachingDefsTransfer`] that also generates the foreign definitions of a place
+/// AFTER its ordinary transfer: a write performed while the statement or header expression runs
+/// is seen by the next read, not by the reads of the place itself.
+struct WritesAwareTransfer {
+    foreign: ForeignWriteGen,
+}
+
+impl Transfer<ReachingDefs> for WritesAwareTransfer {
+    fn transfer_stmt(&self, stmt_id: RawIdx, state: &ReachingDefs, body: &Body) -> ReachingDefs {
+        let mut new_state = ReachingDefsTransfer.transfer_stmt(stmt_id, state, body);
+        self.foreign.apply_stmt(hir_def::StmtId::from_raw(stmt_id), &mut new_state);
+        new_state
+    }
+
+    fn transfer_expr(
+        &self,
+        expr_id: hir_def::ExprId,
+        state: &ReachingDefs,
+        _body: &Body,
+    ) -> ReachingDefs {
+        let mut new_state = state.clone();
+        self.foreign.apply_header(expr_id, &mut new_state);
+        new_state
+    }
+
+    fn transfer_edge(&self, edge_kind: cfg::CfgEdgeType, state: &ReachingDefs) -> ReachingDefs {
+        ExecutableReachingDefsTransfer.transfer_edge(edge_kind, state)
     }
 }
 
@@ -896,5 +1175,346 @@ mod tests {
         assert!(state.has_def_for_var("x"));
         assert!(state.has_def_for_var("y"));
         assert!(!state.has_def_for_var("z"));
+    }
+
+    /// Builds one body by hand. The verdicts under test are about ORDER, so the fixture needs
+    /// real statements - the ordinary transfer reads the body - and a real CFG built from them,
+    /// not a hand-drawn graph whose edges could be drawn to suit the expectation.
+    struct Fixture {
+        body: Body,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            Self { body: Body::new() }
+        }
+
+        fn path(&mut self, text: &str) -> hir_def::hir::ExprIdx {
+            self.body.alloc_expr(Expr::Path(Name::new(text))).to_idx()
+        }
+
+        /// `<target> = Истина`: these tests read which writes arrive, never a value.
+        fn assign(&mut self, target: &str) -> hir_def::StmtId {
+            let target = self.path(target);
+            let value =
+                self.body.alloc_expr(Expr::Literal(hir_def::hir::Literal::Bool(true))).to_idx();
+            self.body.alloc_stmt(Stmt::Assign { target, value })
+        }
+
+        /// `<callee>(<arg>)` as a statement: the place a foreign write is attributed to.
+        fn call(&mut self, callee: &str, arg: &str) -> hir_def::StmtId {
+            let callee = self.path(callee);
+            let arg = self.path(arg);
+            let call = self.body.alloc_expr(Expr::Call { callee, args: Box::new([arg]) }).to_idx();
+            self.body.alloc_stmt(Stmt::Expr(call))
+        }
+
+        fn execute(&mut self, text: &str) -> hir_def::StmtId {
+            let expr = self
+                .body
+                .alloc_expr(Expr::Literal(hir_def::hir::Literal::String(text.into())))
+                .to_idx();
+            self.body.alloc_stmt(Stmt::Execute { expr })
+        }
+
+        fn ret(&mut self) -> hir_def::StmtId {
+            self.body.alloc_stmt(Stmt::Return { value: None })
+        }
+
+        /// `Пока <cond> Цикл <body> КонецЦикла`, returning the statement and its condition.
+        fn while_loop(
+            &mut self,
+            cond: &str,
+            stmts: &[hir_def::StmtId],
+        ) -> (hir_def::StmtId, hir_def::ExprId) {
+            let condition = self.path(cond);
+            let body: Vec<_> = stmts.iter().map(|s| s.to_idx()).collect();
+            let stmt =
+                self.body.alloc_stmt(Stmt::While { condition, body: body.into_boxed_slice() });
+            (stmt, hir_def::ExprId::from_idx(condition))
+        }
+
+        fn if_then(&mut self, cond: &str, stmts: &[hir_def::StmtId]) -> hir_def::StmtId {
+            let condition = self.path(cond);
+            let then_branch: Vec<_> = stmts.iter().map(|s| s.to_idx()).collect();
+            self.body.alloc_stmt(Stmt::If(Box::new(hir_def::hir::IfStmt {
+                condition,
+                then_branch: then_branch.into_boxed_slice(),
+                elsif_branches: Box::new([]),
+                else_branch: None,
+            })))
+        }
+
+        fn try_except(
+            &mut self,
+            protected: &[hir_def::StmtId],
+            handler: &[hir_def::StmtId],
+        ) -> hir_def::StmtId {
+            let body: Vec<_> = protected.iter().map(|s| s.to_idx()).collect();
+            let except: Vec<_> = handler.iter().map(|s| s.to_idx()).collect();
+            self.body.alloc_stmt(Stmt::Try {
+                body: body.into_boxed_slice(),
+                except: except.into_boxed_slice(),
+            })
+        }
+
+        fn finish(mut self, top_level: &[hir_def::StmtId]) -> Arc<Body> {
+            let stmts: Vec<_> = top_level.iter().map(|s| s.to_idx()).collect();
+            self.body.set_body_stmts(stmts.into_boxed_slice());
+            Arc::new(self.body)
+        }
+    }
+
+    fn solve_foreign(body: &Arc<Body>, writes: ForeignWriteEvents) -> Arc<ReachingDefsResult> {
+        let cfg = cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body);
+        solve_executable_reaching_definitions_with_writes(
+            Arc::new(cfg),
+            body,
+            false,
+            Arc::new(writes),
+        )
+        .expect("the solve converges")
+    }
+
+    fn foreign_kinds(defs: &[Definition]) -> Vec<ForeignWrite> {
+        defs.iter()
+            .filter_map(|def| match def.def_site {
+                DefSite::ForeignWrite { kind, .. } => Some(kind),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn assignment_sites(defs: &[Definition]) -> Vec<RawIdx> {
+        defs.iter()
+            .filter_map(|def| match def.def_site {
+                DefSite::Assignment(site) => Some(site),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn foreign_write_at_a_statement_is_seen_after_it_and_not_before() {
+        // х = 1; Ф(х); у = х;
+        let mut fixture = Fixture::new();
+        let assign = fixture.assign("х");
+        let site = fixture.call("ф", "х");
+        let read = fixture.assign("у");
+        let body = fixture.finish(&[assign, site, read]);
+
+        let mut writes = ForeignWriteEvents::default();
+        writes.push_stmt(site, SmolStr::new("х"), ForeignWrite::ByRefArgument);
+        let result = solve_foreign(&body, writes);
+
+        let before = result.defs_for_var_at_stmt("х", site).expect("state before the call");
+        assert_eq!(foreign_kinds(&before), Vec::new(), "the call's own write is not read by it");
+
+        let after = result.defs_for_var_at_stmt("х", read).expect("state before the read");
+        assert_eq!(foreign_kinds(&after), vec![ForeignWrite::ByRefArgument]);
+        assert_eq!(
+            assignment_sites(&after),
+            vec![assign.into_raw()],
+            "a write that MAY happen kills nothing"
+        );
+    }
+
+    #[test]
+    fn foreign_write_round_a_loop_is_seen_inside_it_and_not_before() {
+        // х = 1; в = х; Пока у Цикл г = х; Ф(х); КонецЦикла;
+        let mut fixture = Fixture::new();
+        let assign = fixture.assign("х");
+        let before_loop = fixture.assign("в");
+        let in_loop = fixture.assign("г");
+        let site = fixture.call("ф", "х");
+        let (loop_stmt, _) = fixture.while_loop("у", &[in_loop, site]);
+        let body = fixture.finish(&[assign, before_loop, loop_stmt]);
+
+        let mut writes = ForeignWriteEvents::default();
+        writes.push_stmt(site, SmolStr::new("х"), ForeignWrite::ByRefArgument);
+        let result = solve_foreign(&body, writes);
+
+        let outside = result.defs_for_var_at_stmt("х", before_loop).expect("state before the loop");
+        assert_eq!(foreign_kinds(&outside), Vec::new());
+
+        let inside = result.defs_for_var_at_stmt("х", in_loop).expect("state inside the loop");
+        assert_eq!(
+            foreign_kinds(&inside),
+            vec![ForeignWrite::ByRefArgument],
+            "the back edge carries the write to a read that precedes it in the text"
+        );
+    }
+
+    /// The control for [`foreign_write_in_dead_code_reaches_nothing`]: one statement apart, the
+    /// same write does reach the read.
+    #[test]
+    fn foreign_write_in_a_live_branch_reaches_the_read_after_it() {
+        let mut fixture = Fixture::new();
+        let assign = fixture.assign("х");
+        let site = fixture.call("ф", "х");
+        let branch = fixture.if_then("у", &[site]);
+        let read = fixture.assign("з");
+        let body = fixture.finish(&[assign, branch, read]);
+
+        let mut writes = ForeignWriteEvents::default();
+        writes.push_stmt(site, SmolStr::new("х"), ForeignWrite::ByRefArgument);
+        let result = solve_foreign(&body, writes);
+
+        let defs = result.defs_for_var_at_stmt("х", read).expect("state before the read");
+        assert_eq!(foreign_kinds(&defs), vec![ForeignWrite::ByRefArgument]);
+    }
+
+    #[test]
+    fn foreign_write_in_dead_code_reaches_nothing() {
+        // х = 1; Если у Тогда Возврат; Ф(х); КонецЕсли; з = 2;
+        let mut fixture = Fixture::new();
+        let assign = fixture.assign("х");
+        let ret = fixture.ret();
+        let site = fixture.call("ф", "х");
+        let branch = fixture.if_then("у", &[ret, site]);
+        let read = fixture.assign("з");
+        let body = fixture.finish(&[assign, branch, read]);
+
+        let mut writes = ForeignWriteEvents::default();
+        writes.push_stmt(site, SmolStr::new("х"), ForeignWrite::ByRefArgument);
+        let result = solve_foreign(&body, writes);
+
+        let defs = result.defs_for_var_at_stmt("х", read).expect("state before the read");
+        assert_eq!(
+            foreign_kinds(&defs),
+            Vec::new(),
+            "nothing executes the call, so nothing can be written there"
+        );
+        assert_eq!(assignment_sites(&defs), vec![assign.into_raw()]);
+    }
+
+    #[test]
+    fn execute_adds_a_foreign_definition_beside_the_assignment() {
+        // х = 1; Выполнить("…"); у = 2;
+        let mut fixture = Fixture::new();
+        let assign = fixture.assign("х");
+        let site = fixture.execute("х = 2");
+        let read = fixture.assign("у");
+        let body = fixture.finish(&[assign, site, read]);
+
+        let mut writes = ForeignWriteEvents::default();
+        writes.push_every_name(site);
+        let result = solve_foreign(&body, writes);
+
+        let defs = result.defs_for_var_at_stmt("х", read).expect("state before the read");
+        assert_eq!(foreign_kinds(&defs), vec![ForeignWrite::Execute]);
+        assert_eq!(assignment_sites(&defs), vec![assign.into_raw()]);
+    }
+
+    /// The handler is reached from the `Попытка` vertex, BEFORE the protected statements, so the
+    /// definition that reached the statement still reaches the handler - the earlier value is
+    /// what the handler may see - and the write among the protected statements does not.
+    #[test]
+    fn a_foreign_write_among_protected_statements_leaves_the_handlers_read_its_earlier_definition()
+    {
+        // х = 1; Попытка Ф(х); Исключение у = 2; КонецПопытки;
+        let mut fixture = Fixture::new();
+        let assign = fixture.assign("х");
+        let site = fixture.call("ф", "х");
+        let handler_read = fixture.assign("у");
+        let try_stmt = fixture.try_except(&[site], &[handler_read]);
+        let body = fixture.finish(&[assign, try_stmt]);
+
+        let mut writes = ForeignWriteEvents::default();
+        writes.push_stmt(site, SmolStr::new("х"), ForeignWrite::ByRefArgument);
+        let result = solve_foreign(&body, writes);
+
+        let defs = result.defs_for_var_at_stmt("х", handler_read).expect("state in the handler");
+        assert_eq!(
+            assignment_sites(&defs),
+            vec![assign.into_raw()],
+            "the earlier definition is not lost"
+        );
+        assert_eq!(
+            foreign_kinds(&defs),
+            Vec::new(),
+            "an error can interrupt before the call, so its write is not on the handler's path"
+        );
+    }
+
+    #[test]
+    fn a_write_in_an_if_condition_is_seen_after_the_branch_and_not_by_the_condition() {
+        // х = Истина; Если Ф(х) Тогда г = Истина; КонецЕсли; з = Истина;
+        let mut fixture = Fixture::new();
+        let assign = fixture.assign("х");
+        let in_branch = fixture.assign("г");
+        let callee = fixture.path("ф");
+        let arg = fixture.path("х");
+        let call = fixture.body.alloc_expr(Expr::Call { callee, args: Box::new([arg]) });
+        let branch = fixture.body.alloc_stmt(Stmt::If(Box::new(hir_def::hir::IfStmt {
+            condition: call.to_idx(),
+            then_branch: Box::new([in_branch.to_idx()]),
+            elsif_branches: Box::new([]),
+            else_branch: None,
+        })));
+        let read = fixture.assign("з");
+        let body = fixture.finish(&[assign, branch, read]);
+
+        let mut writes = ForeignWriteEvents::default();
+        writes.push_header(call, branch, SmolStr::new("х"), ForeignWrite::UnattestedArgument);
+        let result = solve_foreign(&body, writes);
+
+        let at_header = result.defs_for_var_at_header("х", call).expect("state at the header");
+        assert_eq!(foreign_kinds(&at_header), Vec::new(), "the condition reads before it writes");
+
+        let after = result.defs_for_var_at_stmt("х", read).expect("state after the branch");
+        assert_eq!(foreign_kinds(&after), vec![ForeignWrite::UnattestedArgument]);
+    }
+
+    /// The control for the test above, one statement apart: a LOOP condition is evaluated again
+    /// after its own write, so the write of the previous pass is among the definitions the
+    /// condition reads. That is the answer the body-wide scan this replaced could not give at
+    /// all - it had no notion of a second pass.
+    #[test]
+    fn a_write_in_a_loop_condition_is_seen_by_the_condition_on_a_later_pass() {
+        // х = Истина; Пока Ф(х) Цикл г = Истина; КонецЦикла;
+        let mut fixture = Fixture::new();
+        let assign = fixture.assign("х");
+        let in_loop = fixture.assign("г");
+        let callee = fixture.path("ф");
+        let arg = fixture.path("х");
+        let call = fixture.body.alloc_expr(Expr::Call { callee, args: Box::new([arg]) });
+        let loop_stmt = fixture.body.alloc_stmt(Stmt::While {
+            condition: call.to_idx(),
+            body: Box::new([in_loop.to_idx()]),
+        });
+        let body = fixture.finish(&[assign, loop_stmt]);
+
+        let mut writes = ForeignWriteEvents::default();
+        writes.push_header(call, loop_stmt, SmolStr::new("х"), ForeignWrite::UnattestedArgument);
+        let result = solve_foreign(&body, writes);
+
+        let at_header = result.defs_for_var_at_header("х", call).expect("state at the header");
+        assert_eq!(foreign_kinds(&at_header), vec![ForeignWrite::UnattestedArgument]);
+
+        let in_body = result.defs_for_var_at_stmt("х", in_loop).expect("state inside the loop");
+        assert_eq!(foreign_kinds(&in_body), vec![ForeignWrite::UnattestedArgument]);
+    }
+
+    #[test]
+    fn empty_events_give_the_plain_executable_solve() {
+        let mut fixture = Fixture::new();
+        let assign = fixture.assign("х");
+        let read = fixture.assign("у");
+        let body = fixture.finish(&[assign, read]);
+
+        let cfg =
+            Arc::new(cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body));
+        let plain = solve_executable_reaching_definitions(cfg.clone(), &body, false)
+            .expect("the solve converges");
+        let with_none = solve_executable_reaching_definitions_with_writes(
+            cfg,
+            &body,
+            false,
+            Arc::new(ForeignWriteEvents::default()),
+        )
+        .expect("the solve converges");
+
+        assert_eq!(plain, with_none);
     }
 }

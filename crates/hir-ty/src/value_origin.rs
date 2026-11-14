@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use dataflow::reaching_defs::{header_read_expr, DefSite, ReachingDefsResult};
+use dataflow::reaching_defs::{header_read_expr, DefSite, ForeignWrite, ReachingDefsResult};
 use hir_def::body::Body;
 use hir_def::hir::{Expr, Stmt};
 use hir_def::{
@@ -29,9 +29,7 @@ use bsl_types::kind::{TypeId, TypeKind};
 
 use crate::call_resolution::CallSelection;
 use crate::db::HirDatabase;
-use crate::definite_init::ArgPassing;
-use crate::infer::{argument_passing_of, CallArgBinding, ImplicitLocalInfo};
-use crate::narrow::local_may_be_rewritten;
+use crate::infer::{CallArgBinding, ImplicitLocalInfo};
 
 /// What the walk proved about the values of an expression.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,11 +46,10 @@ pub enum ValueOrigin {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unproven {
     /// The only obstacle is a call whose passing direction is not attested: the value may have
-    /// been overwritten, or may not. A reader is allowed to look past this one - which is the
-    /// policy of issue #854 item 5 - and no other.
+    /// been overwritten, or may not. A reader is allowed to look past this one and no other.
     RewriteDirectionUnknown,
-    /// A writer the walk cannot see through can certainly write: `Выполнить`, a call PROVEN to
-    /// take the argument by reference, or a write an error can skip past.
+    /// A writer the walk cannot see through can certainly write: `Выполнить`, or a call PROVEN
+    /// to take the argument by reference.
     Rewritten,
     /// A definition the walk cannot read: `DefSite::Unknown`, no definition at all, or a value
     /// that comes from a call the walk cannot resolve to one callee.
@@ -238,31 +235,6 @@ impl<'a> ValueOriginWalk<'a> {
             return ValueOrigin::Unproven(Unproven::OpaqueDefinition);
         };
 
-        // Two questions to the same scan, differing in the oracle only. The conservative one
-        // asks "may be rewritten unless every call is PROVEN to take it by value". The second
-        // counts only calls PROVEN to take it by reference, plus the writers the oracle does
-        // not govern at all - `Выполнить`, a write the handler of `Попытка` does not see.
-        // Those are not a matter of an unknown direction, which is why `Выполнить` lands in
-        // `Rewritten` and not under the policy knob: it can certainly write.
-        //
-        // `own_call` is `None` on purpose: the operand need not be a call argument, and counting
-        // its own call as a possible rewrite loses findings but invents none.
-        let passing = |arg| argument_passing_of(self.db, self.bindings, arg);
-        let may_rewrite = local_may_be_rewritten(self.body, &key, stmt.to_idx(), None, &|arg| {
-            passing(arg) == ArgPassing::ByVal
-        });
-        if may_rewrite {
-            let proven_writer =
-                local_may_be_rewritten(self.body, &key, stmt.to_idx(), None, &|arg| {
-                    passing(arg) != ArgPassing::ByRef
-                });
-            return ValueOrigin::Unproven(if proven_writer {
-                Unproven::Rewritten
-            } else {
-                Unproven::RewriteDirectionUnknown
-            });
-        }
-
         // A read inside an `Если` / `Пока` condition or a `Для` bound happens at the header, which
         // is not a statement of any block: its definitions are asked by the expression the header
         // evaluates first, as inference does.
@@ -290,6 +262,14 @@ impl<'a> ValueOriginWalk<'a> {
                 | DefSite::VarDecl(_)
                 | DefSite::ForLoop(_)
                 | DefSite::ForEachLoop(_) => ValueOrigin::Other,
+                // A writer the walk cannot see through. `Выполнить` and a PROVEN by-reference
+                // argument certainly can write, so they are not a matter of an unknown
+                // direction and do not fall under the policy knob. The meet below settles what
+                // happens when such a write reaches a read beside an ordinary definition.
+                DefSite::ForeignWrite { kind, .. } => ValueOrigin::Unproven(match kind {
+                    ForeignWrite::ByRefArgument | ForeignWrite::Execute => Unproven::Rewritten,
+                    ForeignWrite::UnattestedArgument => Unproven::RewriteDirectionUnknown,
+                }),
                 DefSite::Unknown => ValueOrigin::Unproven(Unproven::OpaqueDefinition),
             };
             let merged = met.map_or(origin, |earlier| earlier.meet(origin));
@@ -301,17 +281,21 @@ impl<'a> ValueOriginWalk<'a> {
         met.unwrap_or(ValueOrigin::Unproven(Unproven::OpaqueDefinition))
     }
 
+    /// The writes-aware executable definitions: a write the walk cannot read is one of them, and
+    /// a value that only dead code wrote is not.
     fn reaching(&mut self) -> Option<Arc<ReachingDefsResult>> {
         self.reaching
             .get_or_insert_with(|| match self.owner {
                 DefWithBodyId::Method(local_id) => {
                     let module = ModuleId::new(self.file_id);
-                    self.db.method_reaching_definitions(MethodIdInput::new(
+                    self.db.method_foreign_write_reaching_definitions(MethodIdInput::new(
                         self.db,
                         MethodId { module, local_id },
                     ))
                 }
-                DefWithBodyId::ModuleCode => self.db.module_code_reaching_definitions(self.file_id),
+                DefWithBodyId::ModuleCode => {
+                    self.db.module_code_foreign_write_reaching_definitions(self.file_id)
+                }
             })
             .clone()
     }

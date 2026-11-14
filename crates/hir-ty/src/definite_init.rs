@@ -139,6 +139,72 @@ pub(crate) struct Collected {
     pub(crate) candidates: Vec<Candidate>,
 }
 
+/// The expression roots one statement evaluates, each with the flow point that evaluates it: a
+/// header root belongs to the header vertex of the CFG, everything else to the statement. The
+/// branches and loop bodies are statements of their own and are not reached from here.
+///
+/// [`InitPoint`] names a flow point and nothing specific to initialization, which is why the
+/// foreign-write collector shares this.
+pub(crate) fn stmt_expr_roots(
+    body: &Body,
+    stmt_id: StmtId,
+    stmt: &Stmt,
+) -> Vec<(InitPoint, ExprIdx)> {
+    let mut roots: Vec<(InitPoint, ExprIdx)> = Vec::new();
+    let header = |root: &ExprIdx| (InitPoint::Header(ExprId::from_idx(*root)), *root);
+    match stmt {
+        Stmt::If(if_stmt) => {
+            roots.push(header(&if_stmt.condition));
+            roots.extend(if_stmt.elsif_branches.iter().map(|(condition, _)| header(condition)));
+        }
+        Stmt::While { condition, .. } => roots.push(header(condition)),
+        Stmt::For { from, to, .. } => roots.extend([header(from), header(to)]),
+        Stmt::ForEach { collection, .. } => roots.push(header(collection)),
+        _ => {
+            let stmt_idx: StmtIdx = stmt_id.to_idx();
+            for_each_stmt_expr_root(body, stmt_idx, &mut |root| {
+                roots.push((InitPoint::Stmt(stmt_id), root));
+            });
+        }
+    }
+    roots
+}
+
+/// The calls of one expression tree, as a name read has to see them.
+pub(crate) struct CallShape {
+    /// Every node of the tree, root first.
+    pub(crate) nodes: Vec<ExprIdx>,
+    /// The callee expressions: a name in that position is not a value read.
+    pub(crate) callees: FxHashSet<ExprIdx>,
+    /// The arguments that are a bare variable path - the only shape whose local a callee can
+    /// write back through.
+    pub(crate) arguments: FxHashSet<ExprIdx>,
+}
+
+pub(crate) fn call_shape(body: &Body, root: ExprIdx) -> CallShape {
+    let mut nodes = vec![root];
+    let mut pos = 0;
+    while let Some(&node) = nodes.get(pos) {
+        for_each_expr_child(body, node, &mut |child| nodes.push(child));
+        pos += 1;
+    }
+
+    let mut callees = FxHashSet::default();
+    let mut arguments: FxHashSet<ExprIdx> = FxHashSet::default();
+    for &node in &nodes {
+        let args = match body.expr_idx(node) {
+            Expr::Call { callee, args } => {
+                callees.insert(*callee);
+                args
+            }
+            Expr::MethodCall { args, .. } | Expr::New { args, .. } => args,
+            _ => continue,
+        };
+        arguments.extend(args.iter().filter(|arg| matches!(body.expr_idx(**arg), Expr::Path(_))));
+    }
+    CallShape { nodes, callees, arguments }
+}
+
 /// One pass over the statements: the reads to judge and every initialization event.
 pub(crate) fn collect(
     body: &Body,
@@ -162,47 +228,8 @@ pub(crate) fn collect(
             _ => None,
         };
 
-        let mut roots: Vec<(InitPoint, ExprIdx)> = Vec::new();
-        let header = |root: &ExprIdx| (InitPoint::Header(ExprId::from_idx(*root)), *root);
-        match stmt {
-            Stmt::If(if_stmt) => {
-                roots.push(header(&if_stmt.condition));
-                roots.extend(if_stmt.elsif_branches.iter().map(|(condition, _)| header(condition)));
-            }
-            Stmt::While { condition, .. } => roots.push(header(condition)),
-            Stmt::For { from, to, .. } => roots.extend([header(from), header(to)]),
-            Stmt::ForEach { collection, .. } => roots.push(header(collection)),
-            _ => {
-                let stmt_idx: StmtIdx = stmt_id.to_idx();
-                for_each_stmt_expr_root(body, stmt_idx, &mut |root| {
-                    roots.push((InitPoint::Stmt(stmt_id), root));
-                });
-            }
-        }
-
-        for (point, root) in roots {
-            let mut nodes = vec![root];
-            let mut pos = 0;
-            while let Some(&node) = nodes.get(pos) {
-                for_each_expr_child(body, node, &mut |child| nodes.push(child));
-                pos += 1;
-            }
-
-            let mut callees = FxHashSet::default();
-            let mut arguments: FxHashSet<ExprIdx> = FxHashSet::default();
-            for &node in &nodes {
-                let args = match body.expr_idx(node) {
-                    Expr::Call { callee, args } => {
-                        callees.insert(*callee);
-                        args
-                    }
-                    Expr::MethodCall { args, .. } | Expr::New { args, .. } => args,
-                    _ => continue,
-                };
-                arguments.extend(
-                    args.iter().filter(|arg| matches!(body.expr_idx(**arg), Expr::Path(_))),
-                );
-            }
+        for (point, root) in stmt_expr_roots(body, stmt_id, stmt) {
+            let CallShape { nodes, callees, arguments } = call_shape(body, root);
 
             for node in nodes {
                 let Expr::Path(name) = body.expr_idx(node) else { continue };

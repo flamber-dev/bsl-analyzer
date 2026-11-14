@@ -9,7 +9,6 @@ use hir_def::{
     BindingId, DefWithBodyId, ExprId, IdConversion, MethodId, MethodIdInput, ModuleId, StmtId,
 };
 use rustc_hash::FxHashMap;
-use stdx::case::CaseExt;
 use vfs::FileId;
 
 use bsl_types::builders::Builders;
@@ -280,24 +279,10 @@ impl<'a> DocumentedValues<'a> {
         let Some(stmt) = self.body.enclosing_stmt(expr) else {
             return false;
         };
-        // A write reaching definitions do not see leaves a value nothing documented. A call
-        // the local is passed to counts as a possible writer unless the callee is proven to
-        // take that argument by value (`ТипЗнч(Х)`, `Формат(Х, …)`): an unresolved callee proves
-        // nothing, so it stays a writer.
-        let key = name.fold_lower();
-        let passed_by_value = |arg| {
-            crate::infer::argument_passing_of(self.db, self.bindings, arg)
-                == crate::definite_init::ArgPassing::ByVal
-        };
-        if crate::narrow::local_may_be_rewritten(
-            self.body,
-            &key,
-            stmt.to_idx(),
-            Some(call_expr),
-            &passed_by_value,
-        ) {
-            return false;
-        }
+        // A write reaching definitions do not see leaves a value nothing documented, and such a
+        // write is one of the definitions reaching this read. Its own call does not shadow the
+        // read: the definitions of a statement are the state BEFORE it, and the argument is read
+        // before the callee can write it back.
         let Some(defs) =
             self.reaching().and_then(|reaching| reaching.defs_for_var_at_stmt(name, stmt))
         else {
@@ -315,21 +300,26 @@ impl<'a> DocumentedValues<'a> {
                 DefSite::VarDecl(_)
                 | DefSite::ForLoop(_)
                 | DefSite::ForEachLoop(_)
+                | DefSite::ForeignWrite { .. }
                 | DefSite::Unknown => false,
             })
     }
 
+    /// The writes-aware executable definitions: a write nothing documented is one of them, and a
+    /// value that only dead code wrote is not.
     fn reaching(&mut self) -> Option<Arc<ReachingDefsResult>> {
         self.reaching
             .get_or_insert_with(|| match self.owner {
                 DefWithBodyId::Method(local_id) => {
                     let module = ModuleId::new(self.file_id);
-                    self.db.method_reaching_definitions(MethodIdInput::new(
+                    self.db.method_foreign_write_reaching_definitions(MethodIdInput::new(
                         self.db,
                         MethodId { module, local_id },
                     ))
                 }
-                DefWithBodyId::ModuleCode => self.db.module_code_reaching_definitions(self.file_id),
+                DefWithBodyId::ModuleCode => {
+                    self.db.module_code_foreign_write_reaching_definitions(self.file_id)
+                }
             })
             .clone()
     }

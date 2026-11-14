@@ -161,6 +161,40 @@ fn a_value_a_call_may_have_rewritten_without_attestation_is_not_flagged() {
     assert!(d.is_empty(), "{d:?}");
 }
 
+/// Order, which the body-wide scan this replaced could not see: the write happens AFTER the
+/// comparison, so the value compared is the one the assignment gave, and the finding stands.
+/// The control is the same write one statement earlier, which does silence it.
+#[test]
+fn a_write_through_a_by_reference_call_after_the_read_does_not_silence_the_finding() {
+    let after = "    Имя = Строка(ТипЗнч(Объект));\n    Если Имя = \"Документ\" Тогда\n    КонецЕсли;\n    ВвестиСтроку(Имя);";
+    let d = run(after);
+    assert_eq!(d.len(), 1, "a write after the read leaves the read proven: {d:?}");
+
+    let before = "    Имя = Строка(ТипЗнч(Объект));\n    ВвестиСтроку(Имя);\n    Если Имя = \"Документ\" Тогда\n    КонецЕсли;";
+    let d = run(before);
+    assert!(d.is_empty(), "the same write before the read does silence it: {d:?}");
+}
+
+/// `Выполнить` may write any local, so it silences a read ordered after it - and only that one.
+#[test]
+fn execute_before_the_read_silences_the_finding_and_after_it_does_not() {
+    let before = "    Имя = Строка(ТипЗнч(Объект));\n    Выполнить(\"Имя = 1\");\n    Если Имя = \"Документ\" Тогда\n    КонецЕсли;";
+    let d = run(before);
+    assert!(d.is_empty(), "{d:?}");
+
+    let after = "    Имя = Строка(ТипЗнч(Объект));\n    Если Имя = \"Документ\" Тогда\n    КонецЕсли;\n    Выполнить(\"Имя = 1\");";
+    let d = run(after);
+    assert_eq!(d.len(), 1, "{d:?}");
+}
+
+/// Nothing executes the call, so nothing can be written there.
+#[test]
+fn a_write_through_a_by_reference_call_in_dead_code_does_not_silence_the_finding() {
+    let body = "    Имя = Строка(ТипЗнч(Объект));\n    Если Значение Тогда\n        Возврат;\n        ВвестиСтроку(Имя);\n    КонецЕсли;\n    Если Имя = \"Документ\" Тогда\n    КонецЕсли;";
+    let d = run(body);
+    assert_eq!(d.len(), 1, "{d:?}");
+}
+
 #[test]
 fn a_local_assigned_a_type_name_and_something_else_is_not_flagged() {
     let d = run("    Имя = Строка(ТипЗнч(Объект));\n    Имя = \"Документ\";\n    Если Имя = \"Документ\" Тогда\n    КонецЕсли;");

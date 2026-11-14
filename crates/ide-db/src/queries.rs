@@ -452,6 +452,45 @@ pub fn module_code_reaching_definitions_query<'db>(
     hir::dataflow::reaching_defs::solve_reaching_definitions(cfg, body_arc, false)
 }
 
+// The writes-aware pair below answers "may this local have been written by something reaching
+// definitions do not see". It depends on the inference result, which holds the resolved passing
+// direction of every argument, so inference itself must NOT read it — that would close a cycle;
+// inference solves its own copy locally. The plain pair above stays for the callers that want
+// the definitions alone (`query_text_dataflow`).
+
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::reaching_defs_heap, returns(clone))]
+pub fn foreign_write_reaching_definitions_query<'db>(
+    db: &'db dyn RootDatabase,
+    method_id_input: hir::MethodIdInput<'db>,
+) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>> {
+    let _span =
+        tracing::info_span!("foreign_write_reaching_definitions", ?method_id_input).entered();
+    let cfg = method_cfg_query(db, method_id_input);
+    let infer = db.infer_method_ref(method_id_input);
+    hir::foreign_writes::solve_with_cfg(
+        db,
+        cfg,
+        db.method_body_ref(method_id_input),
+        &infer.call_arg_bindings,
+        true,
+    )
+}
+
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::reaching_defs_heap, returns(clone))]
+pub fn module_code_foreign_write_reaching_definitions_query<'db>(
+    db: &'db dyn RootDatabase,
+    file_id_input: FileIdInput<'db>,
+) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>> {
+    let file_id = file_id_input.file_id(db);
+    let _span =
+        tracing::info_span!("module_code_foreign_write_reaching_definitions", ?file_id).entered();
+    let module_bodies = db.module_bodies_ref(ModuleId::new(file_id));
+    let body_arc = module_bodies.module_code_arc()?;
+    let cfg = module_level_cfg_query(db, file_id_input);
+    let infer = db.infer_module_code_ref(file_id);
+    hir::foreign_writes::solve_with_cfg(db, cfg, body_arc, &infer.call_arg_bindings, false)
+}
+
 #[salsa::tracked(lru = 8192, heap_size = heap_estimate::path_terminates_heap, returns(clone))]
 pub fn method_path_terminates_query<'db>(
     db: &'db dyn RootDatabase,

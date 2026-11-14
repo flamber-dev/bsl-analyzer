@@ -8,6 +8,7 @@ mod definite_init;
 pub mod doc_see;
 pub mod field_enum;
 pub mod field_lookup;
+pub mod foreign_writes;
 pub mod form_attr;
 pub mod form_items;
 pub mod form_self;

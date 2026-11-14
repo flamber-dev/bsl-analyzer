@@ -216,6 +216,9 @@ struct PathWalk {
     /// Reaching definitions to answer local reads with, in place of the module's memoised ones.
     /// A read in a branch or loop header is then answered too, by what that header reads.
     own_defs: Option<Arc<dataflow::reaching_defs::ReachingDefsResult>>,
+    /// Reaching definitions told about the writes they cannot read, solved on the first local
+    /// read of the walk: most walks meet none, and the solve is per body, not per read.
+    foreign_defs: Option<Option<Arc<dataflow::reaching_defs::ReachingDefsResult>>>,
 }
 
 /// What a definition reaching a read takes its value from.
@@ -2292,6 +2295,24 @@ impl<'db> InferenceContext<'db> {
         )
     }
 
+    /// [`Self::executable_reaching_defs`] told about the writes it cannot read - a call that may
+    /// write the local it is given, `Выполнить`. Solved here and not read from the cached query:
+    /// the collector needs the passing directions this very inference is resolving.
+    fn foreign_defs(
+        &self,
+        walk: &mut PathWalk,
+    ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>> {
+        walk.foreign_defs
+            .get_or_insert_with(|| {
+                crate::foreign_writes::solve_locally(
+                    &self.body,
+                    matches!(self.owner, DefWithBodyId::Method(_)),
+                    &|arg| self.argument_passing(arg),
+                )
+            })
+            .clone()
+    }
+
     /// The operation a call proves to execute. Reaching definitions are solved on the first call
     /// that names one, as most bodies have none.
     fn query_execution_kind(
@@ -3080,22 +3101,20 @@ impl<'db> InferenceContext<'db> {
                     }),
                     None => self.reaching_assignment_types_at(self.read_point(use_stmt)?, &key)?,
                 };
-                let use_stmt = use_stmt.to_idx();
-                // The bindings fill in as statements are inferred, so a call not reached yet has
-                // none and reads as "not proven by value", which keeps it a possible rewrite.
-                let passed_by_value =
-                    |arg| self.argument_passing(arg) == definite_init::ArgPassing::ByVal;
+                // A write the analysis cannot read leaves a value no definition accounts for.
+                // Reaching definitions answer it: the write generates a definition of its own at
+                // the place that may perform it, so it reaches a read ordered after it and no
+                // other - which the body-wide scan this replaced could not tell apart.
                 if !walk.inferred_leaves
-                    && crate::narrow::local_may_be_rewritten(
-                        &self.body,
-                        &key,
-                        use_stmt,
-                        None,
-                        &passed_by_value,
-                    )
+                    && self.foreign_defs(walk).is_none_or(|defs| {
+                        crate::foreign_writes::foreign_write_reaches(
+                            &defs, &self.body, &key, use_stmt,
+                        )
+                    })
                 {
                     return None;
                 }
+                let use_stmt = use_stmt.to_idx();
                 let sources = self.loop_aware_definitions(&key, use_stmt, reaching)?;
                 walk.active.push(expr);
                 let types = self.types_of_definitions(&sources, walk);
@@ -3295,7 +3314,10 @@ impl<'db> InferenceContext<'db> {
                 | dataflow::reaching_defs::DefSite::ForEachLoop(binding) => {
                     ReachingDef { stmt: None, ty: self.binding_types.get(&binding).copied() }
                 }
-                dataflow::reaching_defs::DefSite::Unknown => ReachingDef { stmt: None, ty: None },
+                // A value no statement of this body holds: there is nothing to take a type
+                // from, and the walk that reads these has already refused such a read.
+                dataflow::reaching_defs::DefSite::ForeignWrite { .. }
+                | dataflow::reaching_defs::DefSite::Unknown => ReachingDef { stmt: None, ty: None },
             })
             .collect()
     }
