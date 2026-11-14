@@ -30,7 +30,7 @@ use bsl_types::kind::{TypeId, TypeKind};
 use crate::call_resolution::CallSelection;
 use crate::db::HirDatabase;
 use crate::definite_init::ArgPassing;
-use crate::infer::{argument_passing_of, CallArgBinding};
+use crate::infer::{argument_passing_of, CallArgBinding, ImplicitLocalInfo};
 use crate::narrow::local_may_be_rewritten;
 
 /// What the walk proved about the values of an expression.
@@ -102,11 +102,16 @@ pub struct ValueOriginWalk<'a> {
     // assigned value to follow, so the walk reads no binding type.
     #[allow(dead_code)]
     binding_types: &'a FxHashMap<BindingId, TypeId>,
+    implicit_locals: &'a FxHashMap<String, ImplicitLocalInfo>,
     reaching: Option<Option<Arc<ReachingDefsResult>>>,
     memo: FxHashMap<ExprId, ValueOrigin>,
 }
 
 impl<'a> ValueOriginWalk<'a> {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the fields of one inference result, passed as they are held"
+    )]
     pub fn new(
         db: &'a dyn HirDatabase,
         file_id: FileId,
@@ -115,6 +120,7 @@ impl<'a> ValueOriginWalk<'a> {
         bindings: &'a [CallArgBinding],
         expr_types: &'a FxHashMap<ExprId, TypeId>,
         binding_types: &'a FxHashMap<BindingId, TypeId>,
+        implicit_locals: &'a FxHashMap<String, ImplicitLocalInfo>,
     ) -> Self {
         Self {
             db,
@@ -124,6 +130,7 @@ impl<'a> ValueOriginWalk<'a> {
             bindings,
             expr_types,
             binding_types,
+            implicit_locals,
             reaching: None,
             memo: FxHashMap::default(),
         }
@@ -208,13 +215,15 @@ impl<'a> ValueOriginWalk<'a> {
             .is_some_and(|ty| matches!(self.db.lookup_type(*ty), TypeKind::TypeDescriptor))
     }
 
+    /// Whether the name is a local of this body, as type inference decides it: a binding
+    /// this body declares, or an implicit local inference admitted. "There is an assignment
+    /// to this name somewhere in the body" is a different question with a different answer:
+    /// a module variable assigned in one branch has such an assignment and is still not a
+    /// local, and a read on a path that does not pass that assignment is not a value this
+    /// body wrote.
     fn is_local(&self, key: &str) -> bool {
-        let names_key = |expr: &hir_def::hir::ExprIdx| matches!(self.body.expr_idx(*expr), Expr::Path(name) if name.as_str().fold_lower() == key);
         self.body.bindings_iter().any(|(_, binding)| binding.name.as_str().fold_lower() == key)
-            || self.body.stmts_iter().any(|(_, stmt)| match stmt {
-                Stmt::Assign { target, .. } => names_key(target),
-                _ => false,
-            })
+            || self.implicit_locals.contains_key(key)
     }
 
     fn walk_name(&mut self, expr: ExprId, name: &str, depth: u32) -> ValueOrigin {
@@ -331,6 +340,7 @@ pub fn value_origin_of(
                 &infer.call_arg_bindings,
                 &infer.expr_types,
                 &infer.binding_types,
+                &infer.implicit_locals,
             )
             .value_origin_on_every_path(expr)
         }
@@ -348,6 +358,7 @@ pub fn value_origin_of(
                 &infer.call_arg_bindings,
                 &infer.expr_types,
                 &infer.binding_types,
+                &infer.implicit_locals,
             )
             .value_origin_on_every_path(expr)
         }

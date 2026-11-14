@@ -112,6 +112,23 @@ fn a_module_variable_compared_with_a_literal_is_not_flagged() {
 }
 
 #[test]
+fn a_module_variable_assigned_in_one_branch_is_not_flagged() {
+    let d = run_module(
+        "Перем Имя;\n\nПроцедура Проба(Объект, Условие)\n    Если Условие Тогда\n        Имя = Строка(ТипЗнч(Объект));\n    КонецЕсли;\n    Если Имя = \"Табличное поле\" Тогда\n    КонецЕсли;\nКонецПроцедуры\n",
+    );
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn a_local_assigned_the_type_name_in_every_branch_is_flagged() {
+    let d = run_module(
+        "Процедура Проба(Объект, Условие)\n    Если Условие Тогда\n        Имя = Строка(ТипЗнч(Объект));\n    Иначе\n        Имя = Строка(ТипЗнч(Объект));\n    КонецЕсли;\n    Если Имя = \"Табличное поле\" Тогда\n    КонецЕсли;\nКонецПроцедуры\n",
+    );
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert_eq!(d[0].message, MESSAGE);
+}
+
+#[test]
 fn a_plain_literal_compared_with_a_literal_is_not_flagged() {
     let d = run("    Если \"Табличное поле\" = \"Табличное поле\" Тогда\n    КонецЕсли;");
     assert!(d.is_empty(), "{d:?}");

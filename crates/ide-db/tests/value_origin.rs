@@ -68,6 +68,7 @@ fn origin(source: &str) -> ValueOrigin {
         &infer.call_arg_bindings,
         &infer.expr_types,
         &infer.binding_types,
+        &infer.implicit_locals,
     );
     walk.value_origin_on_every_path(value)
 }
@@ -98,6 +99,7 @@ fn origin_in_condition(source: &str) -> ValueOrigin {
         &infer.call_arg_bindings,
         &infer.expr_types,
         &infer.binding_types,
+        &infer.implicit_locals,
     );
     walk.value_origin_on_every_path(read)
 }
