@@ -258,66 +258,6 @@ impl DefinitionIndex {
             definitions.push(def);
         };
 
-        fn collect_stmt_defs<F: FnMut(Definition)>(
-            stmts: &[hir_def::hir::StmtIdx],
-            body: &Body,
-            add_def: &mut F,
-        ) {
-            for &stmt_id in stmts {
-                let opaque_id = hir_def::StmtId::from_idx(stmt_id);
-                match body.stmt(opaque_id) {
-                    Stmt::Assign { target, .. } => {
-                        if let Some(var_name) =
-                            extract_var_name_from_expr(hir_def::ExprId::from_idx(*target), body)
-                        {
-                            let def = Definition::assignment(var_name, stmt_id.into_raw());
-                            add_def(def);
-                        }
-                    }
-                    Stmt::VarDecl { bindings } => {
-                        for &binding_id in bindings.iter() {
-                            let binding = body.binding_idx(binding_id);
-                            let def = Definition::var_decl(
-                                &binding.name,
-                                BindingId::from_idx(binding_id),
-                            );
-                            add_def(def);
-                        }
-                    }
-                    Stmt::For { var, body: loop_body, .. } => {
-                        let binding = body.binding_idx(*var);
-                        let def = Definition::for_loop(&binding.name, BindingId::from_idx(*var));
-                        add_def(def);
-                        collect_stmt_defs(loop_body, body, add_def);
-                    }
-                    Stmt::ForEach { var, body: loop_body, .. } => {
-                        let binding = body.binding_idx(*var);
-                        let def =
-                            Definition::for_each_loop(&binding.name, BindingId::from_idx(*var));
-                        add_def(def);
-                        collect_stmt_defs(loop_body, body, add_def);
-                    }
-                    Stmt::If(if_stmt) => {
-                        collect_stmt_defs(&if_stmt.then_branch, body, add_def);
-                        for (_cond, stmts) in if_stmt.elsif_branches.iter() {
-                            collect_stmt_defs(stmts, body, add_def);
-                        }
-                        if let Some(ref else_stmts) = if_stmt.else_branch {
-                            collect_stmt_defs(else_stmts, body, add_def);
-                        }
-                    }
-                    Stmt::While { body: loop_body, .. } => {
-                        collect_stmt_defs(loop_body, body, add_def);
-                    }
-                    Stmt::Try { body: try_body, except, .. } => {
-                        collect_stmt_defs(try_body, body, add_def);
-                        collect_stmt_defs(except, body, add_def);
-                    }
-                    _ => {}
-                }
-            }
-        }
-
         collect_stmt_defs(body.body_stmts_typed(), body, &mut add_def);
 
         Arc::new(Self { definitions, var_to_defs, def_to_idx })
@@ -344,66 +284,6 @@ impl DefinitionIndex {
         for (name, binding_id) in params {
             let def = Definition::parameter(&name, binding_id);
             add_def(def);
-        }
-
-        fn collect_stmt_defs<F: FnMut(Definition)>(
-            stmts: &[hir_def::hir::StmtIdx],
-            body: &Body,
-            add_def: &mut F,
-        ) {
-            for &stmt_id in stmts {
-                let opaque_id = hir_def::StmtId::from_idx(stmt_id);
-                match body.stmt(opaque_id) {
-                    Stmt::Assign { target, .. } => {
-                        if let Some(var_name) =
-                            extract_var_name_from_expr(hir_def::ExprId::from_idx(*target), body)
-                        {
-                            let def = Definition::assignment(var_name, stmt_id.into_raw());
-                            add_def(def);
-                        }
-                    }
-                    Stmt::VarDecl { bindings } => {
-                        for &binding_id in bindings.iter() {
-                            let binding = body.binding_idx(binding_id);
-                            let def = Definition::var_decl(
-                                &binding.name,
-                                BindingId::from_idx(binding_id),
-                            );
-                            add_def(def);
-                        }
-                    }
-                    Stmt::For { var, body: loop_body, .. } => {
-                        let binding = body.binding_idx(*var);
-                        let def = Definition::for_loop(&binding.name, BindingId::from_idx(*var));
-                        add_def(def);
-                        collect_stmt_defs(loop_body, body, add_def);
-                    }
-                    Stmt::ForEach { var, body: loop_body, .. } => {
-                        let binding = body.binding_idx(*var);
-                        let def =
-                            Definition::for_each_loop(&binding.name, BindingId::from_idx(*var));
-                        add_def(def);
-                        collect_stmt_defs(loop_body, body, add_def);
-                    }
-                    Stmt::If(if_stmt) => {
-                        collect_stmt_defs(&if_stmt.then_branch, body, add_def);
-                        for (_cond, stmts) in if_stmt.elsif_branches.iter() {
-                            collect_stmt_defs(stmts, body, add_def);
-                        }
-                        if let Some(ref else_stmts) = if_stmt.else_branch {
-                            collect_stmt_defs(else_stmts, body, add_def);
-                        }
-                    }
-                    Stmt::While { body: loop_body, .. } => {
-                        collect_stmt_defs(loop_body, body, add_def);
-                    }
-                    Stmt::Try { body: try_body, except, .. } => {
-                        collect_stmt_defs(try_body, body, add_def);
-                        collect_stmt_defs(except, body, add_def);
-                    }
-                    _ => {}
-                }
-            }
         }
 
         collect_stmt_defs(body.body_stmts_typed(), body, &mut add_def);
@@ -459,6 +339,65 @@ impl DefinitionIndex {
             definitions.push(def);
         }
         Arc::new(Self { definitions, var_to_defs, def_to_idx })
+    }
+}
+
+/// Every definition the statements of one region generate, nested statements included: the
+/// gen set of a whole subtree of the body, which both the definition index and the
+/// `Exception` edge of a `Попытка` need.
+fn collect_stmt_defs<F: FnMut(Definition)>(
+    stmts: &[hir_def::hir::StmtIdx],
+    body: &Body,
+    add_def: &mut F,
+) {
+    for &stmt_id in stmts {
+        let opaque_id = hir_def::StmtId::from_idx(stmt_id);
+        match body.stmt(opaque_id) {
+            Stmt::Assign { target, .. } => {
+                if let Some(var_name) =
+                    extract_var_name_from_expr(hir_def::ExprId::from_idx(*target), body)
+                {
+                    let def = Definition::assignment(var_name, stmt_id.into_raw());
+                    add_def(def);
+                }
+            }
+            Stmt::VarDecl { bindings } => {
+                for &binding_id in bindings.iter() {
+                    let binding = body.binding_idx(binding_id);
+                    let def = Definition::var_decl(&binding.name, BindingId::from_idx(binding_id));
+                    add_def(def);
+                }
+            }
+            Stmt::For { var, body: loop_body, .. } => {
+                let binding = body.binding_idx(*var);
+                let def = Definition::for_loop(&binding.name, BindingId::from_idx(*var));
+                add_def(def);
+                collect_stmt_defs(loop_body, body, add_def);
+            }
+            Stmt::ForEach { var, body: loop_body, .. } => {
+                let binding = body.binding_idx(*var);
+                let def = Definition::for_each_loop(&binding.name, BindingId::from_idx(*var));
+                add_def(def);
+                collect_stmt_defs(loop_body, body, add_def);
+            }
+            Stmt::If(if_stmt) => {
+                collect_stmt_defs(&if_stmt.then_branch, body, add_def);
+                for (_cond, stmts) in if_stmt.elsif_branches.iter() {
+                    collect_stmt_defs(stmts, body, add_def);
+                }
+                if let Some(ref else_stmts) = if_stmt.else_branch {
+                    collect_stmt_defs(else_stmts, body, add_def);
+                }
+            }
+            Stmt::While { body: loop_body, .. } => {
+                collect_stmt_defs(loop_body, body, add_def);
+            }
+            Stmt::Try { body: try_body, except, .. } => {
+                collect_stmt_defs(try_body, body, add_def);
+                collect_stmt_defs(except, body, add_def);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -953,6 +892,15 @@ impl Transfer<ReachingDefs> for WritesAwareTransfer {
     fn transfer_edge(&self, edge_kind: cfg::CfgEdgeType, state: &ReachingDefs) -> ReachingDefs {
         ExecutableReachingDefsTransfer.transfer_edge(edge_kind, state)
     }
+
+    fn transfer_exception_edge(
+        &self,
+        try_stmt: hir_def::StmtId,
+        state: &mut ReachingDefs,
+        body: &Body,
+    ) {
+        ExecutableReachingDefsTransfer.transfer_exception_edge(try_stmt, state, body);
+    }
 }
 
 struct ExecutableReachingDefsTransfer;
@@ -967,6 +915,15 @@ impl Transfer<ReachingDefs> for ExecutableReachingDefsTransfer {
             cfg::CfgEdgeType::Unexecutable => ReachingDefs::new(state.def_index.clone()),
             _ => state.clone(),
         }
+    }
+
+    fn transfer_exception_edge(
+        &self,
+        try_stmt: hir_def::StmtId,
+        state: &mut ReachingDefs,
+        body: &Body,
+    ) {
+        ReachingDefsTransfer.transfer_exception_edge(try_stmt, state, body);
     }
 }
 
@@ -1012,6 +969,22 @@ impl Transfer<ReachingDefs> for ReachingDefsTransfer {
         }
 
         new_state
+    }
+
+    /// Adds, without killing, every definition the protected statements generate. An exception
+    /// can interrupt them anywhere, so a write among them MAY have happened when the handler
+    /// starts - and may equally not have happened, which is why what reached the `Попытка`
+    /// still reaches the handler beside it. A nested `Попытка` counts: its statements are
+    /// protected by this handler too.
+    fn transfer_exception_edge(
+        &self,
+        try_stmt: hir_def::StmtId,
+        state: &mut ReachingDefs,
+        body: &Body,
+    ) {
+        if let Stmt::Try { body: protected, .. } = body.stmt(try_stmt) {
+            collect_stmt_defs(protected, body, &mut |def: Definition| state.insert(&def));
+        }
     }
 }
 
@@ -1516,5 +1489,122 @@ mod tests {
         .expect("the solve converges");
 
         assert_eq!(plain, with_none);
+    }
+
+    fn solve_executable(body: &Arc<Body>) -> Arc<ReachingDefsResult> {
+        let cfg = cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body);
+        solve_executable_reaching_definitions(Arc::new(cfg), body, false)
+            .expect("the solve converges")
+    }
+
+    /// The handler is entered from the `Попытка` vertex, before any protected statement runs, so
+    /// the graph alone would say the handler sees only what reached the `Попытка`. An exception
+    /// can interrupt the protected statements anywhere, so a write among them may have happened
+    /// by then - and may equally not have happened, which is why BOTH definitions reach.
+    #[test]
+    fn a_write_among_protected_statements_reaches_the_handler_beside_the_earlier_definition() {
+        // х = Истина; Попытка х = Истина; г = Истина; Исключение у = Истина; КонецПопытки;
+        let mut fixture = Fixture::new();
+        let before_try = fixture.assign("х");
+        let inside_try = fixture.assign("х");
+        let after_write = fixture.assign("г");
+        let handler_read = fixture.assign("у");
+        let try_stmt = fixture.try_except(&[inside_try, after_write], &[handler_read]);
+        let body = fixture.finish(&[before_try, try_stmt]);
+
+        let result = solve_executable(&body);
+        let defs = result.defs_for_var_at_stmt("х", handler_read).expect("state in the handler");
+        let sites = assignment_sites(&defs);
+
+        assert_eq!(
+            sites.len(),
+            2,
+            "both the interrupted write and the earlier one reach: {sites:?}"
+        );
+        assert!(
+            sites.contains(&inside_try.into_raw()),
+            "the write among the protected statements may have happened"
+        );
+        assert!(
+            sites.contains(&before_try.into_raw()),
+            "the exception may have come before that write"
+        );
+    }
+
+    /// The code after `КонецПопытки` is fed by the end of the protected body and by the end of
+    /// the handler. A write the protected body OVERWRITES later leaves the first path, so it can
+    /// only arrive through the handler - which is the regression this carries: without the write
+    /// on the exception edge, a value written and overwritten inside a `Попытка` reaches nothing.
+    #[test]
+    fn a_write_overwritten_later_in_the_protected_body_reaches_the_code_after_it() {
+        // х = Истина; Попытка х = Истина; х = Истина; Исключение г = Истина; КонецПопытки;
+        // у = Истина;
+        let mut fixture = Fixture::new();
+        let before_try = fixture.assign("х");
+        let interrupted = fixture.assign("х");
+        let overwrite = fixture.assign("х");
+        let handler_stmt = fixture.assign("г");
+        let try_stmt = fixture.try_except(&[interrupted, overwrite], &[handler_stmt]);
+        let read_after = fixture.assign("у");
+        let body = fixture.finish(&[before_try, try_stmt, read_after]);
+
+        let result = solve_executable(&body);
+        let defs = result.defs_for_var_at_stmt("х", read_after).expect("state after the Попытка");
+        let sites = assignment_sites(&defs);
+
+        assert!(
+            sites.contains(&interrupted.into_raw()),
+            "the overwritten write survives through the handler: {sites:?}"
+        );
+        assert!(sites.contains(&overwrite.into_raw()), "the uninterrupted path reaches too");
+    }
+
+    /// The control for the two above: the union is of the PROTECTED statements, not of the body.
+    /// A write placed after `КонецПопытки` cannot have run when the handler starts.
+    #[test]
+    fn a_write_after_the_popytka_is_not_seen_inside_the_handler() {
+        // Попытка г = Истина; Исключение у = Истина; КонецПопытки; х = Истина;
+        let mut fixture = Fixture::new();
+        let inside_try = fixture.assign("г");
+        let handler_read = fixture.assign("у");
+        let try_stmt = fixture.try_except(&[inside_try], &[handler_read]);
+        let after_try = fixture.assign("х");
+        let body = fixture.finish(&[try_stmt, after_try]);
+
+        let result = solve_executable(&body);
+        let defs = result.defs_for_var_at_stmt("х", handler_read).expect("state in the handler");
+
+        assert_eq!(
+            assignment_sites(&defs),
+            Vec::new(),
+            "the handler runs before the text that follows the Попытка"
+        );
+    }
+
+    /// The statements of a nested `Попытка` are protected by the outer handler as well: an
+    /// exception raised there and not caught inside propagates outwards.
+    #[test]
+    fn a_write_in_an_inner_protected_body_reaches_the_outer_handler() {
+        // х = Истина; Попытка Попытка х = Истина; Исключение г = Истина; КонецПопытки;
+        // Исключение у = Истина; КонецПопытки;
+        let mut fixture = Fixture::new();
+        let before_try = fixture.assign("х");
+        let inner_write = fixture.assign("х");
+        let inner_handler = fixture.assign("г");
+        let inner_try = fixture.try_except(&[inner_write], &[inner_handler]);
+        let outer_handler_read = fixture.assign("у");
+        let outer_try = fixture.try_except(&[inner_try], &[outer_handler_read]);
+        let body = fixture.finish(&[before_try, outer_try]);
+
+        let result = solve_executable(&body);
+        let defs =
+            result.defs_for_var_at_stmt("х", outer_handler_read).expect("state in the handler");
+        let sites = assignment_sites(&defs);
+
+        assert!(
+            sites.contains(&inner_write.into_raw()),
+            "the inner write may have happened before the outer handler: {sites:?}"
+        );
+        assert!(sites.contains(&before_try.into_raw()), "the earlier definition is not lost");
     }
 }

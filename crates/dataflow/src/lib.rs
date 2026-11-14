@@ -78,6 +78,19 @@ pub trait Transfer<L: Lattice> {
     /// exception edge into the handler; a backward analysis receives the join
     /// of both successors instead and flows the result to the predecessor.
     fn transfer_try_entry(&self, _try_stmt: hir_def::StmtId, _state: &mut L, _body: &Body) {}
+
+    /// Transfer along the `Exception` edge that leaves the `Попытка` vertex of `try_stmt`,
+    /// applied after [`Transfer::transfer_edge`]. The vertex itself precedes every protected
+    /// statement, so its out-state knows nothing of what they do; an exception, however, can
+    /// interrupt the protected statements anywhere, so what any of them MAY have done by then
+    /// belongs on this edge. The hook exists apart from `transfer_edge` because the `Попытка`
+    /// vertex has ONE out-state shared by both its successors: what is added here must reach
+    /// the handler without reaching the protected body.
+    ///
+    /// Only the edge leaving a `CfgVertex::Try` is offered - not the `Exception` edge of a
+    /// `ВызватьИсключение`, which leaves a basic block. A backward analysis receives the hook
+    /// on the same edge, as it receives `transfer_edge` there.
+    fn transfer_exception_edge(&self, _try_stmt: hir_def::StmtId, _state: &mut L, _body: &Body) {}
 }
 
 pub struct DataflowSolver<L: Lattice, T: Transfer<L>> {
@@ -196,7 +209,7 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
                 let mut state: Option<L> = None;
                 for (pred_idx, edge_kind) in self.cfg.incoming_edges(block_idx) {
                     if let Some(pred_out) = self.block_out.get(&pred_idx) {
-                        let edge_state = self.transfer.transfer_edge(*edge_kind, pred_out);
+                        let edge_state = self.transfer_edge_state(pred_idx, *edge_kind, pred_out);
                         match &mut state {
                             None => {
                                 state = Some(edge_state);
@@ -307,7 +320,7 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
                 let mut state: Option<L> = None;
                 for (succ_idx, edge_kind) in self.cfg.outgoing_edges(block_idx) {
                     if let Some(succ_in) = self.block_in.get(&succ_idx) {
-                        let edge_state = self.transfer.transfer_edge(*edge_kind, succ_in);
+                        let edge_state = self.transfer_edge_state(block_idx, *edge_kind, succ_in);
                         match &mut state {
                             None => {
                                 state = Some(edge_state);
@@ -372,6 +385,20 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
             cfg: self.cfg,
             converged,
         })
+    }
+
+    /// The state that crosses one edge of the graph: [`Transfer::transfer_edge`], plus
+    /// [`Transfer::transfer_exception_edge`] on the `Exception` edge of a `Попытка`.
+    fn transfer_edge_state(&self, source: NodeIndex, edge_kind: CfgEdgeType, state: &L) -> L {
+        let mut edge_state = self.transfer.transfer_edge(edge_kind, state);
+        if matches!(edge_kind, CfgEdgeType::Exception)
+            && matches!(self.cfg.vertex(source), Some(cfg::CfgVertex::Try))
+        {
+            if let Some(try_stmt) = self.cfg.source_stmt_id(source) {
+                self.transfer.transfer_exception_edge(try_stmt, &mut edge_state, &self.body);
+            }
+        }
+        edge_state
     }
 
     fn transfer_block(&self, block_idx: NodeIndex, in_state: &L) -> L {
