@@ -425,7 +425,7 @@ fn dfs_check_paths(
         let edges: Vec<_> = ctx
             .cfg
             .outgoing_edges(node)
-            .filter(|(_, edge_type)| !matches!(edge_type, CfgEdgeType::Unexecutable))
+            .filter(|(_, edge_type)| edge_type.is_executable())
             .collect();
 
         for (succ, edge_type) in edges {
@@ -456,7 +456,7 @@ fn dfs_check_paths(
         let successors: Vec<_> = ctx
             .cfg
             .outgoing_edges(node)
-            .filter(|(_, edge_type)| !matches!(edge_type, CfgEdgeType::Unexecutable))
+            .filter(|(_, edge_type)| edge_type.is_executable())
             .map(|(idx, _)| idx)
             .collect();
         for succ in successors {

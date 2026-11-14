@@ -54,21 +54,15 @@ impl LiveStatements {
     pub fn of_graph(cfg: &ControlFlowGraph) -> Self {
         use cfg::CfgVertex;
 
+        let Some(start) = cfg.start() else {
+            return Self::none();
+        };
         let mut stmts = FxHashSet::default();
-        let mut seen: FxHashSet<NodeIndex> = FxHashSet::default();
-        let mut stack: Vec<NodeIndex> = cfg.start().into_iter().collect();
-        while let Some(node) = stack.pop() {
-            if !seen.insert(node) {
-                continue;
-            }
+        for node in cfg.reachable_vertices(start, |kind| kind.is_executable()) {
             match cfg.vertex(node) {
                 Some(CfgVertex::BasicBlock(block)) => stmts.extend(block.statements().iter()),
                 _ => stmts.extend(cfg.source_stmt_id(node)),
             }
-            stack.extend(
-                cfg.outgoing_edges(node)
-                    .filter_map(|(target, kind)| kind.is_executable().then_some(target)),
-            );
         }
         Self { stmts }
     }
