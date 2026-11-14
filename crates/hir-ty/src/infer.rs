@@ -6403,7 +6403,7 @@ pub(crate) fn argument_passing_of(
     bindings: &[CallArgBinding],
     arg: ExprId,
 ) -> definite_init::ArgPassing {
-    use crate::call_resolution::{BuiltinCallableId, CallSelection, CandidateId};
+    use crate::call_resolution::{BuiltinCallableId, CandidateId};
     use bsl_platform::ParamPassing;
     use definite_init::ArgPassing;
 
@@ -6412,10 +6412,8 @@ pub(crate) fn argument_passing_of(
     }) else {
         return ArgPassing::Unknown;
     };
-    let candidate = match &binding.candidate.resolution.selection {
-        CallSelection::Unique { candidate } => *candidate,
-        CallSelection::Ambiguous { candidates } if candidates.len() == 1 => candidates[0],
-        _ => return ArgPassing::Unknown,
+    let Some(candidate) = binding.candidate.resolution.selection.sole_candidate() else {
+        return ArgPassing::Unknown;
     };
     let method = match candidate {
         CandidateId::User { method, .. } => method,

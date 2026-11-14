@@ -27,7 +27,6 @@ use vfs::FileId;
 
 use bsl_types::kind::{TypeId, TypeKind};
 
-use crate::call_resolution::CallSelection;
 use crate::db::HirDatabase;
 use crate::infer::{CallArgBinding, ImplicitLocalInfo};
 
@@ -162,11 +161,9 @@ impl<'a> ValueOriginWalk<'a> {
         let Some(binding) = self.bindings.iter().find(|binding| binding.call_expr == callee) else {
             return opaque;
         };
-        // The same test `argument_passing_of` applies: one candidate, or the call proves nothing.
-        let candidate = match &binding.candidate.resolution.selection {
-            CallSelection::Unique { candidate } => *candidate,
-            CallSelection::Ambiguous { candidates } if candidates.len() == 1 => candidates[0],
-            _ => return opaque,
+        // One candidate, or the call proves nothing - the test `argument_passing_of` applies too.
+        let Some(candidate) = binding.candidate.resolution.selection.sole_candidate() else {
+            return opaque;
         };
         let Some(signature) = binding
             .candidate
