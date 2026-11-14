@@ -34,6 +34,50 @@ pub(crate) fn map_table_bytes<K, V>(len: usize) -> usize {
     cap.saturating_mul(std::mem::size_of::<K>() + std::mem::size_of::<V>() + 1)
 }
 
+/// The statements the graph can execute: those of a vertex the start reaches over executable
+/// edges ([`CfgEdgeType::is_executable`]). Liveness is the GRAPH's knowledge - a [`Body`]
+/// statement carries no notion of it - so the solver computes this and hands it to
+/// [`Transfer::transfer_exception_edge`], whose addition must never carry a write that no
+/// execution performs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LiveStatements {
+    stmts: FxHashSet<hir_def::StmtId>,
+}
+
+impl LiveStatements {
+    /// Nothing executes. The solver's value for a graph without a `Попытка`, where
+    /// [`Transfer::transfer_exception_edge`] is never called.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    pub fn of_graph(cfg: &ControlFlowGraph) -> Self {
+        use cfg::CfgVertex;
+
+        let mut stmts = FxHashSet::default();
+        let mut seen: FxHashSet<NodeIndex> = FxHashSet::default();
+        let mut stack: Vec<NodeIndex> = cfg.start().into_iter().collect();
+        while let Some(node) = stack.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            match cfg.vertex(node) {
+                Some(CfgVertex::BasicBlock(block)) => stmts.extend(block.statements().iter()),
+                _ => stmts.extend(cfg.source_stmt_id(node)),
+            }
+            stack.extend(
+                cfg.outgoing_edges(node)
+                    .filter_map(|(target, kind)| kind.is_executable().then_some(target)),
+            );
+        }
+        Self { stmts }
+    }
+
+    pub fn contains(&self, stmt: hir_def::StmtId) -> bool {
+        self.stmts.contains(&stmt)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Forward,
@@ -90,7 +134,18 @@ pub trait Transfer<L: Lattice> {
     /// Only the edge leaving a `CfgVertex::Try` is offered - not the `Exception` edge of a
     /// `ВызватьИсключение`, which leaves a basic block. A backward analysis receives the hook
     /// on the same edge, as it receives `transfer_edge` there.
-    fn transfer_exception_edge(&self, _try_stmt: hir_def::StmtId, _state: &mut L, _body: &Body) {}
+    ///
+    /// `live` carries the statements the graph can execute. Raising an exception after a write
+    /// requires reaching that write, so a statement absent from `live` contributes nothing -
+    /// the implementor must honour this, since the `Body` it walks has no notion of dead code.
+    fn transfer_exception_edge(
+        &self,
+        _try_stmt: hir_def::StmtId,
+        _state: &mut L,
+        _body: &Body,
+        _live: &LiveStatements,
+    ) {
+    }
 }
 
 pub struct DataflowSolver<L: Lattice, T: Transfer<L>> {
@@ -107,6 +162,10 @@ pub struct DataflowSolver<L: Lattice, T: Transfer<L>> {
     max_iterations: usize,
 
     direction: Direction,
+
+    /// Built once per [`DataflowSolver::solve`], and only for a graph that has a `Попытка`:
+    /// nothing else consults it.
+    live_stmts: LiveStatements,
 }
 
 impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
@@ -119,6 +178,7 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
             block_out: FxHashMap::default(),
             max_iterations: DEFAULT_MAX_ITERATIONS,
             direction: Direction::Forward,
+            live_stmts: LiveStatements::none(),
         }
     }
 
@@ -160,7 +220,10 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
         }
     }
 
-    pub fn solve(self) -> Option<DataflowResult<L>> {
+    pub fn solve(mut self) -> Option<DataflowResult<L>> {
+        if self.cfg.vertices().any(|(_, vertex)| matches!(vertex, cfg::CfgVertex::Try)) {
+            self.live_stmts = LiveStatements::of_graph(&self.cfg);
+        }
         match self.direction {
             Direction::Forward => self.solve_forward(),
             Direction::Backward => self.solve_backward(),
@@ -395,7 +458,12 @@ impl<L: Lattice, T: Transfer<L>> DataflowSolver<L, T> {
             && matches!(self.cfg.vertex(source), Some(cfg::CfgVertex::Try))
         {
             if let Some(try_stmt) = self.cfg.source_stmt_id(source) {
-                self.transfer.transfer_exception_edge(try_stmt, &mut edge_state, &self.body);
+                self.transfer.transfer_exception_edge(
+                    try_stmt,
+                    &mut edge_state,
+                    &self.body,
+                    &self.live_stmts,
+                );
             }
         }
         edge_state

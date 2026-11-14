@@ -401,6 +401,92 @@ fn collect_stmt_defs<F: FnMut(Definition)>(
     }
 }
 
+/// The definitions the protected statements of a `Попытка` may have produced when its handler
+/// starts: the union, over those statements, of what holds immediately BEFORE each of them.
+///
+/// The handler is entered only if something inside the region raised, so what it sees is the
+/// state at a point where an exception can STILL be raised. A statement therefore contributes
+/// its own definitions only when something that can raise runs after it while the region is
+/// still open; the region's TAIL contributes nothing, because once it completes the region ends
+/// normally and the handler is not entered at all.
+///
+/// `tail` says that the region ends, with nothing left that could raise, once `stmts` completes.
+/// It carries into the places where that remains true - a trailing `Если` branch, the body and
+/// the handler of a trailing nested `Попытка`, whose own handler ends the inner region and
+/// returns control to the outer one - and is dropped where it does not: after the last statement
+/// of a LOOP body the loop's own condition is evaluated, which can raise, and the loop may run
+/// again.
+///
+/// `live` drops a statement no execution reaches. The tail rule does not subsume it: a dead
+/// statement standing LAST in the protected body of a nested `Попытка` that is itself followed
+/// by more region statements is not in tail position, and only liveness keeps its write out of
+/// the outer handler.
+fn collect_interruptible_defs<F: FnMut(Definition)>(
+    stmts: &[hir_def::hir::StmtIdx],
+    body: &Body,
+    live: &crate::LiveStatements,
+    tail: bool,
+    add_def: &mut F,
+) {
+    for (position, &stmt_id) in stmts.iter().enumerate() {
+        let opaque_id = hir_def::StmtId::from_idx(stmt_id);
+        if !live.contains(opaque_id) {
+            continue;
+        }
+        let in_tail = tail && position + 1 == stmts.len();
+        match body.stmt(opaque_id) {
+            Stmt::Assign { target, .. } => {
+                if in_tail {
+                    continue;
+                }
+                if let Some(var_name) =
+                    extract_var_name_from_expr(hir_def::ExprId::from_idx(*target), body)
+                {
+                    add_def(Definition::assignment(var_name, stmt_id.into_raw()));
+                }
+            }
+            Stmt::VarDecl { bindings } => {
+                if in_tail {
+                    continue;
+                }
+                for &binding_id in bindings.iter() {
+                    let binding = body.binding_idx(binding_id);
+                    add_def(Definition::var_decl(&binding.name, BindingId::from_idx(binding_id)));
+                }
+            }
+            // The loop variable is written before the body and the next condition run, both of
+            // which can raise, so it contributes even in tail position.
+            Stmt::For { var, body: loop_body, .. } => {
+                let binding = body.binding_idx(*var);
+                add_def(Definition::for_loop(&binding.name, BindingId::from_idx(*var)));
+                collect_interruptible_defs(loop_body, body, live, false, add_def);
+            }
+            Stmt::ForEach { var, body: loop_body, .. } => {
+                let binding = body.binding_idx(*var);
+                add_def(Definition::for_each_loop(&binding.name, BindingId::from_idx(*var)));
+                collect_interruptible_defs(loop_body, body, live, false, add_def);
+            }
+            Stmt::While { body: loop_body, .. } => {
+                collect_interruptible_defs(loop_body, body, live, false, add_def);
+            }
+            Stmt::If(if_stmt) => {
+                collect_interruptible_defs(&if_stmt.then_branch, body, live, in_tail, add_def);
+                for (_cond, branch) in if_stmt.elsif_branches.iter() {
+                    collect_interruptible_defs(branch, body, live, in_tail, add_def);
+                }
+                if let Some(ref else_stmts) = if_stmt.else_branch {
+                    collect_interruptible_defs(else_stmts, body, live, in_tail, add_def);
+                }
+            }
+            Stmt::Try { body: try_body, except, .. } => {
+                collect_interruptible_defs(try_body, body, live, in_tail, add_def);
+                collect_interruptible_defs(except, body, live, in_tail, add_def);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn extract_var_name_from_expr(expr_id: hir_def::ExprId, body: &Body) -> Option<SmolStr> {
     match body.expr(expr_id) {
         Expr::Path(name) => Some(SmolStr::new(name.as_str().fold_lower())),
@@ -898,8 +984,9 @@ impl Transfer<ReachingDefs> for WritesAwareTransfer {
         try_stmt: hir_def::StmtId,
         state: &mut ReachingDefs,
         body: &Body,
+        live: &crate::LiveStatements,
     ) {
-        ExecutableReachingDefsTransfer.transfer_exception_edge(try_stmt, state, body);
+        ExecutableReachingDefsTransfer.transfer_exception_edge(try_stmt, state, body, live);
     }
 }
 
@@ -922,8 +1009,9 @@ impl Transfer<ReachingDefs> for ExecutableReachingDefsTransfer {
         try_stmt: hir_def::StmtId,
         state: &mut ReachingDefs,
         body: &Body,
+        live: &crate::LiveStatements,
     ) {
-        ReachingDefsTransfer.transfer_exception_edge(try_stmt, state, body);
+        ReachingDefsTransfer.transfer_exception_edge(try_stmt, state, body, live);
     }
 }
 
@@ -971,19 +1059,25 @@ impl Transfer<ReachingDefs> for ReachingDefsTransfer {
         new_state
     }
 
-    /// Adds, without killing, every definition the protected statements generate. An exception
-    /// can interrupt them anywhere, so a write among them MAY have happened when the handler
-    /// starts - and may equally not have happened, which is why what reached the `Попытка`
-    /// still reaches the handler beside it. A nested `Попытка` counts: its statements are
-    /// protected by this handler too.
+    /// Adds, without killing, the definitions the protected statements may have produced when
+    /// the handler starts - [`collect_interruptible_defs`] decides which. Nothing is killed
+    /// because the exception may equally have come BEFORE such a write, so what reached the
+    /// `Попытка` still reaches the handler beside it.
+    ///
+    /// Both restrictions the collector applies are facts about the edge, not policies this
+    /// transfer is free to relax: propagating state ACROSS an unexecutable edge is what the
+    /// plain transfer does, inventing a write that no execution performs, or one after which
+    /// the region can no longer raise, is not. So they hold here as well as in
+    /// [`ExecutableReachingDefsTransfer`].
     fn transfer_exception_edge(
         &self,
         try_stmt: hir_def::StmtId,
         state: &mut ReachingDefs,
         body: &Body,
+        live: &crate::LiveStatements,
     ) {
         if let Stmt::Try { body: protected, .. } = body.stmt(try_stmt) {
-            collect_stmt_defs(protected, body, &mut |def: Definition| state.insert(&def));
+            collect_interruptible_defs(protected, body, live, true, &mut |def| state.insert(&def));
         }
     }
 }
@@ -1491,6 +1585,136 @@ mod tests {
         assert_eq!(plain, with_none);
     }
 
+    /// The case the liveness filter still catches once the tail rule is in place: a dead write
+    /// standing LAST in the protected body of a nested `Попытка` that is itself followed by more
+    /// region statements. It is not in tail position of the outer region - the statement after
+    /// `КонецПопытки` can raise - so only liveness keeps it out of the outer handler. The live
+    /// write of the same inner body does reach it.
+    #[test]
+    fn a_dead_write_last_in_an_inner_protected_body_does_not_reach_the_outer_handler() {
+        // Попытка Попытка х = Истина; Возврат; д = Истина; Исключение г = Истина; КонецПопытки;
+        // е = Истина; Исключение у = Истина; КонецПопытки;
+        let mut fixture = Fixture::new();
+        let live_write = fixture.assign("х");
+        let ret = fixture.ret();
+        let dead_write = fixture.assign("д");
+        let inner_handler = fixture.assign("г");
+        let inner_try = fixture.try_except(&[live_write, ret, dead_write], &[inner_handler]);
+        let after_inner = fixture.assign("е");
+        let outer_handler_read = fixture.assign("у");
+        let outer_try = fixture.try_except(&[inner_try, after_inner], &[outer_handler_read]);
+        let body = fixture.finish(&[outer_try]);
+
+        let result = solve_plain(&body);
+
+        let live = result
+            .defs_for_var_at_stmt("х", outer_handler_read)
+            .expect("state in the outer handler");
+        assert_eq!(
+            assignment_sites(&live),
+            vec![live_write.into_raw()],
+            "the live write of the inner body may have happened before the outer handler"
+        );
+
+        let dead = result
+            .defs_for_var_at_stmt("д", outer_handler_read)
+            .expect("state in the outer handler");
+        assert_eq!(
+            assignment_sites(&dead),
+            Vec::new(),
+            "nothing executes a write after Возврат, whatever its position in the region"
+        );
+    }
+
+    /// The handler is entered only when the region raised, so a write after which the region
+    /// can no longer raise is not on any path into it: once the LAST protected statement
+    /// completes, the region ends normally and the handler is skipped. The write before it is
+    /// on such a path, because the tail statement itself can raise.
+    #[test]
+    fn a_write_in_tail_position_does_not_reach_the_handler_but_one_before_it_does() {
+        // Попытка х = Истина; г = Истина; Исключение у = Истина; КонецПопытки;
+        let mut fixture = Fixture::new();
+        let before_tail = fixture.assign("х");
+        let tail_write = fixture.assign("г");
+        let handler_read = fixture.assign("у");
+        let try_stmt = fixture.try_except(&[before_tail, tail_write], &[handler_read]);
+        let body = fixture.finish(&[try_stmt]);
+
+        let result = solve_plain(&body);
+
+        let before = result.defs_for_var_at_stmt("х", handler_read).expect("state in the handler");
+        assert_eq!(
+            assignment_sites(&before),
+            vec![before_tail.into_raw()],
+            "the tail statement can raise, so the write before it may have happened"
+        );
+
+        let tail = result.defs_for_var_at_stmt("г", handler_read).expect("state in the handler");
+        assert_eq!(
+            assignment_sites(&tail),
+            Vec::new(),
+            "once the last protected statement completes, the region ends and the handler is              not entered"
+        );
+    }
+
+    /// A trailing LOOP is not a tail: after the last statement of its body the loop's own
+    /// condition is evaluated, which can raise, and the loop may run again.
+    #[test]
+    fn a_write_in_the_body_of_a_trailing_loop_reaches_the_handler() {
+        // Попытка Пока у Цикл х = Истина; КонецЦикла; Исключение з = Истина; КонецПопытки;
+        let mut fixture = Fixture::new();
+        let in_loop = fixture.assign("х");
+        let (loop_stmt, _) = fixture.while_loop("у", &[in_loop]);
+        let handler_read = fixture.assign("з");
+        let try_stmt = fixture.try_except(&[loop_stmt], &[handler_read]);
+        let body = fixture.finish(&[try_stmt]);
+
+        let result = solve_plain(&body);
+        let defs = result.defs_for_var_at_stmt("х", handler_read).expect("state in the handler");
+
+        assert_eq!(
+            assignment_sites(&defs),
+            vec![in_loop.into_raw()],
+            "the condition after the loop body can raise, so the write may have happened"
+        );
+    }
+
+    /// The PLAIN solve, which propagates state across an unexecutable edge instead of dropping
+    /// it: the strictest setting for the liveness filter of the `Exception` edge, since nothing
+    /// else here removes a dead statement's contribution.
+    fn solve_plain(body: &Arc<Body>) -> Arc<ReachingDefsResult> {
+        let cfg = cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body);
+        solve_reaching_definitions(Arc::new(cfg), body, false).expect("the solve converges")
+    }
+
+    /// Raising an exception after a write requires reaching that write. The live write of the
+    /// protected body is therefore on the handler's path and the write after `Возврат` is not,
+    /// though both stand in the same protected body and write the same local.
+    #[test]
+    fn a_dead_write_in_the_protected_body_does_not_reach_the_handler_but_a_live_one_does() {
+        // Попытка х = Истина; Возврат; х = Истина; Исключение у = Истина; КонецПопытки;
+        let mut fixture = Fixture::new();
+        let live_write = fixture.assign("х");
+        let ret = fixture.ret();
+        let dead_write = fixture.assign("х");
+        let handler_read = fixture.assign("у");
+        let try_stmt = fixture.try_except(&[live_write, ret, dead_write], &[handler_read]);
+        let body = fixture.finish(&[try_stmt]);
+
+        let result = solve_plain(&body);
+        let defs = result.defs_for_var_at_stmt("х", handler_read).expect("state in the handler");
+        let sites = assignment_sites(&defs);
+
+        assert!(
+            sites.contains(&live_write.into_raw()),
+            "an exception can interrupt the protected body after the live write: {sites:?}"
+        );
+        assert!(
+            !sites.contains(&dead_write.into_raw()),
+            "nothing executes the write after Возврат, so no handler can see it: {sites:?}"
+        );
+    }
+
     fn solve_executable(body: &Arc<Body>) -> Arc<ReachingDefsResult> {
         let cfg = cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body);
         solve_executable_reaching_definitions(Arc::new(cfg), body, false)
@@ -1582,18 +1806,23 @@ mod tests {
     }
 
     /// The statements of a nested `Попытка` are protected by the outer handler as well: an
-    /// exception raised there and not caught inside propagates outwards.
+    /// exception raised there and not caught inside propagates outwards. The inner write needs
+    /// something after it that can still raise - here the statement following the inner
+    /// `КонецПопытки` - or it would stand in tail position of the outer region and
+    /// contribute nothing, which is what the single-statement region of `security_balanced`
+    /// records.
     #[test]
     fn a_write_in_an_inner_protected_body_reaches_the_outer_handler() {
         // х = Истина; Попытка Попытка х = Истина; Исключение г = Истина; КонецПопытки;
-        // Исключение у = Истина; КонецПопытки;
+        // д = Истина; Исключение у = Истина; КонецПопытки;
         let mut fixture = Fixture::new();
         let before_try = fixture.assign("х");
         let inner_write = fixture.assign("х");
         let inner_handler = fixture.assign("г");
         let inner_try = fixture.try_except(&[inner_write], &[inner_handler]);
+        let after_inner = fixture.assign("д");
         let outer_handler_read = fixture.assign("у");
-        let outer_try = fixture.try_except(&[inner_try], &[outer_handler_read]);
+        let outer_try = fixture.try_except(&[inner_try, after_inner], &[outer_handler_read]);
         let body = fixture.finish(&[before_try, outer_try]);
 
         let result = solve_executable(&body);
