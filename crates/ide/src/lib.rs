@@ -461,6 +461,18 @@ impl Analysis {
         WarmCachesTask { db: self.db.clone(), file_ids: file_ids.to_vec() }
     }
 
+    /// Dependency discovery and cache warming as one job: the discovery query runs
+    /// wherever the warming runs, not on the caller's thread. `retain` drops the
+    /// dependencies the caller no longer wants warmed — an exclusion added since the id
+    /// was issued — and is handed the whole batch, because resolving one directory
+    /// serves every path under it.
+    pub fn warm_dependencies_task<F>(&self, file_id: FileId, retain: F) -> WarmDependenciesTask<F>
+    where
+        F: FnOnce(Vec<FileId>) -> Vec<FileId>,
+    {
+        WarmDependenciesTask { db: self.db.clone(), file_id, retain }
+    }
+
     pub fn highlight(&self, file_id: FileId) -> HighlightResult {
         syntax_highlighting::highlight(&self.db, file_id)
     }
@@ -530,6 +542,47 @@ impl WarmCachesTask {
         }
 
         self.file_ids.len()
+    }
+}
+
+/// What a [`WarmDependenciesTask`] did. Discovery is timed apart from warming because
+/// the point of the task is that the caller stops paying the discovery cost itself: a
+/// caller that cannot see where the time went cannot tell whether it moved.
+pub struct WarmedDependencies {
+    pub discover_ms: u64,
+    pub warmed: usize,
+}
+
+/// Discovery and warming of one file's dependencies, to run off the caller's thread.
+pub struct WarmDependenciesTask<F> {
+    db: RootDatabaseImpl,
+    file_id: FileId,
+    retain: F,
+}
+
+impl<F> WarmDependenciesTask<F>
+where
+    F: FnOnce(Vec<FileId>) -> Vec<FileId>,
+{
+    pub fn cancellation_token(&self) -> salsa::CancellationToken {
+        salsa::Database::cancellation_token(&self.db)
+    }
+
+    pub fn run(self) -> WarmedDependencies {
+        use hir::{DefDatabase, ModuleId};
+
+        let discover_start = std::time::Instant::now();
+        let discovered = self.db.file_dependencies(ModuleId::new(self.file_id));
+        let deps = (self.retain)(discovered.as_ref().clone());
+        let discover_ms = discover_start.elapsed().as_millis() as u64;
+
+        for file_id in &deps {
+            let module_id = ModuleId::new(*file_id);
+            let _ = self.db.symbol_tree(module_id);
+            let _ = self.db.module_bodies(module_id);
+        }
+
+        WarmedDependencies { discover_ms, warmed: deps.len() }
     }
 }
 
