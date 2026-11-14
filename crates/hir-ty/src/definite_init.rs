@@ -5,6 +5,7 @@
 //! The functions see only the body, its CFG and the analysis result; whatever
 //! needs the resolver arrives from `InferenceContext` as data or a closure.
 
+use bsl_platform::ParamPassing;
 use cfg_types::IdConversion;
 use dataflow::definite_init::{
     DefiniteInitResult, EnteringHeader, InitEvents, InitPoint, WitnessStep,
@@ -17,14 +18,6 @@ use stdx::case::CaseExt;
 
 use crate::infer::{assignment_target_base, UninitializedPath};
 use crate::narrow::{for_each_expr_child, for_each_stmt_expr_root, stmt_covers_stmt};
-
-/// How a call passes one argument, as far as the resolved callee proves it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ArgPassing {
-    ByVal,
-    ByRef,
-    Unknown,
-}
 
 /// The body may be missing statements or edges, so no path through it is proven.
 pub(crate) fn hir_suppressed(body: &Body) -> bool {
@@ -210,7 +203,7 @@ pub(crate) fn collect(
     body: &Body,
     tracked: &Tracked,
     local_reads: &FxHashSet<ExprId>,
-    passing: &impl Fn(ExprId) -> ArgPassing,
+    passing: &impl Fn(ExprId) -> Option<ParamPassing>,
 ) -> Collected {
     let mut events = InitEvents { width: tracked.width(), ..InitEvents::default() };
     let mut during: FxHashMap<InitPoint, FxHashSet<u32>> = FxHashMap::default();
@@ -236,7 +229,7 @@ pub(crate) fn collect(
                 let Some(bit) = tracked.name_bit(name) else { continue };
                 let expr = ExprId::from_idx(node);
                 let judged = if arguments.contains(&node) {
-                    if passing(expr) == ArgPassing::ByVal {
+                    if passing(expr) == Some(ParamPassing::ByVal) {
                         true
                     } else {
                         during.entry(point).or_default().insert(bit);

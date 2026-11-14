@@ -10,6 +10,7 @@
 //! inference as statements are inferred: a call not reached yet has none and reads as "not
 //! proven by value", which keeps it a possible writer.
 
+use bsl_platform::ParamPassing;
 use cfg_types::IdConversion;
 use dataflow::definite_init::InitPoint;
 use dataflow::reaching_defs::{ForeignWrite, ForeignWriteEvents};
@@ -18,7 +19,7 @@ use hir_def::hir::{Expr, Stmt};
 use hir_def::ExprId;
 use smol_str::SmolStr;
 
-use crate::definite_init::{call_shape, stmt_expr_roots, ArgPassing, CallShape};
+use crate::definite_init::{call_shape, stmt_expr_roots, CallShape};
 
 /// One pass over the body: every place that may write a local the body does not spell out.
 ///
@@ -27,7 +28,10 @@ use crate::definite_init::{call_shape, stmt_expr_roots, ArgPassing, CallShape};
 /// by value: an unresolved or unattested callee proves nothing, so it stays a writer. The two
 /// are told apart, because a reader may look past an unattested direction and not past a
 /// proven by-reference one.
-pub(crate) fn collect(body: &Body, passing: &impl Fn(ExprId) -> ArgPassing) -> ForeignWriteEvents {
+pub(crate) fn collect(
+    body: &Body,
+    passing: &impl Fn(ExprId) -> Option<ParamPassing>,
+) -> ForeignWriteEvents {
     let mut events = ForeignWriteEvents::default();
 
     for (stmt_id, stmt) in body.stmts_iter() {
@@ -43,9 +47,12 @@ pub(crate) fn collect(body: &Body, passing: &impl Fn(ExprId) -> ArgPassing) -> F
             for node in arguments {
                 let Expr::Path(name) = body.expr_idx(node) else { continue };
                 let kind = match passing(ExprId::from_idx(node)) {
-                    ArgPassing::ByVal => continue,
-                    ArgPassing::ByRef => ForeignWrite::ByRefArgument,
-                    ArgPassing::Unknown => ForeignWrite::UnattestedArgument,
+                    Some(ParamPassing::ByVal) => continue,
+                    Some(ParamPassing::ByRef) => ForeignWrite::ByRefArgument,
+                    // `ParamPassing` is non-exhaustive, and `None` means the corpus attests
+                    // nothing: a passing we cannot name is not proof of a copy, so the argument
+                    // stays a possible write - which is what `ArgPassing::Unknown` meant here.
+                    _ => ForeignWrite::UnattestedArgument,
                 };
                 written.push((SmolStr::new(name.as_str()), kind));
             }
@@ -89,7 +96,7 @@ pub fn solve_with_cfg(
 pub(crate) fn solve_locally(
     body: &std::sync::Arc<Body>,
     seed_params: bool,
-    passing: &impl Fn(ExprId) -> ArgPassing,
+    passing: &impl Fn(ExprId) -> Option<ParamPassing>,
 ) -> Option<std::sync::Arc<dataflow::reaching_defs::ReachingDefsResult>> {
     let cfg = cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body);
     let writes = collect(body, passing);

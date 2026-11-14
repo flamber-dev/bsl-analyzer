@@ -2514,7 +2514,7 @@ impl<'db> InferenceContext<'db> {
             || is_self_name(&name.as_str().fold_lower())
     }
 
-    fn argument_passing(&self, arg: ExprId) -> definite_init::ArgPassing {
+    fn argument_passing(&self, arg: ExprId) -> Option<bsl_platform::ParamPassing> {
         argument_passing_of(self.db, &self.call_arg_bindings, arg)
     }
 
@@ -6388,9 +6388,10 @@ impl<'db> InferenceContext<'db> {
     }
 }
 
-/// How the call holding `arg` passes it, known only when the call settles on one
-/// callee: the unique candidate, or the sole survivor whose argument types are
-/// undecided (an undocumented parameter leaves the selection `Ambiguous`).
+/// How the call holding `arg` passes it, as far as the resolved callee proves it; `None` is
+/// unknown. Known only when the call settles on one callee: the unique candidate, or the sole
+/// survivor whose argument types are undecided (an undocumented parameter leaves the selection
+/// `Ambiguous`).
 /// For a user method the answer is the `Знач` flag of the parameter at the
 /// argument's position. For a platform callable it is the curated corpus's fact,
 /// where silence means "by value" only inside a scope the corpus attests as
@@ -6402,24 +6403,20 @@ pub(crate) fn argument_passing_of(
     db: &dyn HirDatabase,
     bindings: &[CallArgBinding],
     arg: ExprId,
-) -> definite_init::ArgPassing {
+) -> Option<bsl_platform::ParamPassing> {
     use crate::call_resolution::{BuiltinCallableId, CandidateId};
     use bsl_platform::ParamPassing;
-    use definite_init::ArgPassing;
 
-    let Some((binding, position)) = bindings.iter().find_map(|binding| {
+    let (binding, position) = bindings.iter().find_map(|binding| {
         binding.args.iter().position(|a| *a == arg).map(|position| (binding, position))
-    }) else {
-        return ArgPassing::Unknown;
-    };
-    let Some(candidate) = binding.candidate.resolution.selection.sole_candidate() else {
-        return ArgPassing::Unknown;
-    };
+    })?;
+    let candidate = binding.candidate.resolution.selection.sole_candidate()?;
     let method = match candidate {
         CandidateId::User { method, .. } => method,
         CandidateId::Platform { .. }
         | CandidateId::Builtin { callable: BuiltinCallableId::PlatformGlobal(_), .. } => {
-            let passing = binding
+            // Forwarded as it is: every consumer reads a variant it cannot name like `None`.
+            return binding
                 .candidate
                 .candidates
                 .as_slice()
@@ -6427,23 +6424,17 @@ pub(crate) fn argument_passing_of(
                 .find(|signature| signature.id == candidate)
                 .and_then(|signature| signature.params.get(position))
                 .and_then(|param| param.passing);
-            return match passing {
-                Some(ParamPassing::ByVal) => ArgPassing::ByVal,
-                Some(ParamPassing::ByRef) => ArgPassing::ByRef,
-                // `ParamPassing` is non-exhaustive: a future variant is unknown to us.
-                Some(_) | None => ArgPassing::Unknown,
-            };
         }
-        _ => return ArgPassing::Unknown,
+        _ => return None,
     };
-    let Some(decl) = db.interface_method(hir_def::MethodId::from(method)) else {
-        return ArgPassing::Unknown;
-    };
-    match decl.params.get(position) {
-        Some(param) if param.is_val => ArgPassing::ByVal,
-        Some(_) => ArgPassing::ByRef,
-        None => ArgPassing::Unknown,
-    }
+    let decl = db.interface_method(hir_def::MethodId::from(method))?;
+    decl.params.get(position).map(|param| {
+        if param.is_val {
+            ParamPassing::ByVal
+        } else {
+            ParamPassing::ByRef
+        }
+    })
 }
 
 /// Whether help of the `served` release lists every type of the project's
