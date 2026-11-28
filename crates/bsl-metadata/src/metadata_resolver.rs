@@ -161,6 +161,18 @@ pub fn resolve_type_description<R: QueryMetadataResolver + ?Sized>(
                     values.push(AttributeType::Unknown);
                 }
             }
+            AttributeType::CharacteristicValue { ref name } => {
+                if resolver
+                    .resolve_metadata_object(MdoType::ChartOfCharacteristicTypes, name)
+                    .is_some()
+                {
+                    values.push(ty);
+                } else {
+                    failures
+                        .push((values.len(), TypeResolutionIssueKind::ReferencedTypeUnavailable));
+                    values.push(AttributeType::Unknown);
+                }
+            }
             AttributeType::InformationRegisterRecordManager { ref name } => {
                 if resolver.resolve_register(MdoType::InformationRegister, name).is_some() {
                     values.push(ty);
@@ -330,5 +342,26 @@ mod tests {
                 }]
             );
         }
+    }
+
+    #[test]
+    fn type_description_resolution_checks_characteristic_value_chart_availability() {
+        let mut cfg = Configuration::new("Test");
+        cfg.add_metadata_object(MetadataObject::new(MdoType::ChartOfCharacteristicTypes, "Виды"));
+
+        let present = AttributeType::CharacteristicValue { name: "Виды".into() };
+        assert_eq!(resolve_type_description(&present, &cfg, 64), (present, Vec::new()));
+
+        let missing = AttributeType::CharacteristicValue { name: "Отсутствует".into() };
+        assert_eq!(
+            resolve_type_description(&missing, &cfg, 64),
+            (
+                AttributeType::Unknown,
+                vec![TypeResolutionIssue {
+                    variant_index: 0,
+                    kind: TypeResolutionIssueKind::ReferencedTypeUnavailable,
+                }],
+            )
+        );
     }
 }
